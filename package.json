@@ -15,6 +15,7 @@
     "test": "npm run test:unit && npm run test:e2e",
     "test:unit": "npm run test --workspaces --if-present",
     "test:e2e": "npm exec --workspace @neocode/web playwright install chromium && npm run test:e2e -w @neocode/web",
+    "candidate:evidence": "bash scripts/candidate-evidence.sh",
     "check:git": "node scripts/check-git-state.mjs",
     "check": "npm run check:git && npm run check --workspaces --if-present",
     "build": "npm run build --workspaces --if-present"

@@ -15,9 +15,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # Candidate checks validate the complete PR range, never a shallow
-          # HEAD^ fallback that can omit earlier feature commits.
-          fetch-depth: 0
+          fetch-depth: 1
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Fetch true PR base history
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags --unshallow origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" ||
+            git fetch --no-tags origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+          git branch -f main "origin/$BASE_BRANCH"
+      - name: Record exact candidate Git evidence
+        if: github.event_name == 'pull_request'
+        env:
+          NEOCODE_CANDIDATE_BASE_REF: origin/${{ github.event.pull_request.base.ref }}
+        run: npm run candidate:evidence
       - uses: actions/setup-node@v5
         with:
           node-version: 22

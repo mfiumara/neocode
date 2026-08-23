@@ -204,6 +204,8 @@ export interface WorkerRecovery {
   generation: number;
   leaseToken?: string;
   leaseAcquiredAt?: number;
+  /** Renewed by the owning generation; another server must not take over before this instant. */
+  leaseExpiresAt?: number;
   nextRetryAt?: number;
   needsConfirmation?: boolean;
   checkoutDirty?: boolean;
@@ -279,6 +281,8 @@ export interface AgentJob {
   baseRef: string;
   createdAt: number;
   updatedAt: number;
+  /** Monotonic durable CAS revision; omitted legacy records are revision zero. */
+  runtimeRevision?: number;
   messages: TranscriptMessage[];
   /** Transport-only window metadata; omitted from durable state. */
   transcriptPage?: TranscriptPageInfo;

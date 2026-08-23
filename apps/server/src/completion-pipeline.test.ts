@@ -537,3 +537,116 @@ test("local integration rebases untracked work and fast-forwards main without a 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+async function gitFixture(name: string): Promise<{ directory: string; root: string; worker: string; base: string; branch: string }> {
+  const directory = await mkdtemp(join(tmpdir(), `neocode-git-${name}-`));
+  const root = join(directory, "root");
+  const worker = join(directory, "worker");
+  const branch = `neocode/${name}`;
+  await execFileAsync("git", ["init", "-b", "main", root]);
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: root });
+  await writeFile(join(root, "shared.txt"), "base\n");
+  await execFileAsync("git", ["add", "."], { cwd: root });
+  await execFileAsync("git", ["commit", "-m", "base"], { cwd: root });
+  const base = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+  await execFileAsync("git", ["worktree", "add", "-b", branch, worker, base], { cwd: root });
+  return { directory, root, worker, base, branch };
+}
+
+function gitJob(fixture: { worker: string; base: string; branch: string }, id: string): AgentJob {
+  const value = job(id);
+  value.branch = fixture.branch;
+  value.baseRef = fixture.base;
+  value.worktree = fixture.worker;
+  value.isolation.path = fixture.worker;
+  return value;
+}
+
+test("Git-backed reconciliation refuses a dirty root without changing user content", async () => {
+  const fixture = await gitFixture("dirty-root");
+  try {
+    await writeFile(join(fixture.worker, "feature.txt"), "candidate\n");
+    await execFileAsync("git", ["add", "."], { cwd: fixture.worker });
+    await execFileAsync("git", ["commit", "-m", "feature"], { cwd: fixture.worker });
+    await writeFile(join(fixture.root, "user-untracked.txt"), "preserve me\n");
+    const before = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: fixture.root })).stdout.trim();
+    const adapter = new LocalReviewAdapter(fixture.root, {
+      targetBranch: "main", command: "true", judge: async (_job, _diff, hash) => verdict(hash),
+    });
+
+    await assert.rejects(() => adapter.reconcile(gitJob(fixture, "dirty-root")), (error: unknown) => {
+      assert.ok(error instanceof PipelineError);
+      assert.equal(error.code, "blocked");
+      assert.match(error.message, /Root checkout is dirty/);
+      return true;
+    });
+    assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: fixture.root })).stdout.trim(), before);
+    assert.equal(await readFile(join(fixture.root, "user-untracked.txt"), "utf8"), "preserve me\n");
+    await assert.rejects(() => execFileAsync("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: fixture.root }));
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Git-backed restart safety preserves an interrupted conflicting merge for explicit resolution", async () => {
+  const fixture = await gitFixture("interrupted-merge");
+  try {
+    await writeFile(join(fixture.worker, "shared.txt"), "worker\n");
+    await execFileAsync("git", ["commit", "-am", "worker side"], { cwd: fixture.worker });
+    await writeFile(join(fixture.root, "shared.txt"), "main\n");
+    await execFileAsync("git", ["commit", "-am", "main side"], { cwd: fixture.root });
+    await assert.rejects(() => execFileAsync("git", ["merge", "--no-ff", fixture.branch], { cwd: fixture.root }));
+    const mergeHead = (await execFileAsync("git", ["rev-parse", "MERGE_HEAD"], { cwd: fixture.root })).stdout.trim();
+    const conflicted = (await execFileAsync("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: fixture.root })).stdout.trim();
+    const adapter = new LocalReviewAdapter(fixture.root, {
+      targetBranch: "main", command: "true", judge: async (_job, _diff, hash) => verdict(hash),
+    });
+
+    await assert.rejects(() => adapter.reconcile(gitJob(fixture, "interrupted-merge")), /Root checkout is dirty/);
+    assert.equal((await execFileAsync("git", ["rev-parse", "MERGE_HEAD"], { cwd: fixture.root })).stdout.trim(), mergeHead,
+      "server safety enforcement must not steal product conflict resolution or abort an existing merge");
+    assert.equal((await execFileAsync("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: fixture.root })).stdout.trim(), conflicted);
+  } finally {
+    await execFileAsync("git", ["merge", "--abort"], { cwd: fixture.root }).catch(() => undefined);
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Git-backed merge is delivered exactly once and only after explicit coordinator authorization", async () => {
+  const fixture = await gitFixture("authorized-once");
+  try {
+    await writeFile(join(fixture.worker, "feature.txt"), "authorized candidate\n");
+    const value = gitJob(fixture, "authorized-once");
+    const adapter = new LocalReviewAdapter(fixture.root, {
+      targetBranch: "main", command: "true", judge: async (_job, _diff, hash) => verdict(hash),
+    });
+    const pipeline = new CompletionPipeline(adapter, () => undefined, "main", fixture.root, undefined, coordinatorMergeCapability);
+    pipeline.enqueue(value);
+    pipeline.startJudge(value);
+    await pipeline.idle();
+    assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: fixture.root })).stdout.trim(), fixture.base,
+      "judge approval alone must not mutate main");
+
+    executeCoordinatorGuardedMerge(
+      pipeline, coordinatorMergeCapability, (jobId) => jobId === value.id ? value : assert.fail("unknown job"), value.id,
+    );
+    assert.throws(() => executeCoordinatorGuardedMerge(
+      pipeline, coordinatorMergeCapability, (jobId) => jobId === value.id ? value : assert.fail("unknown job"), value.id,
+    ), /already running/);
+    await pipeline.idle();
+    assert.equal(await readFile(join(fixture.root, "feature.txt"), "utf8"), "authorized candidate\n");
+    const integratedHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: fixture.root })).stdout.trim();
+    const commits = (await execFileAsync("git", ["rev-list", "--count", `${fixture.base}..main`], { cwd: fixture.root })).stdout.trim();
+    assert.equal(commits, "1", "one coordinator authorization fast-forwards exactly one candidate commit");
+    assert.equal(integratedHead, value.completion?.head, "integration preserves the exact reviewed commit identity");
+    assert.throws(() => executeCoordinatorGuardedMerge(
+      pipeline, coordinatorMergeCapability, (jobId) => jobId === value.id ? value : assert.fail("unknown job"), value.id,
+    ), /unavailable from merged/);
+    assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: fixture.root })).stdout.trim(), integratedHead,
+      "repeated requests cannot replay an already delivered integration");
+    assert.equal(value.review?.status, "merged");
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});

@@ -4,6 +4,7 @@ import type { AgentJob } from "@neocode/protocol";
 import {
   canAutomaticallyResume,
   continuationPrompt,
+  hasUnexpiredRecoveryLease,
   isDurableAttemptCurrent,
   openRecoverySession,
   recoveryConfig,
@@ -56,14 +57,24 @@ test("restart backoff is configurable, exponential, capped, and bounded", () => 
     NEOCODE_WORKER_RESTART_MAX_RETRIES: "2",
     NEOCODE_WORKER_RESTART_BACKOFF_MS: "25",
     NEOCODE_WORKER_RESTART_MAX_BACKOFF_MS: "60",
+    NEOCODE_WORKER_LEASE_MS: "5000",
   });
-  assert.deepEqual(config, { maxRetries: 2, backoffMs: 25, maxBackoffMs: 60 });
+  assert.deepEqual(config, { maxRetries: 2, backoffMs: 25, maxBackoffMs: 60, leaseMs: 5000 });
   assert.equal(retryDelay(config, 1), 25);
   assert.equal(retryDelay(config, 2), 50);
   assert.equal(retryDelay(config, 3), 60);
   assert.equal(job().recovery!.retryCount >= job().recovery!.maxRetries, false);
   const exhausted = job({ recovery: { retryCount: 3, maxRetries: 3, generation: 4 } });
   assert.equal(exhausted.recovery!.retryCount >= exhausted.recovery!.maxRetries, true);
+});
+
+test("lease takeover refuses an unexpired live generation", () => {
+  const value = job({ recovery: {
+    retryCount: 1, maxRetries: 3, generation: 7, leaseToken: "generation-7", leaseExpiresAt: 10_000,
+  } });
+  assert.equal(hasUnexpiredRecoveryLease(value, 9_999), true);
+  assert.equal(hasUnexpiredRecoveryLease(value, 10_000), false);
+  assert.equal(hasUnexpiredRecoveryLease(job({ recovery: { retryCount: 1, maxRetries: 3, generation: 8 } }), 1), false);
 });
 
 test("root automatic recovery permits only clearly read-only auto isolation", () => {
