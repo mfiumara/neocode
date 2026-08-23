@@ -184,6 +184,10 @@ export class Orchestrator {
   private readonly acceptingCoordinatorPromptIds = new Set<string>();
   private promptDrain?: Promise<void>;
   private coordinatorPromptDrainBlocked = false;
+  // User prompts and durable system wakes share one Pi AgentSession. Reserve
+  // the turn synchronously so their independent drains cannot both observe an
+  // idle session and race into prompt().
+  private coordinatorTurnInFlight = false;
   private activeCoordinatorPromptId?: string;
   private promptResponseCheckpoint?: { messageId: string; flushed: Promise<void> };
   private promptSettlement: PromptSettlementSnapshot = { throughTimestamp: 0, failures: [] };
@@ -471,11 +475,20 @@ export class Orchestrator {
       append: (event) => this.appendCoordinatorWorkerEvent(event),
       persist: () => this.persist(),
       isIdle: () => this.coordinatorStatus === "idle" && this.coordinator.isIdle,
-      wake: (event) => this.coordinator.prompt(
-        `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\n${event.kind === "backlog_sweep"
-          ? "Autonomous backlog sweep: inspect this exact job and take its next safe lifecycle action now. Do not merely summarize it. Resume a verified interrupted worker, start a fresh judge for a completed handoff, remediate exact failures in the same worktree, or guarded-merge only a fresh approval. Process only this job."
-          : "Resume coordinator-owned reconciliation now: inspect the handoff, start an independent judge when appropriate, and report each decision concisely. Never merge without a fresh exact-diff approval."}`,
-      ),
+      wake: async (event) => {
+        if (this.coordinatorTurnInFlight) throw new Error("Coordinator turn is already reserved");
+        this.coordinatorTurnInFlight = true;
+        try {
+          await this.coordinator.prompt(
+            `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\n${event.kind === "backlog_sweep"
+              ? "Autonomous backlog sweep: inspect this exact job and take its next safe lifecycle action now. Do not merely summarize it. Resume a verified interrupted worker, start a fresh judge for a completed handoff, remediate exact failures in the same worktree, or guarded-merge only a fresh approval. Process only this job."
+              : "Resume coordinator-owned reconciliation now: inspect the handoff, start an independent judge when appropriate, and report each decision concisely. Never merge without a fresh exact-diff approval."}`,
+          );
+        } finally {
+          this.coordinatorTurnInFlight = false;
+          this.schedulePromptDrain();
+        }
+      },
     });
     // Old runtimes could have queued review metadata without the structured
     // handoff now required by coordinator-owned judging. Upgrade only that
@@ -595,6 +608,7 @@ export class Orchestrator {
   private async drainCoordinatorPrompts(): Promise<void> {
     while (this.pendingCoordinatorPrompts.length
       && !this.acceptingCoordinatorPromptIds.has(this.pendingCoordinatorPrompts[0]!.messageId)
+      && !this.coordinatorTurnInFlight
       && this.coordinatorStatus !== "running" && this.coordinator.isIdle) {
       const pending = this.pendingCoordinatorPrompts[0]!;
       const message = this.coordinatorMessages.find((entry) => entry.id === pending.messageId);
@@ -615,6 +629,7 @@ export class Orchestrator {
       const content = `${message.text}${pending.context.length
         ? `\n\n<context-basket>\n${pending.context.join("\n\n---\n\n")}\n</context-basket>`
         : ""}\n\n${modeInstruction}`;
+      this.coordinatorTurnInFlight = true;
       try {
         await this.coordinator.prompt(content, message.attachments?.length ? { images: imagesForPi(message.attachments) } : undefined);
         // Persist a completed-response checkpoint before removing the queue
@@ -657,6 +672,8 @@ export class Orchestrator {
         if (!this.coordinatorAborting) this.fail(error);
         // This item is durably terminal; later independent FIFO entries may run.
         continue;
+      } finally {
+        this.coordinatorTurnInFlight = false;
       }
     }
     if (!this.pendingCoordinatorPrompts.length && this.coordinator.isIdle) {
