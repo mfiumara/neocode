@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, appendFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { mkdir, appendFile, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import {
   createAgentSession,
@@ -22,6 +22,11 @@ import type {
   TranscriptMessage,
 } from "@neocode/protocol";
 import { resolveIsolationMode } from "./isolation.js";
+import {
+  RUNTIME_STATE_VERSION,
+  RuntimeStateStore,
+  type DurableRuntimeState,
+} from "./runtime-state.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -82,6 +87,9 @@ export class Orchestrator {
   private readonly jobs = new Map<string, AgentJob>();
   private readonly workers = new Map<string, RunningWorker>();
   private readonly coordinatorMessages: TranscriptMessage[] = [];
+  private readonly piSessionFiles = new Map<string, string>();
+  private readonly stateStore: RuntimeStateStore;
+  private coordinatorSessionFile?: string;
   private coordinatorStatus: AgentStatus = "idle";
   private modelRuntime!: ModelRuntime;
   private coordinator!: AgentSession;
@@ -95,9 +103,22 @@ export class Orchestrator {
     // The server resolves this before constructing the orchestrator. Keeping a
     // single root here prevents the coordinator from following worker cwd state.
     this.cwd = cwd;
+    this.stateStore = new RuntimeStateStore(cwd);
   }
 
   async initialize(): Promise<void> {
+    await this.ensureLocalExcludes();
+    const restored = await this.stateStore.load();
+    if (restored) {
+      this.coordinatorMessages.push(...restored.coordinator.messages);
+      this.coordinatorSessionFile = restored.coordinator.piSessionFile;
+      for (const entry of restored.jobs) {
+        this.jobs.set(entry.job.id, entry.job);
+        if (entry.piSessionFile) this.piSessionFiles.set(entry.job.id, entry.piSessionFile);
+      }
+      await this.reconcileRestoredJobs();
+    }
+
     this.modelRuntime = await ModelRuntime.create();
 
     const loader = new DefaultResourceLoader({
@@ -166,16 +187,30 @@ export class Orchestrator {
       },
     ];
 
+    const coordinatorSessionDir = join(this.stateStore.root, "pi-sessions", "coordinator");
+    let coordinatorManager: SessionManager;
+    try {
+      coordinatorManager = this.coordinatorSessionFile && await this.pathExists(this.coordinatorSessionFile)
+        ? SessionManager.open(this.coordinatorSessionFile, coordinatorSessionDir, this.cwd)
+        : SessionManager.create(this.cwd, coordinatorSessionDir);
+    } catch {
+      // Neocode's transcript remains usable even if Pi's append-only session was
+      // externally removed or corrupted. Start a fresh model context explicitly.
+      coordinatorManager = SessionManager.create(this.cwd, coordinatorSessionDir);
+    }
+    this.coordinatorSessionFile = coordinatorManager.getSessionFile();
+
     const result = await createAgentSession({
       cwd: this.cwd,
       modelRuntime: this.modelRuntime,
       resourceLoader: loader,
-      sessionManager: SessionManager.create(this.cwd),
+      sessionManager: coordinatorManager,
       tools: ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job"],
       customTools,
     });
     this.coordinator = result.session;
     this.bindCoordinator();
+    this.persist();
   }
 
   snapshot(): AppSnapshot {
@@ -196,6 +231,7 @@ export class Orchestrator {
 
     const userMessage: TranscriptMessage = { id: id(), role: "user", text, timestamp: Date.now() };
     this.coordinatorMessages.push(userMessage);
+    this.persist();
     this.emit({ type: "coordinator_message", message: userMessage });
 
     try {
@@ -211,13 +247,22 @@ export class Orchestrator {
 
   async dispose(): Promise<void> {
     await this.coordinator.abort().catch(() => undefined);
-    for (const worker of this.workers.values()) {
+    for (const [jobId, worker] of this.workers) {
       worker.cancelled = true;
       await worker.session.abort().catch(() => undefined);
       worker.session.dispose();
+      const job = this.jobs.get(jobId);
+      if (job && (job.status === "running" || job.status === "queued")) {
+        job.status = "interrupted";
+        job.recoverable = true;
+        job.updatedAt = Date.now();
+      }
     }
     this.workers.clear();
     this.coordinator.dispose();
+    this.coordinatorStatus = "idle";
+    this.persist();
+    await this.stateStore.flush();
   }
 
   async delegate(
@@ -256,7 +301,6 @@ export class Orchestrator {
     try {
       if (isolationMode === "worktree") {
         await mkdir(join(this.cwd, ".worktrees"), { recursive: true });
-        await this.ensureLocalExcludes();
         await this.git(["worktree", "add", "-b", branch, worktree, baseRef]);
       }
     } catch (error) {
@@ -297,6 +341,7 @@ export class Orchestrator {
     this.coordinator.subscribe((event) => {
       if (event.type === "agent_start") {
         this.coordinatorStatus = "running";
+        this.persist();
         this.emit({ type: "coordinator_status", status: "running" });
       } else if (event.type === "message_start" && event.message.role === "assistant") {
         streaming = { id: id(), role: "assistant", text: "", timestamp: Date.now() };
@@ -305,10 +350,12 @@ export class Orchestrator {
         if (!emitted) {
           streaming.text = event.assistantMessageEvent.delta;
           this.coordinatorMessages.push(streaming);
+          this.persist();
           this.emit({ type: "coordinator_message", message: { ...streaming } });
           emitted = true;
         } else {
           streaming.text += event.assistantMessageEvent.delta;
+          this.persist();
           this.emit({ type: "coordinator_delta", messageId: streaming.id, delta: event.assistantMessageEvent.delta });
         }
       } else if (event.type === "message_end" && event.message.role === "assistant" && streaming) {
@@ -322,10 +369,12 @@ export class Orchestrator {
             this.emit({ type: "coordinator_message_updated", message: { ...streaming } });
           }
         }
+        this.persist();
         streaming = undefined;
         emitted = false;
       } else if (event.type === "agent_settled") {
         this.coordinatorStatus = "idle";
+        this.persist();
         this.emit({ type: "coordinator_status", status: "idle" });
       }
     });
@@ -341,13 +390,18 @@ export class Orchestrator {
 
       });
       await loader.reload();
+      const workerSessionDir = join(this.stateStore.root, "pi-sessions", "workers", job.id);
+      const workerManager = SessionManager.create(job.isolation.path, workerSessionDir);
+      const workerSessionFile = workerManager.getSessionFile();
+      if (workerSessionFile) this.piSessionFiles.set(job.id, workerSessionFile);
+      this.persist();
       const result = await createAgentSession({
         cwd: job.isolation.path,
         model: this.coordinator.model,
         thinkingLevel: this.coordinator.thinkingLevel,
         modelRuntime: this.modelRuntime,
         resourceLoader: loader,
-        sessionManager: SessionManager.create(job.isolation.path),
+        sessionManager: workerManager,
       });
       session = result.session;
       this.workers.set(job.id, { session, cancelled: false });
@@ -425,17 +479,90 @@ export class Orchestrator {
   }
 
   private async ensureLocalExcludes(): Promise<void> {
-    const gitDir = await this.git(["rev-parse", "--git-common-dir"]);
+    const gitDir = await this.git(["rev-parse", "--git-common-dir"]).catch(() => undefined);
+    if (!gitDir) return;
     const absoluteGitDir = gitDir.startsWith("/") ? gitDir : join(this.cwd, gitDir);
-    await appendFile(join(absoluteGitDir, "info", "exclude"), "\n.worktrees/\n", "utf8").catch(() => undefined);
+    await appendFile(
+      join(absoluteGitDir, "info", "exclude"),
+      "\n# Neocode runtime (workspace-local, never source)\n.worktrees/\n.neocode/runtime/\n",
+      "utf8",
+    ).catch(() => undefined);
   }
 
   private publishJob(job: AgentJob): void {
+    this.persist();
     this.emit({ type: "job_updated", job: structuredClone(job) });
+  }
+
+  private persist(): void {
+    const state: DurableRuntimeState = {
+      version: RUNTIME_STATE_VERSION,
+      workspaceRoot: this.cwd,
+      updatedAt: Date.now(),
+      coordinator: {
+        messages: [...this.coordinatorMessages],
+        piSessionFile: this.coordinatorSessionFile,
+      },
+      jobs: this.listJobs().map((job) => ({
+        job: structuredClone(job),
+        piSessionFile: this.piSessionFiles.get(job.id),
+      })),
+    };
+    this.stateStore.save(state);
+  }
+
+  private async pathExists(path: string): Promise<boolean> {
+    return stat(path).then(() => true, () => false);
+  }
+
+  private async reconcileRestoredJobs(): Promise<void> {
+    const worktrees = await this.git(["worktree", "list", "--porcelain"]).catch(() => "");
+    const registered = new Map<string, string | undefined>();
+    let currentPath: string | undefined;
+    for (const line of worktrees.split("\n")) {
+      if (line.startsWith("worktree ")) {
+        currentPath = line.slice(9);
+        registered.set(currentPath, undefined);
+      } else if (currentPath && line.startsWith("branch refs/heads/")) {
+        registered.set(currentPath, line.slice("branch refs/heads/".length));
+      }
+    }
+
+    for (const job of this.jobs.values()) {
+      // No in-memory worker survives this process. Pi's session can be opened
+      // later for context, but doing so does not resume a tool process safely.
+      if (job.status === "running" || job.status === "queued") {
+        job.status = "interrupted";
+        job.updatedAt = Date.now();
+      }
+
+      if (job.isolation.mode === "root") {
+        job.isolation.path = this.cwd;
+        job.worktree = this.cwd;
+        job.recoverable = await this.pathExists(this.cwd);
+      } else {
+        const exists = await this.pathExists(job.isolation.path);
+        const registeredBranch = registered.get(job.isolation.path);
+        const isRegistered = registered.has(job.isolation.path);
+        const branchMatches = registeredBranch === job.branch;
+        job.recoverable = exists && isRegistered && branchMatches;
+        if (!exists || !isRegistered || !branchMatches) {
+          job.recoveryIssue = !exists
+            ? "The recorded worktree no longer exists."
+            : !isRegistered
+              ? "The recorded path exists but is not a registered git worktree."
+              : `The worktree is on ${registeredBranch || "a detached HEAD"}, not ${job.branch}.`;
+        } else {
+          delete job.recoveryIssue;
+          await this.refreshDiff(job).catch(() => undefined);
+        }
+      }
+    }
   }
 
   private fail(error: unknown): void {
     this.coordinatorStatus = "error";
+    this.persist();
     this.emit({ type: "coordinator_status", status: "error" });
     this.emit({ type: "error", message: error instanceof Error ? error.message : String(error) });
   }

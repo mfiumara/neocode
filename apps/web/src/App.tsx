@@ -12,12 +12,21 @@ type ActiveView = { kind: "coordinator" } | { kind: "job"; id: string };
 type JobTab = "conversation" | "diff";
 interface ContextEntry { id: string; label: string; text: string }
 interface PaletteEntry { id: string; label: string; detail: string; action: () => void }
+interface BrowserWorkspaceState {
+  version: 1;
+  active: ActiveView;
+  jobTab: JobTab;
+  prompt: string;
+  isolation: RequestedIsolationMode;
+  context: ContextEntry[];
+}
 type NavigableRow =
   | { kind: "message"; key: string; timestamp: number; message: TranscriptMessage }
   | { kind: "job"; key: string; timestamp: number; job: AgentJob };
 
 function statusGlyph(status: AgentJob["status"]): string {
   if (status === "running") return "●";
+  if (status === "interrupted") return "↻";
   if (status === "completed") return "✓";
   if (status === "failed") return "!";
   if (status === "cancelled") return "×";
@@ -35,6 +44,35 @@ function isolationLabel(job: AgentJob): string {
     : job.isolation.mode;
 }
 
+function browserStateKey(cwd: string): string {
+  return `neocode.browser-state.v1:${encodeURIComponent(cwd)}`;
+}
+
+function loadBrowserState(cwd: string, jobs: AgentJob[]): BrowserWorkspaceState | undefined {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(browserStateKey(cwd)) || "null");
+    if (!value || typeof value !== "object") return undefined;
+    const state = value as Partial<BrowserWorkspaceState>;
+    if (state.version !== 1 || typeof state.prompt !== "string" || !Array.isArray(state.context)) return undefined;
+    const requestedActive = state.active;
+    const active: ActiveView = requestedActive?.kind === "job" && jobs.some((job) => job.id === requestedActive.id)
+      ? requestedActive
+      : { kind: "coordinator" };
+    const isolation = state.isolation === "root" || state.isolation === "worktree" ? state.isolation : "auto";
+    return {
+      version: 1,
+      active,
+      jobTab: active.kind === "job" && state.jobTab === "diff" ? "diff" : "conversation",
+      prompt: state.prompt.slice(0, 100_000),
+      isolation,
+      context: state.context.slice(0, 50).filter((entry): entry is ContextEntry =>
+        !!entry && typeof entry.id === "string" && typeof entry.label === "string" && typeof entry.text === "string"),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>();
   const [connected, setConnected] = useState(false);
@@ -48,6 +86,8 @@ export function App() {
   const [context, setContext] = useState<ContextEntry[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
+  const [workspaceStorageKey, setWorkspaceStorageKey] = useState<string>();
+  const hydratedWorkspaceRef = useRef<string | undefined>(undefined);
   const socketRef = useRef<WebSocket | undefined>(undefined);
   const promptRef = useRef<HTMLTextAreaElement>(null);
 
@@ -75,8 +115,27 @@ export function App() {
         setError("Received an invalid message from the Neocode backend.");
         return;
       }
-      if (message.type === "snapshot") setSnapshot(message.snapshot);
-      else if (message.type === "coordinator_status") {
+      if (message.type === "snapshot") {
+        setSnapshot(message.snapshot);
+        if (hydratedWorkspaceRef.current !== message.snapshot.cwd) {
+          const restored = loadBrowserState(message.snapshot.cwd, message.snapshot.jobs);
+          if (restored) {
+            setActive(restored.active);
+            setJobTab(restored.jobTab);
+            setPrompt(restored.prompt);
+            setIsolation(restored.isolation);
+            setContext(restored.context);
+          } else {
+            setActive({ kind: "coordinator" });
+            setJobTab("conversation");
+            setPrompt("");
+            setIsolation("auto");
+            setContext([]);
+          }
+          hydratedWorkspaceRef.current = message.snapshot.cwd;
+          setWorkspaceStorageKey(browserStateKey(message.snapshot.cwd));
+        }
+      } else if (message.type === "coordinator_status") {
         setSnapshot((current) => current ? {
           ...current,
           coordinator: { ...current.coordinator, status: message.status },
@@ -146,6 +205,17 @@ export function App() {
       socketRef.current = undefined;
     };
   }, []);
+
+  useEffect(() => {
+    if (!workspaceStorageKey || !snapshot || hydratedWorkspaceRef.current !== snapshot.cwd) return;
+    const state: BrowserWorkspaceState = { version: 1, active, jobTab, prompt, isolation, context };
+    try {
+      localStorage.setItem(workspaceStorageKey, JSON.stringify(state));
+    } catch {
+      // Storage can be disabled or full. Browser persistence is best effort and
+      // must never prevent prompting or receiving live WebSocket updates.
+    }
+  }, [workspaceStorageKey, snapshot?.cwd, active, jobTab, prompt, isolation, context]);
 
   const activeJob = active.kind === "job" ? snapshot?.jobs.find((job) => job.id === active.id) : undefined;
   const messages = active.kind === "coordinator"
