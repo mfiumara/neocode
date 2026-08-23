@@ -1,34 +1,50 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentJob } from "@neocode/protocol";
-import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
+import type { AgentJob, JobTerminalDisposition } from "@neocode/protocol";
+import { isDoneJob, jobActiveState, jobLifecycleLabel, splitJobs } from "./jobLifecycle";
 
-function job(status: AgentJob["status"], integration?: AgentJob["integration"]): AgentJob {
+function job(status: AgentJob["status"], integration?: AgentJob["integration"], terminalDisposition?: JobTerminalDisposition): AgentJob {
   return {
-    id: status, title: status, prompt: "", status, branch: "branch", worktree: "/worktree",
-    isolation: { requested: "worktree", mode: "worktree", path: "/worktree" }, baseRef: "base",
-    createdAt: 1, updatedAt: 1, messages: [], integration,
+    id: `${status}-${terminalDisposition?.kind || integration?.status || "plain"}`, title: status, prompt: "", status,
+    branch: "branch", worktree: "/worktree", isolation: { requested: "worktree", mode: "worktree", path: "/worktree" },
+    baseRef: "base", createdAt: 1, updatedAt: 1, messages: [], integration, terminalDisposition,
   };
 }
-
-test("completed unmerged, review, conflict, and interrupted jobs remain actionable", () => {
-  for (const value of [
-    job("completed", { status: "unmerged" }), job("completed", { status: "reviewing" }),
-    job("completed", { status: "conflicted" }), job("interrupted"),
-  ]) assert.equal(isDoneJob(value), false);
-  assert.equal(jobLifecycleLabel(job("completed", { status: "unmerged" })), "Completed · unmerged");
-  assert.equal(jobLifecycleLabel(job("completed", { status: "conflicted" })), "Conflict · needs attention");
+const disposition = (kind: JobTerminalDisposition["kind"], supersededBy?: string): JobTerminalDisposition => ({
+  kind, recordedAt: 2,
+  evidence: {
+    method: kind === "superseded" ? "migration-manifest" : kind === "merged_verified" ? "commit-ancestry"
+      : kind === "cancelled" ? "explicit-cancellation" : kind === "archived" ? "manual-archive" : "process-failure",
+    detail: "proof",
+  },
+  supersededBy,
 });
 
-test("verified integration, supersession, and non-actionable terminal failures are Done", () => {
-  assert.equal(isDoneJob(job("completed", { status: "merged" })), true);
-  assert.equal(jobLifecycleLabel(job("completed", { status: "merged" })), "Integrated · verified");
-  assert.equal(isDoneJob(job("completed", { status: "merged", disposition: "already_integrated" })), true);
-  assert.equal(jobLifecycleLabel(job("completed", { status: "merged", disposition: "already_integrated" })), "Already integrated · verified");
-  assert.equal(isDoneJob(job("completed", { status: "superseded", disposition: "superseded", dispositionReason: "replaced" })), true);
-  assert.equal(jobLifecycleLabel(job("completed", { status: "superseded" })), "Not required · superseded");
-  assert.equal(isDoneJob(job("failed")), true);
-  assert.equal(isDoneJob(job("cancelled")), true);
+test("filters and counts expose only non-terminal workers as actionable", () => {
+  const jobs = [
+    job("running"), job("completed", { status: "unmerged" }), job("completed", { status: "reviewing" }),
+    job("needs_attention", { status: "conflicted" }), job("completed", { status: "merged" }),
+    job("completed", { status: "merged" }, disposition("merged_verified")),
+    job("interrupted", undefined, disposition("superseded", "replacement")),
+    job("cancelled", undefined, disposition("cancelled")), job("failed", undefined, disposition("failed_terminal")),
+  ];
+  const split = splitJobs(jobs);
+  assert.equal(split.actionable.length, 5);
+  assert.equal(split.done.length, 4);
+  assert.equal(isDoneJob(job("completed", { status: "merged" })), false, "legacy merged labels are not sufficient evidence");
+  assert.equal(isDoneJob(job("completed", { status: "superseded", disposition: "superseded" })), false,
+    "legacy superseded labels require durable disposition migration");
+});
+
+test("labels distinguish unverified completion, terminal outcomes, and cleaned history", () => {
+  assert.equal(jobLifecycleLabel(job("completed", { status: "unmerged" })), "Completed · unmerged");
+  assert.equal(jobLifecycleLabel(job("completed", { status: "merged" })), "Integrated · verification pending");
+  assert.equal(jobLifecycleLabel(job("completed", { status: "superseded" })), "Not required · verification pending");
+  assert.equal(jobLifecycleLabel(job("interrupted", undefined, disposition("superseded", "new-job"))), "Not required · superseded by new-job");
+  const merged = job("completed", { status: "merged", disposition: "already_integrated" }, disposition("merged_verified"));
+  assert.equal(jobLifecycleLabel(merged), "Already integrated · verified");
+  merged.cleanup = { status: "removed", checkedAt: 3, removedAt: 4, evidence: { checkedAt: 3, targetRef: "main", targetHead: "target", completionHead: "source", intendedCommits: ["source"], mergeMethod: "commit-ancestry", cleanPorcelain: true, registeredPath: "/worktree", registeredBranch: "branch" } };
+  assert.equal(jobLifecycleLabel(merged), "Already integrated · verified · cleaned");
 });
 
 function reviewed(status: NonNullable<AgentJob["review"]>["status"], jobStatus: AgentJob["status"] = "completed"): AgentJob {
@@ -103,8 +119,15 @@ test("settled and disconnected lifecycle state never appears active", () => {
 });
 
 test("verified and superseded terminal labels override stale remediation disposition", () => {
-  for (const [integration, label] of [["merged", "Integrated · verified"], ["superseded", "Not required · superseded"]] as const) {
+  for (const [integration, kind, label] of [
+    ["merged", "merged_verified", "Integrated · verified"],
+    ["superseded", "superseded", "Not required · superseded by replacement"],
+  ] as const) {
     const value = reviewed("ci_running", "needs_attention"); value.integration = { status: integration };
+    value.terminalDisposition = {
+      kind, recordedAt: 4, ...(kind === "superseded" ? { supersededBy: "replacement" } : {}),
+      evidence: { method: kind === "superseded" ? "coordinator-supersession" : "commit-ancestry", detail: "Durable terminal authority." },
+    };
     value.review!.activeRetry = { target: "post_merge", startedAt: 3 };
     value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "stale", actions: [{ id: "stale", failureClass: "post_merge_ci", fingerprint: "f", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: 2, updatedAt: 3, evidence: { detail: "stale", mergeCommit: "merged" } }] };
     assert.equal(jobActiveState(value), undefined);

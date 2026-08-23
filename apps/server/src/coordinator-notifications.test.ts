@@ -445,3 +445,24 @@ test("every lifecycle transition is appended without extra model chatter", async
   assert.match(durable.events[1]?.text || "", /judging/);
   assert.equal(wakes, 1, "only the handoff wakes the coordinator");
 });
+
+test("settled archived and manifest-superseded history never emits actionable or backlog notifications", () => {
+  const durable = state();
+  const appended: CoordinatorWorkerEvent[] = [];
+  const queue = new CoordinatorNotificationQueue(durable, {
+    append: (event) => appended.push(event), persist: () => undefined, isIdle: () => true, wake: async () => undefined,
+  });
+  const archived = job();
+  archived.terminalDisposition = { kind: "archived", recordedAt: 3, evidence: { method: "manual-archive", detail: "Explicit coordinator archive." } };
+  const superseded = job(); superseded.id = "superseded";
+  superseded.terminalDisposition = {
+    kind: "superseded", recordedAt: 3, supersededBy: "replacement-job",
+    evidence: { method: "migration-manifest", detail: "Reviewed manifest replacement." },
+  };
+  for (const value of [archived, superseded]) {
+    assert.equal(queue.observe(value), false);
+    assert.equal(queue.requestBacklogSweep(value), false);
+  }
+  assert.equal(appended.length, 0);
+  assert.equal(durable.events.length, 0);
+});

@@ -66,7 +66,17 @@ export class WorktreeJanitor {
 
   async review(job: AgentJob): Promise<boolean> {
     const checkedAt = this.now();
-    if (job.status !== "completed") return refusal(job, "not_completed", `Job status is ${job.status}.`, checkedAt);
+    // Janitor consumes settled history; it never creates lifecycle outcomes.
+    // Reconciliation and an intervening durable persist must happen first.
+    if (!job.terminalDisposition) {
+      return refusal(job, "missing_terminal_disposition", "Durable terminal classification must precede physical cleanup.", checkedAt);
+    }
+    if (job.terminalDisposition.kind !== "merged_verified" && job.terminalDisposition.kind !== "superseded") {
+      return refusal(job, "terminal_not_cleanup_eligible", `Disposition ${job.terminalDisposition.kind} does not authorize cleanup.`, checkedAt);
+    }
+    if (job.status !== "completed") {
+      return refusal(job, "not_completed", `Job status is ${job.status}.`, checkedAt);
+    }
     if (!job.completion?.head || !job.completion.finishedAt || !job.worktreeIdentity) {
       return refusal(job, "missing_durable_identity", "Completion head or worktree identity is missing.", checkedAt);
     }
@@ -105,6 +115,9 @@ export class WorktreeJanitor {
 
     const targetHead = await this.git(["rev-parse", this.options.targetRef], this.workspaceRoot);
     const superseded = integration === "superseded";
+    if (superseded && job.terminalDisposition?.kind !== "superseded") {
+      return refusal(job, "not_merged", "Supersession lacks a durable coordinator-reviewed disposition.", checkedAt);
+    }
     let mergeMethod: CleanupEvidence["mergeMethod"] = superseded
       ? "superseded-branch-retained" : commits.length ? "commit-ancestry" : "no-changes";
     // Superseded work remains committed on its retained branch, so removing the
@@ -152,16 +165,6 @@ export class WorktreeJanitor {
       registeredPath: identity.path,
       registeredBranch: identity.branch,
     };
-    if (!superseded) job.integration = {
-      ...job.integration,
-      status: "merged",
-      targetRef: this.options.targetRef,
-      verifiedAt: checkedAt,
-      targetHead,
-      completionHead: job.completion.head,
-      disposition: job.integration?.disposition || "already_integrated",
-    };
-
     await this.git(["worktree", "remove", "--", identity.path], this.workspaceRoot);
     const after = await this.registeredWorktrees();
     const stillExists = await stat(identity.path).then(() => true, () => false);

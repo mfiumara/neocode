@@ -11,7 +11,7 @@ export interface JobActiveState {
  * transition history must never make a settled job look live again.
  */
 export function jobActiveState(job: AgentJob, activityReady = true): JobActiveState | undefined {
-  if (!activityReady) return undefined;
+  if (!activityReady || job.terminalDisposition) return undefined;
   if (["queued", "interrupted", "needs_attention", "failed", "cancelled"].includes(job.status)) {
     // Queued and terminal worker dispositions override stale review data.
     // Completed is deliberately excluded because review/integration work
@@ -54,28 +54,41 @@ export function jobActiveState(job: AgentJob, activityReady = true): JobActiveSt
 }
 
 export function isDoneJob(job: AgentJob): boolean {
-  if (job.integration?.status === "merged" || job.integration?.status === "superseded") return true;
-  if (job.status === "failed" || job.status === "cancelled") return true;
-  return job.status === "completed" && job.isolation.mode === "root";
+  return job.terminalDisposition !== undefined;
+}
+
+export function isActionableJob(job: AgentJob): boolean {
+  return !isDoneJob(job);
+}
+
+export function splitJobs(jobs: AgentJob[]): { actionable: AgentJob[]; done: AgentJob[] } {
+  return { actionable: jobs.filter(isActionableJob), done: jobs.filter(isDoneJob) };
 }
 
 export function jobLifecycleLabel(job: AgentJob): string {
+  const terminal = job.terminalDisposition;
+  if (terminal?.kind === "merged_verified") {
+    const prefix = job.integration?.disposition === "already_integrated" ? "Already integrated" : "Integrated";
+    return job.cleanup?.status === "removed" ? `${prefix} · verified · cleaned` : `${prefix} · verified`;
+  }
+  if (terminal?.kind === "superseded") {
+    const replacement = terminal.supersededBy ? ` by ${terminal.supersededBy}` : "";
+    return job.cleanup?.status === "removed" ? "Not required · cleaned" : `Not required · superseded${replacement}`;
+  }
+  if (terminal?.kind === "cancelled") return "Cancelled";
+  if (terminal?.kind === "failed_terminal") return "Failed · terminal";
+  if (terminal?.kind === "archived") return "Archived";
+
   const integration = job.integration?.status;
   const review = job.review?.status;
-  // Verified integration and explicit supersession are terminal authority even
-  // when legacy snapshots retain a stale worker/remediation disposition.
-  if (integration === "merged") {
-    const prefix = job.integration?.disposition === "already_integrated" ? "Already integrated" : "Integrated";
-    return job.cleanup?.status === "removed" ? `${prefix} · cleaned` : `${prefix} · verified`;
-  }
-  if (integration === "superseded") return job.cleanup?.status === "removed" ? "Not required · cleaned" : "Not required · superseded";
   // Otherwise the current worker disposition overrides transient review data.
   if (job.status === "queued") return "Queued";
   if (job.status === "interrupted") return job.recoverable === false ? "Interrupted" : "Interrupted · recoverable";
   if (job.status === "needs_attention") return "Needs attention";
   if (job.status === "failed") return "Failed";
   if (job.status === "cancelled") return "Cancelled";
-  if (job.status === "completed" && job.isolation.mode === "root") return "Completed";
+  if (integration === "merged") return "Integrated · verification pending";
+  if (integration === "superseded") return "Not required · verification pending";
 
   const currentRoundJudgeClaim = job.handoff?.round !== undefined
     && job.review?.judgeHandoffRound === job.handoff.round
@@ -96,6 +109,6 @@ export function jobLifecycleLabel(job: AgentJob): string {
   if (integration === "reviewing") return "Review in progress";
   if (integration === "integrating") return "Integrating";
   if (integration === "conflicted") return "Conflict · needs attention";
-  if (job.status === "completed" && job.isolation.mode === "worktree") return "Completed · unmerged";
+  if (job.status === "completed") return job.isolation.mode === "worktree" ? "Completed · unmerged" : "Completed · unverified";
   return job.status.charAt(0).toUpperCase() + job.status.slice(1);
 }

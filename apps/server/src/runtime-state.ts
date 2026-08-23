@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AgentActivity, AgentJob, MaintenanceStatus, PromptSettlementSnapshot, TranscriptMessage } from "@neocode/protocol";
 
 
-export const RUNTIME_STATE_VERSION = 1;
+export const RUNTIME_STATE_VERSION = 2;
 
 export interface DurableJob {
   job: AgentJob;
@@ -84,7 +84,7 @@ export function runtimeStatePath(workspaceRoot: string): string {
 function isRuntimeState(value: unknown, workspaceRoot: string): value is DurableRuntimeState {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DurableRuntimeState>;
-  return candidate.version === RUNTIME_STATE_VERSION
+  return ((candidate as { version?: number }).version === 1 || candidate.version === RUNTIME_STATE_VERSION)
     && candidate.workspaceRoot === workspaceRoot
     && !!candidate.coordinator
     && Array.isArray(candidate.coordinator.messages)
@@ -117,6 +117,74 @@ function isRuntimeState(value: unknown, workspaceRoot: string): value is Durable
     });
 }
 
+/** Conservative persisted-schema migration; live Git-derived outcomes remain TerminalReconciler-owned. */
+export async function migrateRuntimeState(state: DurableRuntimeState): Promise<DurableRuntimeState> {
+  const migrated = structuredClone(state);
+  const legacyVersion = (state as { version: number }).version === 1;
+  migrated.version = RUNTIME_STATE_VERSION;
+  for (const { job } of migrated.jobs) {
+    if (job.terminalDisposition) continue;
+    const integration = job.integration;
+    const cleanup = job.cleanup;
+    const identity = job.worktreeIdentity;
+    const completion = job.completion;
+    const removedCleanup = cleanup?.status === "removed" ? cleanup : undefined;
+    const cleanedEvidence = removedCleanup?.evidence;
+    const completeCleanedMerge = legacyVersion && job.status === "completed" && integration?.status === "merged"
+      && Number.isFinite(integration.verifiedAt) && !!integration.targetRef && !!integration.targetHead && !!integration.completionHead
+      && !!completion && completion.head === integration.completionHead && Number.isFinite(completion.finishedAt)
+      && !!identity && identity.path === job.isolation.path && identity.branch === job.branch && identity.baseRef === job.baseRef
+      && !!cleanedEvidence && cleanedEvidence.mergeMethod !== "superseded-branch-retained"
+      && cleanedEvidence.targetRef === integration.targetRef
+      && cleanedEvidence.targetHead === integration.targetHead && cleanedEvidence.completionHead === integration.completionHead
+      && cleanedEvidence.registeredPath === identity.path && cleanedEvidence.registeredBranch === identity.branch
+      && cleanedEvidence.cleanPorcelain === true && removedCleanup?.checkedAt === cleanedEvidence.checkedAt
+      && Number.isFinite(removedCleanup?.removedAt) && removedCleanup!.removedAt >= removedCleanup!.checkedAt
+      && (cleanedEvidence.mergeMethod === "no-changes"
+        ? cleanedEvidence.intendedCommits.length === 0
+        : cleanedEvidence.intendedCommits.includes(integration.completionHead))
+      && await pathIsAbsent(job.isolation.path);
+    if (completeCleanedMerge && cleanedEvidence) job.terminalDisposition = {
+      kind: "merged_verified", recordedAt: removedCleanup!.removedAt,
+      evidence: {
+        method: cleanedEvidence.mergeMethod === "patch-equivalent" ? "patch-equivalence"
+          : cleanedEvidence.mergeMethod === "superseded-branch-retained" ? "no-changes" : cleanedEvidence.mergeMethod,
+        detail: "Migrated complete persisted evidence for a verified merge and physically removed checkout.",
+        sourceCommit: integration.completionHead, targetRef: integration.targetRef, targetCommit: integration.targetHead,
+      },
+    };
+    else if (job.integration?.status === "superseded" && job.integration.supersededByCommit) job.terminalDisposition = {
+      kind: "superseded", recordedAt: job.integration.verifiedAt || job.updatedAt,
+      supersededBy: job.integration.supersededByJobId || job.integration.supersededByCommit,
+      evidence: {
+        method: "coordinator-supersession",
+        detail: job.integration.dispositionReason || "Migrated persisted coordinator-authorized supersession.",
+        sourceCommit: job.integration.completionHead,
+        targetRef: job.integration.targetRef,
+        targetCommit: job.integration.supersededByCommit,
+      },
+    };
+    else if (job.status === "cancelled") job.terminalDisposition = {
+      kind: "cancelled", recordedAt: job.updatedAt,
+      evidence: { method: "explicit-cancellation", detail: "Migrated persisted explicit cancellation." },
+    };
+    else if (job.status === "failed") job.terminalDisposition = {
+      kind: "failed_terminal", recordedAt: job.updatedAt,
+      evidence: { method: "process-failure", detail: job.error || "Migrated persisted terminal process failure." },
+    };
+  }
+  return migrated;
+}
+
+async function pathIsAbsent(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
 export class RuntimeStateStore {
   readonly root: string;
   readonly path: string;
@@ -138,7 +206,7 @@ export class RuntimeStateStore {
   async load(): Promise<DurableRuntimeState | undefined> {
     try {
       const parsed: unknown = JSON.parse(await readFile(this.path, "utf8"));
-      return isRuntimeState(parsed, this.workspaceRoot) ? parsed : undefined;
+      return isRuntimeState(parsed, this.workspaceRoot) ? await migrateRuntimeState(parsed) : undefined;
     } catch {
       // Missing, truncated, or from another workspace: start clean. Atomic
       // writes mean corruption should only be possible through external edits.

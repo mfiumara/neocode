@@ -143,3 +143,35 @@ test("verified base checks report exact empty clean status and reject dirty cand
     assert.match(dirty.stderr, /Working tree is not clean/);
   } finally { value.cleanup(); }
 });
+
+test("local main mode visibly executes the literal review packet commands", () => {
+  const value = fixture();
+  try {
+    git(value.root, ["update-ref", "refs/heads/main", value.base]);
+    writeFileSync(join(value.root, "feature.txt"), "feature\n");
+    git(value.root, ["add", "."]); git(value.root, ["commit", "-m", "feature"]);
+    const result = check(value.root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\$ git merge-base main HEAD/);
+    assert.match(result.stdout, /\$ git diff --name-status main\.\.\.HEAD/);
+    assert.match(result.stdout, /\$ git diff --check main\.\.\.HEAD/);
+  } finally { value.cleanup(); }
+});
+
+test("candidate check records generic checked-out main root cleanliness", () => {
+  const value = fixture();
+  const mainRoot = `${value.root}-main`;
+  try {
+    git(value.root, ["branch", "main", value.base]);
+    git(value.root, ["worktree", "add", mainRoot, "main"]);
+    writeFileSync(join(value.root, "feature.txt"), "feature\n");
+    git(value.root, ["add", "."]); git(value.root, ["commit", "-m", "feature"]);
+    const result = check(value.root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\$ git -C <main-worktree> status --porcelain --untracked-files=normal/);
+    assert.match(result.stdout, /root-clean-status output begin\nroot-clean-status output end\nroot-clean-status exit: 0/);
+  } finally {
+    value.cleanup();
+    rmSync(mainRoot, { recursive: true, force: true });
+  }
+});

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import type { AgentJob, CleanupRefusalReason } from "@neocode/protocol";
+import { TerminalReconciler } from "./terminal-reconciliation.js";
 import { WorktreeJanitor } from "./worktree-janitor.js";
 
 const exec = promisify(execFile);
@@ -49,17 +50,30 @@ function janitor(root: string, graceMs = 1000): WorktreeJanitor {
 function reason(job: AgentJob): CleanupRefusalReason | undefined {
   return job.cleanup?.status === "refused" ? job.cleanup.reason : undefined;
 }
+function classify(job: AgentJob, method: "commit-ancestry" | "patch-equivalence" | "no-changes" = "commit-ancestry"): void {
+  job.terminalDisposition = {
+    kind: "merged_verified", recordedAt: NOW - 5_000,
+    evidence: { method, detail: "Independent durable reconciliation completed.", sourceCommit: job.completion?.head, targetRef: "main" },
+  };
+}
 
 async function withFixture(options: { commit?: boolean; merge?: boolean }, run: (value: Fixture) => Promise<void>) {
   const value = await fixture(options);
   try { await run(value); } finally { await value.cleanup(); }
 }
 
-test("removes a merged clean registered worktree and retains its branch", async () => {
+test("integrated legacy history requires a separate reconciliation pass before cleanup", async () => {
   await withFixture({ merge: true }, async ({ root, worktree, job }) => {
+    assert.equal(await janitor(root).review(job), false);
+    assert.equal(reason(job), "missing_terminal_disposition");
+    assert.equal(await stat(worktree).then(() => true, () => false), true);
+
+    assert.equal(await new TerminalReconciler(root, "main", () => NOW - 5_000).reconcile([job]), 1);
+    assert.equal(job.terminalDisposition?.kind, "merged_verified");
     assert.equal(await janitor(root).review(job), true);
     assert.equal(job.cleanup?.status, "removed");
-    assert.equal(job.integration?.status, "merged");
+    assert.equal(job.terminalDisposition?.kind, "merged_verified", "janitor preserves pre-existing history");
+    assert.equal(job.isolation.path, worktree, "history retains the cleaned checkout path");
     assert.equal(await readFile(join(root, "work.txt"), "utf8"), "intended\n");
     await assert.rejects(readFile(join(worktree, "work.txt"), "utf8"));
     assert.equal(await git(root, ["show-ref", "--verify", "refs/heads/neocode/test-job"]).then(() => true), true);
@@ -72,6 +86,7 @@ test("removes a clean worktree whose commits were integrated with rewritten hash
     await git(root, ["add", "."]);
     await git(root, ["commit", "-m", "advance main"]);
     await git(root, ["cherry-pick", job.completion!.head]);
+    classify(job, "patch-equivalence");
     assert.equal(await janitor(root).review(job), true);
     assert.equal(job.cleanup?.status, "removed");
     if (job.cleanup?.status === "removed") assert.equal(job.cleanup.evidence.mergeMethod, "patch-equivalent");
@@ -81,9 +96,14 @@ test("removes a clean worktree whose commits were integrated with rewritten hash
 
 test("removes a clean superseded checkout while retaining its committed branch", async () => {
   await withFixture({ commit: true }, async ({ root, worktree, job }) => {
+    const replacement = await git(root, ["rev-parse", "main"]);
     job.integration = {
       status: "superseded", disposition: "superseded", dispositionReason: "Verified replacement is on main",
-      supersededByCommit: await git(root, ["rev-parse", "main"]),
+      supersededByCommit: replacement,
+    };
+    job.terminalDisposition = {
+      kind: "superseded", recordedAt: Date.now(), supersededBy: replacement,
+      evidence: { method: "coordinator-supersession", detail: "Verified replacement is on main", targetCommit: replacement },
     };
     assert.equal(await janitor(root).review(job), true);
     assert.equal(job.integration?.status, "superseded");
@@ -95,6 +115,7 @@ test("removes a clean superseded checkout while retaining its committed branch",
 
 test("refuses completed but unmerged work", async () => {
   await withFixture({}, async ({ root, job }) => {
+    classify(job);
     assert.equal(await janitor(root).review(job), false);
     assert.equal(reason(job), "not_merged");
   });
@@ -115,6 +136,7 @@ for (const [name, mutate, expected] of [
   }, "head_mismatch"],
 ] as Array<[string, (fixture: Fixture) => Promise<void>, CleanupRefusalReason]>) {
   test(`refuses ${name}`, async () => withFixture({ merge: true }, async (value) => {
+    classify(value.job);
     await mutate(value);
     assert.equal(await janitor(value.root).review(value.job), false);
     assert.equal(reason(value.job), expected);
@@ -123,6 +145,7 @@ for (const [name, mutate, expected] of [
 
 test("refuses a worktree on a branch other than durable metadata", async () => {
   await withFixture({ merge: true }, async ({ root, job }) => {
+    classify(job);
     job.branch = "main";
     job.worktreeIdentity!.branch = "main";
     assert.equal(await janitor(root).review(job), false);
@@ -132,6 +155,7 @@ test("refuses a worktree on a branch other than durable metadata", async () => {
 
 test("refuses unregistered and unknown worktree paths", async () => {
   await withFixture({ merge: true }, async ({ root, worktree, job }) => {
+    classify(job);
     await git(root, ["worktree", "remove", "--force", worktree]);
     assert.equal(await janitor(root).review(job), false);
     assert.equal(reason(job), "not_registered");
@@ -140,6 +164,7 @@ test("refuses unregistered and unknown worktree paths", async () => {
 
 test("refuses jobs before grace and jobs missing durable completion metadata", async () => {
   await withFixture({ merge: true }, async ({ root, job }) => {
+    classify(job);
     assert.equal(await janitor(root, 20_000).review(job), false);
     assert.equal(reason(job), "grace_period");
     delete job.completion;
@@ -148,8 +173,13 @@ test("refuses jobs before grace and jobs missing durable completion metadata", a
   });
 });
 
-test("removes a clean completed no-op wrapper without risking unique work", async () => {
+test("no-op legacy history requires a separate classification pass before cleanup", async () => {
   await withFixture({ commit: false }, async ({ root, worktree, job }) => {
+    assert.equal(await janitor(root).review(job), false);
+    assert.equal(reason(job), "missing_terminal_disposition");
+    assert.equal(await stat(worktree).then(() => true, () => false), true);
+
+    classify(job, "no-changes");
     assert.equal(await janitor(root).review(job), true);
     assert.equal(job.cleanup?.status, "removed");
     if (job.cleanup?.status === "removed") assert.equal(job.cleanup.evidence.mergeMethod, "no-changes");

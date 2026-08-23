@@ -21,6 +21,7 @@ import {
   type AgentStatus,
   type AgentVariant,
   type AppSnapshot,
+  type CheckEvidence,
   type CoordinatorCompactionStatus,
   type CoordinatorContextState,
   type ImageAttachment,
@@ -60,6 +61,7 @@ import {
   type DurableCoordinatorPrompt,
   type DurableRuntimeState,
 } from "./runtime-state.js";
+import { cleanupCandidates, TerminalReconciler } from "./terminal-reconciliation.js";
 import { OperationLock, WorktreeJanitor } from "./worktree-janitor.js";
 import { transcriptPage } from "./transcript-pagination.js";
 import { integrationComplexityScore } from "./integration-priority.js";
@@ -87,7 +89,7 @@ export interface MaintenanceConfig {
   startup?: boolean;
 }
 
-const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "verify_integration", "mark_not_required", "reconcile_jobs", "clean_worktrees"];
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "verify_integration", "mark_not_required", "archive_job", "reconcile_jobs", "clean_worktrees"];
 const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
 const VARIANTS: AgentVariant[] = ["build", "plan"];
 
@@ -221,6 +223,9 @@ export class Orchestrator {
   readonly #coordinatorMergeCapability = Symbol("main coordinator guarded integration");
   private readonly operationLock = new OperationLock();
   private readonly janitor: WorktreeJanitor;
+  private readonly terminalReconciler: TerminalReconciler;
+  /** Startup reconciliation is metadata-only; janitor cannot consume these records in the same startup pass. */
+  private readonly startupCleanupHold = new Set<string>();
   private maintenance: MaintenanceStatus = { state: "idle" };
   private janitorTimer?: NodeJS.Timeout;
   private janitorRun?: Promise<void>;
@@ -256,6 +261,7 @@ export class Orchestrator {
       graceMs: this.maintenanceConfig.graceMs,
       targetRef: this.maintenanceConfig.targetRef,
     });
+    this.terminalReconciler = new TerminalReconciler(cwd, this.maintenanceConfig.targetRef);
 
   }
 
@@ -310,7 +316,7 @@ export class Orchestrator {
     const loader = new DefaultResourceLoader({
       cwd: this.cwd,
       agentDir: getAgentDir(),
-      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, and only after final approval call guarded_merge. guarded_merge is a compatibility name: the server first rebases the worker onto current main, judges and validates that exact rebased head, and advances main with --ff-only; never create merge commits. Every action_required event must be inspected for the exact command/output. For source, test, judge, conflict, or post-merge failures, quote specific diagnostics with request_worker_changes so the SAME worktree is resumed; await its new handoff, rerun CI, and launch a fresh judge. For a genuinely transient failure use retry_infrastructure. Never bypass bounded repair rounds; needs_attention requires reporting all evidence. Judges report to you and never merge. Conflicts must return to the same worker, be handed off, and be re-judged. Never ask a worker to mutate root/main. After a guarded merge, call reconcile_jobs so externally or previously integrated workers move to Done, then clean_worktrees to safely remove only clean, Git-verified worktrees. While idle, durable backlog sweep events continuously fill a bounded set of review/remediation lanes, prioritized by deterministic diff size, file overlap, and aging; final main integration remains serialized. Act on each sweep rather than merely summarizing it: inspect the job and take the next safe lifecycle action. When committed work is demonstrably replaced by a job or commit already verified on main, use mark_not_required with specific evidence instead of reviewing obsolete work; never supersede dirty, active, or merely inconvenient work. Resume an interrupted recoverable worker with resume_worker; never resume a branch whose durable safety checks reject it. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
+      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, and only after final approval call guarded_merge. guarded_merge is a compatibility name: the server first rebases the worker onto current main, judges and validates that exact rebased head, and advances main with --ff-only; never create merge commits. Every action_required event must be inspected for the exact command/output. For source, test, judge, conflict, or post-merge failures, quote specific diagnostics with request_worker_changes so the SAME worktree is resumed; await its new handoff, rerun CI, and launch a fresh judge. For a genuinely transient failure use retry_infrastructure. Never bypass bounded repair rounds; needs_attention requires reporting all evidence. Judges report to you and never merge. Conflicts must return to the same worker, be handed off, and be re-judged. Never ask a worker to mutate root/main. After a guarded merge, call reconcile_jobs so externally or previously integrated workers move to Done, then clean_worktrees to safely remove only clean, Git-verified worktrees. While idle, durable backlog sweep events continuously fill a bounded set of review/remediation lanes, prioritized by deterministic diff size, file overlap, and aging; final main integration remains serialized. Act on each sweep rather than merely summarizing it: inspect the job and take the next safe lifecycle action. When committed work is demonstrably replaced by a job or commit already verified on main, use mark_not_required with specific evidence instead of reviewing obsolete work; never supersede dirty, active, or merely inconvenient work. Use archive_job only as an explicit coordinator history decision with a specific rationale; it never authorizes checkout deletion. Resume an interrupted recoverable worker with resume_worker; never resume a branch whose durable safety checks reject it. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
 
     });
     await loader.reload();
@@ -401,18 +407,7 @@ export class Orchestrator {
         name: "verify_integration", label: "Verify integration", description: "Verify one job against main and return its persisted merge and CI evidence without authorizing a merge.",
         parameters: Type.Object({ jobId: Type.String() }),
         execute: async (_callId: string, params: { jobId: string }) => {
-          await this.reconcileIntegratedJobs();
-          const job = this.requireJob(params.jobId);
-          if (job.integration?.status !== "merged") throw new Error(`Job ${params.jobId} is not verified on main.`);
-          const evidence = {
-            jobId: job.id,
-            targetRef: job.integration.targetRef,
-            targetHead: job.integration.targetHead,
-            completionHead: job.integration.completionHead,
-            verifiedAt: job.integration.verifiedAt,
-            reviewedDiffSha256: job.review?.judge?.diffSha256,
-            checks: job.review?.postMergeCi || [],
-          };
+          const { job, evidence } = await this.verifyIntegration(params.jobId);
           return { content: [{ type: "text" as const, text: `Verified ${job.id} on ${evidence.targetRef || "main"} at ${evidence.targetHead || "unknown head"}.` }], details: evidence };
         },
       },
@@ -430,6 +425,17 @@ export class Orchestrator {
         },
       },
       {
+        name: "archive_job", label: "Archive job", description: "Explicitly archive inactive history with a specific coordinator reason. This records history only and never deletes a checkout.",
+        parameters: Type.Object({
+          jobId: Type.String(),
+          reason: Type.String({ description: "Specific manual archival rationale" }),
+        }),
+        execute: async (_callId: string, params: { jobId: string; reason: string }) => {
+          const job = await this.archiveJob(params.jobId, params.reason);
+          return { content: [{ type: "text" as const, text: `Archived ${job.id}; its checkout and branch remain untouched.` }], details: { jobId: job.id, terminalDisposition: job.terminalDisposition } };
+        },
+      },
+      {
         name: "reconcile_jobs", label: "Reconcile jobs", description: "Verify completed worker commits against main and move proven integrated or no-op jobs to Done.",
         parameters: Type.Object({}),
         execute: async () => {
@@ -441,8 +447,7 @@ export class Orchestrator {
         name: "clean_worktrees", label: "Clean worktrees", description: "Remove clean worktrees only after Git proves their work is integrated or empty. Bypasses the observation grace period but never safety checks.",
         parameters: Type.Object({}),
         execute: async () => {
-          await this.reconcileIntegratedJobs();
-          await this.cleanNow(true);
+          await this.cleanWorktrees();
           return { content: [{ type: "text" as const, text: `Verified worktree cleanup finished: ${this.maintenance.removed || 0} removed, ${this.maintenance.refused || 0} retained.` }], details: { ...this.maintenance } };
         },
       },
@@ -479,13 +484,24 @@ export class Orchestrator {
       judge: (job, diff, diffSha256) => this.runJudge(job, diff, diffSha256),
     });
     this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock, this.#coordinatorMergeCapability);
+    const beforeStartupReconciliation = new Map(this.listJobs().map((job) => [job.id,
+      `${job.integration?.status || "none"}:${job.terminalDisposition?.kind || "none"}`]));
+    // Runtime-state schema migration happens before initialization. Hold every
+    // already-terminal record through startup maintenance so a newly migrated
+    // supersession can never become physical cleanup input in that same pass.
+    for (const job of this.listJobs()) if (job.terminalDisposition) this.startupCleanupHold.add(job.id);
     await this.reconcileIntegratedJobs(targetBranch);
+    for (const job of this.listJobs()) {
+      const after = `${job.integration?.status || "none"}:${job.terminalDisposition?.kind || "none"}`;
+      if (beforeStartupReconciliation.get(job.id) !== after) this.startupCleanupHold.add(job.id);
+    }
+    this.persist();
     this.initializeCoordinatorNotifications();
     // Old runtimes could have queued review metadata without the structured
     // handoff now required by coordinator-owned judging. Upgrade only that
     // passive queued state from a freshly read exact diff.
     for (const job of this.listJobs()) {
-      if (job.status !== "completed" || job.handoff || job.review?.status !== "queued") continue;
+      if (job.terminalDisposition || job.status !== "completed" || job.handoff || job.review?.status !== "queued") continue;
       await this.refreshDiff(job).then(() => this.completionPipeline.migrateLegacyHandoff(job)).catch(() => undefined);
     }
     this.completionPipeline.recover(this.listJobs());
@@ -958,11 +974,18 @@ export class Orchestrator {
       }
     } catch (error) {
       this.workerConfigs.delete(job.id);
-      job.status = "failed";
-      this.finishWorker(job);
-      job.error = error instanceof Error ? error.message : String(error);
-      job.updatedAt = Date.now();
-      this.publishJob(job);
+      await this.withTerminalAuthority(job, async () => {
+        if (job.terminalDisposition) return;
+        job.status = "failed";
+        this.finishWorker(job);
+        job.error = error instanceof Error ? error.message : String(error);
+        job.terminalDisposition = {
+          kind: "failed_terminal", recordedAt: Date.now(),
+          evidence: { method: "process-failure", detail: job.error },
+        };
+        job.updatedAt = Date.now();
+        this.publishJob(job);
+      });
       throw error;
     }
 
@@ -989,7 +1012,7 @@ export class Orchestrator {
     for (const job of this.jobs.values()) {
       const remediation = job.review?.remediation;
       const action = remediation?.actions.find((entry) => entry.id === remediation.currentActionId);
-      if (job.status !== "completed" || action?.state !== "repairing" || action.failureClass === "infrastructure" || this.workers.has(job.id)) continue;
+      if (job.terminalDisposition || job.status !== "completed" || action?.state !== "repairing" || action.failureClass === "infrastructure" || this.workers.has(job.id)) continue;
       // The coordinator's durable repair claim happened before the previous
       // process died. Resume that exact same worktree without consuming another
       // round or inventing new feedback.
@@ -1001,6 +1024,7 @@ export class Orchestrator {
 
   async requestWorkerChanges(jobId: string, feedback: string): Promise<void> {
     const job = this.requireJob(jobId);
+    if (job.terminalDisposition) throw new Error(`Job ${jobId} is settled as ${job.terminalDisposition.kind}.`);
     if (job.status !== "completed") throw new Error(`Worker ${jobId} is not awaiting review.`);
     if (job.isolation.mode !== "worktree") throw new Error("Review iterations require an isolated worktree worker.");
     this.completionPipeline.requestChanges(job, feedback);
@@ -1013,6 +1037,7 @@ export class Orchestrator {
   async resumeJob(jobId: string): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
+    if (job.terminalDisposition) throw new Error(`Job ${jobId} is settled as ${job.terminalDisposition.kind}; resume is fenced.`);
     if (job.status !== "interrupted" && job.status !== "needs_attention") {
       throw new Error(`Job ${jobId} cannot be resumed from ${job.status}.`);
     }
@@ -1032,17 +1057,30 @@ export class Orchestrator {
   async cancelJob(jobId: string): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
-    const timer = this.recoveryTimers.get(jobId);
+    if (job.terminalDisposition) throw new Error(`Job ${jobId} is already settled as ${job.terminalDisposition.kind}.`);
+    await this.withTerminalAuthority(job, async () => this.cancelJobUnderAuthority(job));
+  }
+
+  private async cancelJobUnderAuthority(job: AgentJob): Promise<void> {
+    if (job.terminalDisposition) throw new Error(`Job ${job.id} is already settled as ${job.terminalDisposition.kind}.`);
+    const timer = this.recoveryTimers.get(job.id);
     if (timer) {
       clearTimeout(timer);
-      this.recoveryTimers.delete(jobId);
+      this.recoveryTimers.delete(job.id);
     }
-    const worker = this.workers.get(jobId);
+    const worker = this.workers.get(job.id);
     if (worker) {
       worker.cancelled = true;
       await worker.session.abort();
     }
+    // Abort is awaited while lifecycle authority is reserved. Revalidate at
+    // the commit point so no concurrent settlement can be overwritten.
+    if (job.terminalDisposition) throw new Error(`Job ${job.id} became settled while cancellation was pending.`);
     job.status = "cancelled";
+    job.terminalDisposition = {
+      kind: "cancelled", recordedAt: Date.now(),
+      evidence: { method: "explicit-cancellation", detail: "User explicitly cancelled this job." },
+    };
     job.activity = undefined;
     job.recoverable = false;
     job.recoveryIssue = "Cancelled intentionally; automatic recovery is disabled.";
@@ -1192,7 +1230,7 @@ export class Orchestrator {
   ): Promise<void> {
     let session: AgentSession | undefined;
     try {
-      if (this.disposing || !this.isCurrentAttempt(job, attempt.generation, attempt.token) || this.workers.has(job.id)) return;
+      if (this.disposing || job.terminalDisposition || !this.isCurrentAttempt(job, attempt.generation, attempt.token) || this.workers.has(job.id)) return;
       const loader = new DefaultResourceLoader({
         cwd: job.isolation.path,
         agentDir: getAgentDir(),
@@ -1229,7 +1267,7 @@ export class Orchestrator {
         sessionManager: workerManager,
       });
       session = result.session;
-      if (this.disposing || !this.isCurrentAttempt(job, attempt.generation, attempt.token) || this.workers.has(job.id)) {
+      if (this.disposing || job.terminalDisposition || !this.isCurrentAttempt(job, attempt.generation, attempt.token) || this.workers.has(job.id)) {
         session.dispose();
         return;
       }
@@ -1242,7 +1280,7 @@ export class Orchestrator {
       } : undefined);
 
       const activeWorker = this.workers.get(job.id);
-      if (activeWorker?.cancelled || !this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;
+      if (job.terminalDisposition || activeWorker?.cancelled || !this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;
       this.setWorkerActivity(job, activity("starting", "Finalizing results"));
       if (job.isolation.mode === "worktree") {
         job.completion = { head: await this.gitAt(["rev-parse", "HEAD"], job.isolation.path), finishedAt: Date.now() };
@@ -1263,14 +1301,22 @@ export class Orchestrator {
       if (job.review) this.completionPipeline.nextHandoff(job);
       else this.completionPipeline.enqueue(job);
     } catch (error) {
-      if (this.disposing || this.workers.get(job.id)?.cancelled || job.status === "cancelled"
+      if (this.disposing || job.terminalDisposition || this.workers.get(job.id)?.cancelled || job.status === "cancelled"
         || !this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;
-      job.status = "failed";
-      this.finishWorker(job);
-      job.error = error instanceof Error ? error.message : String(error);
-      job.updatedAt = Date.now();
-      this.finishAttempt(job, job.error);
-      this.publishJob(job);
+      await this.withTerminalAuthority(job, async () => {
+        if (job.terminalDisposition || this.workers.get(job.id)?.cancelled || job.status === "cancelled"
+          || !this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;
+        job.status = "failed";
+        this.finishWorker(job);
+        job.error = error instanceof Error ? error.message : String(error);
+        job.terminalDisposition = {
+          kind: "failed_terminal", recordedAt: Date.now(),
+          evidence: { method: "process-failure", detail: job.error },
+        };
+        job.updatedAt = Date.now();
+        this.finishAttempt(job, job.error);
+        this.publishJob(job);
+      });
     } finally {
       const worker = this.workers.get(job.id);
       if (worker?.generation === attempt.generation && worker.token === attempt.token) {
@@ -1287,12 +1333,12 @@ export class Orchestrator {
     let streaming: TranscriptMessage | undefined;
     let emitted = false;
     const setActivity = (next: AgentActivity | undefined) => {
-      if (!this.isCurrentAttempt(job, generation, token)) return;
+      if (job.terminalDisposition || !this.isCurrentAttempt(job, generation, token)) return;
       this.setWorkerActivity(job, next);
     };
 
     session.subscribe((event) => {
-      if (this.disposing || !this.isCurrentAttempt(job, generation, token)) return;
+      if (this.disposing || job.terminalDisposition || !this.isCurrentAttempt(job, generation, token)) return;
       if (event.type === "agent_start") setActivity(activity("starting", `Starting · attempt ${job.attempts?.length || 1}`));
       else if (event.type === "message_start") {
         const role = roleOf(event.message);
@@ -1426,10 +1472,26 @@ export class Orchestrator {
     return this.operationLock.run(operation);
   }
 
+  private withTerminalAuthority<T>(job: AgentJob, operation: () => Promise<T>): Promise<T> {
+    if (this.completionPipeline) return this.completionPipeline.withTerminalSettlement(job, operation);
+    return this.operationLock.run(operation);
+  }
+
   private async markNotRequired(params: {
     jobId: string; reason: string; supersededByJobId?: string; supersededByCommit?: string;
   }): Promise<AgentJob> {
     const job = this.requireJob(params.jobId);
+    if (job.terminalDisposition) throw new Error(`Job ${job.id} is already settled as ${job.terminalDisposition.kind}.`);
+    return this.withTerminalAuthority(job, () => this.markNotRequiredUnderAuthority(params));
+  }
+
+  private async markNotRequiredUnderAuthority(params: {
+    jobId: string; reason: string; supersededByJobId?: string; supersededByCommit?: string;
+  }): Promise<AgentJob> {
+    const job = this.requireJob(params.jobId);
+    // A durable terminal disposition is immutable history. Refuse before any
+    // Git inspection so this tool cannot alter metadata or touch a checkout.
+    if (job.terminalDisposition) throw new Error(`Job ${job.id} is already settled as ${job.terminalDisposition.kind}.`);
     if (job.isolation.mode !== "worktree" || this.workers.has(job.id)
       || job.status === "running" || job.status === "queued") {
       throw new Error("Only an inactive worktree job can be marked not required.");
@@ -1440,8 +1502,8 @@ export class Orchestrator {
     let evidenceCommit = params.supersededByCommit;
     if (params.supersededByJobId) {
       const replacement = this.requireJob(params.supersededByJobId);
-      if (replacement.integration?.status !== "merged") throw new Error("The replacement job must be verified on main first.");
-      evidenceCommit = replacement.integration.targetHead || replacement.review?.mergeCommit;
+      const replacementEvidence = this.mergedEvidence(replacement);
+      evidenceCommit = replacementEvidence.targetHead;
     }
     if (!evidenceCommit || !await execFileAsync("git", ["merge-base", "--is-ancestor", evidenceCommit, this.maintenanceConfig.targetRef], { cwd: this.cwd })
       .then(() => true, () => false)) {
@@ -1452,6 +1514,15 @@ export class Orchestrator {
     const branch = await this.gitAt(["branch", "--show-current"], job.isolation.path);
     if (branch !== job.branch) throw new Error("The registered worktree branch does not match durable metadata.");
     const head = await this.gitAt(["rev-parse", "HEAD"], job.isolation.path);
+    // Revalidate all mutable refusal facts immediately before disposition.
+    if (job.terminalDisposition || this.workers.has(job.id)) {
+      throw new Error("Job became active or terminal while supersession evidence was inspected.");
+    }
+    if (await this.gitAt(["status", "--porcelain=v1", "--untracked-files=all"], job.isolation.path)
+      || await this.gitAt(["branch", "--show-current"], job.isolation.path) !== job.branch
+      || await this.gitAt(["rev-parse", "HEAD"], job.isolation.path) !== head) {
+      throw new Error("Worktree identity changed while supersession evidence was inspected.");
+    }
     const now = Date.now();
     job.status = "completed";
     job.completion = { head, finishedAt: job.completion?.finishedAt || now };
@@ -1468,106 +1539,187 @@ export class Orchestrator {
       supersededByJobId: params.supersededByJobId,
       supersededByCommit: evidenceCommit,
     };
+    job.terminalDisposition = {
+      kind: "superseded", recordedAt: now,
+      supersededBy: params.supersededByJobId || evidenceCommit,
+      evidence: {
+        method: "coordinator-supersession", detail: params.reason.trim(), sourceCommit: head,
+        targetRef: this.maintenanceConfig.targetRef, targetCommit: evidenceCommit,
+      },
+    };
     delete job.cleanup;
     job.updatedAt = now;
     this.publishJob(job);
     return job;
   }
 
-  /**
-   * Reconcile durable worker records with Git instead of trusting stale review
-   * labels. This repairs jobs integrated externally, by an older harness, or as
-   * patch-equivalent commits, and safely classifies clean no-op wrapper jobs.
-   */
-  private async reconcileIntegratedJobs(targetRef = process.env.NEOCODE_MERGE_BRANCH || "main"):
-    Promise<{ integrated: number; noOp: number; pending: number }> {
-    const result = { integrated: 0, noOp: 0, pending: 0 };
-    const targetHead = await this.git(["rev-parse", targetRef]);
-
-    for (const job of this.jobs.values()) {
-      if (job.status !== "completed" || job.isolation.mode !== "worktree"
-        || job.integration?.status === "superseded"
-        || (job.integration?.status === "merged" && job.worktreeIdentity)
-        || this.workers.has(job.id)) continue;
-      try {
-        const porcelain = await this.gitAt(["status", "--porcelain=v1", "--untracked-files=all"], job.isolation.path);
-        if (porcelain) { result.pending += 1; continue; }
-        const branch = await this.gitAt(["branch", "--show-current"], job.isolation.path);
-        if (branch !== job.branch) { result.pending += 1; continue; }
-        const actualHead = await this.gitAt(["rev-parse", "HEAD"], job.isolation.path);
-        const commits = (await this.git(["rev-list", "--reverse", `${job.baseRef}..${actualHead}`]))
-          .split("\n").filter(Boolean);
-        let integrated = commits.length === 0;
-        if (!integrated) {
-          const cherry = await this.git(["cherry", targetRef, actualHead]).catch(() => "");
-          const equivalent = new Set(cherry.split("\n")
-            .filter((line) => line.startsWith("- "))
-            .map((line) => line.slice(2).trim()));
-          integrated = true;
-          for (const commit of commits) {
-            const ancestor = await execFileAsync("git", ["merge-base", "--is-ancestor", commit, targetHead], { cwd: this.cwd })
-              .then(() => true, () => false);
-            if (!ancestor && !equivalent.has(commit)) { integrated = false; break; }
-          }
-        }
-        if (!integrated) { result.pending += 1; continue; }
-
-        const now = Date.now();
-        job.completion = { head: actualHead, finishedAt: job.completion?.finishedAt || now };
-        // Older durable records predate worktreeIdentity. Reconstruct it only
-        // after verifying the registered path, expected branch, clean checkout,
-        // immutable base and fully integrated commit set above.
-        job.worktreeIdentity ??= {
-          path: job.isolation.path,
-          branch: job.branch,
-          baseRef: job.baseRef,
-          createdAt: job.createdAt,
-        };
-        job.integration = {
-          ...job.integration,
-          status: "merged", targetRef, verifiedAt: now,
-          targetHead, completionHead: actualHead,
-          disposition: job.integration?.disposition || "already_integrated",
-        };
-        if (job.review) {
-          job.review.status = "merged";
-          job.review.mergeCommit = targetHead;
-          job.review.updatedAt = now;
-          delete job.review.error;
-          job.review.transitions.push({
-            status: "merged", at: now, owner: "server",
-            detail: commits.length
-              ? "Git reconciliation proved every worker commit is integrated or patch-equivalent."
-              : "Git reconciliation proved this clean wrapper job contains no unique commits.",
-          });
-        }
-        delete job.cleanup;
-        job.updatedAt = now;
-        this.publishJob(job);
-        if (commits.length) result.integrated += 1;
-        else result.noOp += 1;
-      } catch {
-        result.pending += 1;
-      }
+  private mergedEvidence(job: AgentJob): {
+    targetRef: string; targetHead: string; completionHead: string; verifiedAt: number;
+    reviewedDiffSha256?: string; checks: CheckEvidence[]; evidenceTarget: string;
+  } {
+    const integration = job.integration;
+    const disposition = job.terminalDisposition;
+    const source = disposition?.evidence.sourceCommit;
+    const evidenceTarget = disposition?.evidence.targetCommit;
+    if (disposition?.kind !== "merged_verified" || integration?.status !== "merged"
+      || !integration.targetRef || !integration.targetHead || !integration.completionHead || !integration.verifiedAt
+      || !source || !evidenceTarget || integration.targetRef !== this.maintenanceConfig.targetRef
+      || disposition.evidence.targetRef !== integration.targetRef
+      || source !== integration.completionHead || source !== job.completion?.head) {
+      throw new Error(`Job ${job.id} does not have consistent authoritative merged_verified evidence.`);
     }
-    return result;
+    return {
+      targetRef: integration.targetRef, targetHead: integration.targetHead,
+      completionHead: integration.completionHead, verifiedAt: integration.verifiedAt,
+      reviewedDiffSha256: job.review?.judge?.diffSha256,
+      checks: job.review?.postMergeCi || [], evidenceTarget,
+    };
   }
 
-  cleanNow(ignoreGrace = false): Promise<void> {
-    this.startCleanup("manual", ignoreGrace);
+  private async verifyIntegration(jobId: string): Promise<{ job: AgentJob; evidence: {
+    jobId: string; targetRef: string; targetHead: string; completionHead: string; verifiedAt: number;
+    reviewedDiffSha256?: string; checks: CheckEvidence[];
+  } }> {
+    // Give conservative Git reconciliation one chance to establish durable
+    // authority. A stale integration.status alone is never verification.
+    await this.reconcileIntegratedJobs();
+    const job = this.requireJob(jobId);
+    const merged = this.mergedEvidence(job);
+    const currentTarget = await this.git(["rev-parse", `${merged.targetRef}^{commit}`]).catch(() => undefined);
+    const source = await this.git(["rev-parse", `${merged.completionHead}^{commit}`]).catch(() => undefined);
+    const targetHead = await this.git(["rev-parse", `${merged.targetHead}^{commit}`]).catch(() => undefined);
+    const evidenceTarget = await this.git(["rev-parse", `${merged.evidenceTarget}^{commit}`]).catch(() => undefined);
+    if (!currentTarget || !source || !targetHead || !evidenceTarget
+      || source !== merged.completionHead || targetHead !== merged.targetHead
+      || !await this.isAncestor(targetHead, currentTarget)
+      || !await this.isAncestor(evidenceTarget, currentTarget)) {
+      throw new Error(`Job ${job.id} merged_verified evidence is not consistently reachable from ${merged.targetRef}.`);
+    }
+    return { job, evidence: {
+      jobId: job.id, targetRef: merged.targetRef, targetHead: merged.targetHead,
+      completionHead: merged.completionHead, verifiedAt: merged.verifiedAt,
+      reviewedDiffSha256: merged.reviewedDiffSha256, checks: merged.checks,
+    } };
+  }
+
+  private isAncestor(commit: string, target: string): Promise<boolean> {
+    return execFileAsync("git", ["merge-base", "--is-ancestor", commit, target], { cwd: this.cwd }).then(() => true, () => false);
+  }
+
+  /** Explicit coordinator-owned history decision. Archival never performs physical cleanup. */
+  async archiveJob(jobId: string, reason: string): Promise<AgentJob> {
+    const job = this.requireJob(jobId);
+    if (job.terminalDisposition) throw new Error("This job already has a durable terminal disposition.");
+    return this.withTerminalAuthority(job, async () => this.archiveJobUnderAuthority(job, reason));
+  }
+
+  private archiveJobUnderAuthority(job: AgentJob, reason: string): AgentJob {
+    if (this.workers.has(job.id) || this.completionPipeline?.isActive(job.id) || job.status === "running" || job.status === "queued") {
+      throw new Error("Only inactive jobs can be archived.");
+    }
+    if (job.terminalDisposition) throw new Error("This job already has a durable terminal disposition.");
+    const detail = reason.trim();
+    if (detail.length < 20) throw new Error("A specific manual archive rationale is required.");
+    const now = Date.now();
+    job.terminalDisposition = {
+      kind: "archived", recordedAt: now,
+      evidence: { method: "manual-archive", detail, sourceCommit: job.completion?.head },
+    };
+    const timer = this.recoveryTimers.get(job.id);
+    if (timer) clearTimeout(timer);
+    this.recoveryTimers.delete(job.id);
+    this.startupRecoveryIds.delete(job.id);
+    job.recoverable = false;
+    job.activity = undefined;
+    job.recoveryIssue = `Archived manually: ${detail}`;
+    if (job.recovery) {
+      delete job.recovery.nextRetryAt;
+      delete job.recovery.leaseToken;
+      delete job.recovery.leaseAcquiredAt;
+    }
+    for (const round of Object.values(job.review?.remediation?.rounds || {})) {
+      if (round) delete round.nextRetryAt;
+    }
+    job.updatedAt = now;
+    this.publishJob(job);
+    return job;
+  }
+
+  /** One conservative reconciliation implementation owns all Git-derived history classification. */
+  private reconcileIntegratedJobs(targetRef = process.env.NEOCODE_MERGE_BRANCH || "main"):
+    Promise<{ integrated: number; noOp: number; pending: number; dispositions: number }> {
+    return this.operationLock.run(() => this.reconcileIntegratedJobsLocked(targetRef));
+  }
+
+  /** Caller holds operationLock; reservation prevents a review launch during Git inspection. */
+  private async reconcileIntegratedJobsLocked(targetRef: string):
+    Promise<{ integrated: number; noOp: number; pending: number; dispositions: number }> {
+    const jobs = this.listJobs();
+    const reservation = this.completionPipeline?.reserveTerminalReconciliation(jobs);
+    const active = new Set([...this.workers.keys(), ...(reservation?.activeJobIds || [])]);
+    try {
+      const before = new Set(jobs.filter((job) => job.terminalDisposition).map((job) => job.id));
+      const reconciler = targetRef === this.maintenanceConfig.targetRef
+        ? this.terminalReconciler : new TerminalReconciler(this.cwd, targetRef);
+      const dispositions = await reconciler.reconcile(jobs, active);
+      let integrated = 0, noOp = 0;
+      for (const job of jobs) {
+        if (!job.terminalDisposition || before.has(job.id)) continue;
+        if (job.terminalDisposition.kind === "merged_verified") {
+          if (job.terminalDisposition.evidence.method === "no-changes") noOp += 1;
+          else integrated += 1;
+        }
+        this.publishJob(job);
+      }
+      const pending = jobs.filter((job) => !job.terminalDisposition
+        && job.status === "completed" && job.isolation.mode === "worktree" && !active.has(job.id)).length;
+      return { integrated, noOp, pending, dispositions };
+    } finally { reservation?.release(); }
+  }
+
+  /** Coordinator clean_worktrees tool path. Reconciliation output is held out of this exact cleanup invocation. */
+  async cleanWorktrees(): Promise<void> {
+    const terminalBefore = new Set(this.listJobs().filter((job) => job.terminalDisposition).map((job) => job.id));
+    await this.reconcileIntegratedJobs();
+    const invocationHold = new Set(this.listJobs()
+      .filter((job) => job.terminalDisposition && !terminalBefore.has(job.id)).map((job) => job.id));
+    await this.cleanNow(true, invocationHold);
+  }
+
+  cleanNow(ignoreGrace = false, invocationHold: ReadonlySet<string> = new Set()): Promise<void> {
+    this.startCleanup("manual", ignoreGrace, invocationHold);
     return this.janitorRun ?? Promise.resolve();
   }
 
-  private startCleanup(source: "startup" | "scheduled" | "manual", ignoreGrace = false): void {
+  private startCleanup(
+    source: "startup" | "scheduled" | "manual", ignoreGrace = false, invocationHold: ReadonlySet<string> = new Set(),
+  ): void {
     if (this.janitorRun) return;
     this.janitorRun = this.operationLock.run(async () => {
       this.maintenance = { state: "running", source };
       this.emit({ type: "maintenance_updated", maintenance: { ...this.maintenance } });
       try {
+        // Reconciliation updates history only. A newly classified record is
+        // never handed to janitor in the same maintenance pass, especially at
+        // startup; cleanup remains a later, independently guarded operation.
+        const terminalBefore = new Set(this.listJobs().filter((job) => job.terminalDisposition).map((job) => job.id));
+        const reconciliation = await this.reconcileIntegratedJobsLocked(this.maintenanceConfig.targetRef);
+        const newlyReconciled = new Set(this.listJobs()
+          .filter((job) => job.terminalDisposition && !terminalBefore.has(job.id)).map((job) => job.id));
+        if (reconciliation.dispositions) {
+          for (const job of this.listJobs()) this.emit({ type: "job_updated", job: structuredClone(job) });
+        }
+        // Physical removal may consume only a terminal generation that the
+        // runtime store has durably acknowledged. A failed flush aborts this
+        // pass before janitor sees any cleanup candidate.
+        this.persist();
+        await this.stateStore.flush();
         const janitor = ignoreGrace
           ? new WorktreeJanitor(this.cwd, { graceMs: 0, targetRef: this.maintenanceConfig.targetRef })
           : this.janitor;
-        const result = await janitor.run(this.listJobs(), (job) => this.publishJob(job));
+        const heldThisPass = new Set([...newlyReconciled, ...invocationHold]);
+        const cleanupJobs = cleanupCandidates(this.listJobs(), heldThisPass, this.startupCleanupHold, source === "startup");
+        const result = await janitor.run(cleanupJobs, (job) => this.publishJob(job));
         this.maintenance = { state: "idle", source, lastRunAt: Date.now(), ...result };
       } catch (error) {
         this.maintenance = {
@@ -1577,7 +1729,10 @@ export class Orchestrator {
       }
       this.persist();
       this.emit({ type: "maintenance_updated", maintenance: { ...this.maintenance } });
-    }).finally(() => { this.janitorRun = undefined; });
+    }).finally(() => {
+      if (source === "startup") this.startupCleanupHold.clear();
+      this.janitorRun = undefined;
+    });
   }
 
   private async ensureLocalExcludes(): Promise<void> {
@@ -1736,7 +1891,8 @@ export class Orchestrator {
     if (!queue || this.coordinatorStatus !== "idle" || !this.coordinator.isIdle || queue.hasPendingWake()) return;
 
     const eligible = (job: AgentJob): boolean => {
-      if (job.isolation.mode !== "worktree" || job.integration?.status === "merged" || job.integration?.status === "superseded") return false;
+      if (job.terminalDisposition || job.isolation.mode !== "worktree"
+        || job.integration?.status === "merged" || job.integration?.status === "superseded") return false;
       if (job.status === "interrupted") return job.recoverable === true;
       if (job.status === "needs_attention") return true;
       if (job.status !== "completed") return false;
@@ -1885,6 +2041,14 @@ export class Orchestrator {
     for (const job of this.jobs.values()) {
       job.activityHistory = (job.activityHistory || []).map(normalizeActivityTiming);
       if (job.activity) job.activity = normalizeActivityTiming(job.activity);
+      if (job.terminalDisposition) {
+        job.activity = undefined;
+        job.recoverable = false;
+        delete job.recovery?.nextRetryAt;
+        delete job.recovery?.leaseToken;
+        delete job.recovery?.leaseAcquiredAt;
+        continue;
+      }
       const wasActive = job.status === "running" || job.status === "queued";
       const wasScheduledRecovery = job.status === "interrupted" && job.recovery?.nextRetryAt !== undefined;
       // No process survives restart; close a persisted live step as interrupted.
@@ -1968,7 +2132,7 @@ export class Orchestrator {
   private async resumeRestoredJobs(): Promise<void> {
     for (const jobId of this.startupRecoveryIds) {
       const job = this.jobs.get(jobId);
-      if (!job || !canAutomaticallyResume(job)) continue;
+      if (!job || job.terminalDisposition || !canAutomaticallyResume(job)) continue;
       const recovery = job.recovery!;
       if (recovery.retryCount >= recovery.maxRetries) {
         job.status = "needs_attention";
@@ -2000,7 +2164,7 @@ export class Orchestrator {
   }
 
   private async launchScheduledRecovery(job: AgentJob): Promise<void> {
-    if (job.status !== "interrupted" || this.workers.has(job.id) || !job.recovery?.nextRetryAt) return;
+    if (job.terminalDisposition || job.status !== "interrupted" || this.workers.has(job.id) || !job.recovery?.nextRetryAt) return;
     await this.validateRecoveryCheckout(job);
     if (job.status !== "interrupted" || this.workers.has(job.id)) return;
     if (!canAutomaticallyResume(job)) {
@@ -2015,6 +2179,7 @@ export class Orchestrator {
 
 
   private async startRecoveryAttempt(job: AgentJob, reason: "backend_restart" | "manual_resume"): Promise<void> {
+    if (job.terminalDisposition) throw new Error(`Job ${job.id} is settled as ${job.terminalDisposition.kind}; recovery is fenced.`);
     if (this.workers.has(job.id)) throw new Error(`Job ${job.id} already has an active worker.`);
     const recovery = job.recovery ??= { retryCount: 0, maxRetries: this.recoveryConfig.maxRetries, generation: 0 };
     if (reason === "backend_restart") recovery.retryCount += 1;

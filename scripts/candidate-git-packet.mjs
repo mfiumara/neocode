@@ -36,6 +36,7 @@ console.log(`parent=${parent}`);
 console.log(`tree=${tree}`);
 console.log(`merge-base=${mergeBase}`);
 console.log(`canonical-binary-diff-sha256=${diffSha256}`);
+
 console.log("$ git diff --name-status main...HEAD");
 printOutput(nameStatus);
 console.log(`$ git show -s --format='${identityFormat}' HEAD`);

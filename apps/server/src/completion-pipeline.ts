@@ -62,6 +62,8 @@ class SerialOperationLock implements OperationLock {
  */
 export class CompletionPipeline {
   private readonly active = new Set<string>();
+  /** Reservations make terminal settlement and classification atomic with launch. */
+  private readonly settling = new Set<string>();
   private readonly scheduled = new Set<string>();
   private readonly operationLock: OperationLock;
   readonly #coordinatorMergeCapability: symbol;
@@ -79,7 +81,7 @@ export class CompletionPipeline {
   }
 
   enqueue(job: AgentJob): boolean {
-    if (job.status !== "completed" || job.review) return false;
+    if (job.terminalDisposition || job.status !== "completed" || job.review) return false;
     const now = Date.now();
     const diff = job.diff || "";
     job.handoff = {
@@ -104,7 +106,7 @@ export class CompletionPipeline {
 
   /** Upgrade pre-handoff queued records after the orchestrator refreshes their exact diff. */
   migrateLegacyHandoff(job: AgentJob): boolean {
-    if (job.status !== "completed" || !job.review || job.handoff || job.review.status !== "queued") return false;
+    if (job.terminalDisposition || job.status !== "completed" || !job.review || job.handoff || job.review.status !== "queued") return false;
     const now = Date.now();
     const diff = job.diff || "";
     job.handoff = {
@@ -129,6 +131,7 @@ export class CompletionPipeline {
   }
 
   startJudge(job: AgentJob): void {
+    this.assertActionable(job);
     if (job.status !== "completed" || !job.review || !job.handoff) throw new Error("A completed worker handoff is required.");
     if (this.active.has(job.id)) throw new Error("A lifecycle action is already running.");
     if (!["queued", "handoff_received"].includes(job.review.status)) {
@@ -150,6 +153,7 @@ export class CompletionPipeline {
   retry(job: AgentJob): void { this.startJudge(job); }
 
   retryInfrastructure(job: AgentJob, reason: string): void {
+    this.assertActionable(job);
     const action = this.currentAction(job);
     const transientChecks = action?.evidence.checks?.some((check) => check.timedOut || check.exitCode === null);
     if (!action || action.state !== "pending" || (action.failureClass !== "infrastructure" && !transientChecks)) {
@@ -161,6 +165,7 @@ export class CompletionPipeline {
   }
 
   requestChanges(job: AgentJob, feedback: string): void {
+    this.assertActionable(job);
     if (!job.review) throw new Error("No handoff exists for this job.");
     if (!feedback.trim()) throw new Error("Specific feedback quoting the failing command/output is required.");
     const action = this.currentAction(job);
@@ -174,6 +179,7 @@ export class CompletionPipeline {
   }
 
   workerResumed(job: AgentJob): void {
+    this.assertActionable(job);
     if (!job.review) throw new Error("No review exists for this job.");
     const action = this.currentAction(job);
     if (!action || action.state !== "repairing") throw new Error("A bounded repair attempt must be claimed before resuming the worker.");
@@ -181,6 +187,7 @@ export class CompletionPipeline {
   }
 
   nextHandoff(job: AgentJob): void {
+    this.assertActionable(job);
     if (!job.review) { this.enqueue(job); return; }
     const action = this.currentAction(job);
     const lastTransition = job.review.transitions.at(-1);
@@ -208,7 +215,7 @@ export class CompletionPipeline {
   }
 
   invalidateApprovalForTargetAdvance(job: AgentJob, targetHead: string): boolean {
-    if (job.review?.status !== "approved" || job.review.reviewBaseRef === targetHead || !job.handoff) return false;
+    if (job.terminalDisposition || job.review?.status !== "approved" || job.review.reviewBaseRef === targetHead || !job.handoff) return false;
     delete job.review.judge;
     delete job.review.coordinatorAuthorizedAt;
     job.review.judgeHandoffRound = Math.max(0, job.handoff.round - 1);
@@ -217,6 +224,7 @@ export class CompletionPipeline {
   }
 
   requestMerge(job: AgentJob, capability: symbol): void {
+    this.assertActionable(job);
     if (capability !== this.#coordinatorMergeCapability) throw new Error("Only the bound main coordinator tool can authorize guarded merge.");
     if (!job.review?.judge?.approved) throw new Error("A fresh independent judge approval is required before guarded merge.");
     if (this.active.has(job.id)) throw new Error("A lifecycle action is already running.");
@@ -231,7 +239,7 @@ export class CompletionPipeline {
   /** Recovery persists intent but never replays judge or merge product decisions. */
   recover(jobs: AgentJob[]): void {
     for (const job of jobs) {
-      if (job.status !== "completed") continue;
+      if (job.terminalDisposition || job.status !== "completed") continue;
       if (!job.review) { this.enqueue(job); continue; }
       const coordinatorStartedJudge = job.review.transitions.some((entry) => entry.status === "judging" && entry.owner === "coordinator");
       if (job.review.judge && !coordinatorStartedJudge) {
@@ -263,13 +271,56 @@ export class CompletionPipeline {
 
   async idle(): Promise<void> { while (this.active.size) await new Promise((resolve) => setTimeout(resolve, 5)); }
 
+  isActive(jobId: string): boolean { return this.active.has(jobId); }
+
+  async withTerminalSettlement<T>(job: AgentJob, operation: () => Promise<T>): Promise<T> {
+    if (this.active.has(job.id) || this.settling.has(job.id)) {
+      throw new Error(`Job ${job.id} has an active lifecycle operation; terminal settlement is refused.`);
+    }
+    // Claim synchronously before waiting for the global operation lock. This
+    // closes the launch-between-check-and-lock race in both call orderings.
+    this.settling.add(job.id);
+    try {
+      return await this.operationLock.run(async () => {
+        if (this.active.has(job.id)) {
+          throw new Error(`Job ${job.id} has an active lifecycle operation; terminal settlement is refused.`);
+        }
+        this.assertActionable(job);
+        return operation();
+      });
+    } finally { this.settling.delete(job.id); }
+  }
+
+  /** Caller holds the shared operation lock; launches are synchronously fenced until release. */
+  reserveTerminalReconciliation(jobs: readonly AgentJob[]): { activeJobIds: Set<string>; release(): void } {
+    const activeJobIds = new Set(this.active);
+    const reserved: string[] = [];
+    for (const job of jobs) {
+      if (job.terminalDisposition) continue;
+      if (this.active.has(job.id) || this.settling.has(job.id)) { activeJobIds.add(job.id); continue; }
+      this.settling.add(job.id);
+      reserved.push(job.id);
+    }
+    return {
+      activeJobIds,
+      release: () => { for (const jobId of reserved) this.settling.delete(jobId); },
+    };
+  }
+
+  private assertActionable(job: AgentJob): void {
+    if (job.terminalDisposition) throw new Error(`Job ${job.id} is settled as ${job.terminalDisposition.kind}; lifecycle execution is fenced.`);
+  }
+
   private launch(job: AgentJob, mode: "judge" | "merge" | "post"): void {
+    this.assertActionable(job);
+    if (this.settling.has(job.id)) throw new Error(`Job ${job.id} has a terminal settlement operation in progress.`);
     this.active.add(job.id);
     void this.process(job, mode).finally(() => this.active.delete(job.id));
   }
 
   private async process(job: AgentJob, mode: "judge" | "merge" | "post"): Promise<void> {
     try {
+      this.assertActionable(job);
       if (mode === "post") {
         const checks = await this.adapter.runCi(this.rootCwd || job.isolation.path);
         const productChecks = this.productCiEvidence(checks);
@@ -358,6 +409,7 @@ export class CompletionPipeline {
         this.transition(job, "merged", `Guarded merge verified as ${result.commit}; post-merge checks passed: ${checks.map((check) => check.command).join(", ")}`, "server");
       });
     } catch (error) {
+      if (job.terminalDisposition) return;
       delete job.review!.activeRetry;
       const code = error instanceof PipelineError ? error.code : "failed";
       const failureClass = error instanceof PipelineError && error.failureClass
@@ -455,13 +507,13 @@ export class CompletionPipeline {
   private scheduleInfrastructureRetry(job: AgentJob): void {
     const action = this.currentAction(job);
     const round = action && job.review?.remediation?.rounds[action.failureClass];
-    if (!action || !round || this.scheduled.has(action.id)
+    if (job.terminalDisposition || !action || !round || this.scheduled.has(action.id)
       || job.review?.status === "merged" || job.integration?.status === "merged") return;
     this.scheduled.add(action.id);
     const delay = Math.max(0, (round.nextRetryAt || Date.now()) - Date.now());
     const timer = setTimeout(() => {
       this.scheduled.delete(action.id);
-      if (this.currentAction(job)?.id !== action.id || action.state !== "repairing"
+      if (job.terminalDisposition || this.currentAction(job)?.id !== action.id || action.state !== "repairing"
         || job.review?.status === "merged" || job.integration?.status === "merged") return;
       const target = action.evidence.mergeCommit ? "post_merge" : "review";
       job.review!.activeRetry = { target, startedAt: Date.now() };
@@ -490,15 +542,25 @@ export class CompletionPipeline {
   }
 
   private transition(job: AgentJob, status: ReviewStatus, detail?: string, owner: "worker" | "coordinator" | "judge" | "server" = "server"): void {
+    this.assertActionable(job);
     const review = job.review!; review.status = status; review.updatedAt = Date.now();
     if (["queued", "ci_running", "judging", "approved", "feedback_sent", "worker_resumed", "handoff_received"].includes(status)) job.integration = { ...job.integration, status: "reviewing", targetRef: review.targetBranch };
     else if (["merge_queued", "merging", "post_merge_ci"].includes(status)) job.integration = { ...job.integration, status: "integrating", targetRef: review.targetBranch };
     else if (["rejected", "blocked", "conflict", "ci_failed", "post_ci_failed", "failed"].includes(status)) job.integration = { ...job.integration, status: "conflicted", targetRef: review.targetBranch };
-    else if (status === "merged") job.integration = {
-      status: "merged", targetRef: review.targetBranch, verifiedAt: Date.now(),
-      targetHead: review.mergeCommit, completionHead: job.completion?.head,
-      disposition: job.integration?.disposition || "integrated",
-    };
+    else if (status === "merged") {
+      job.integration = {
+        status: "merged", targetRef: review.targetBranch, verifiedAt: Date.now(),
+        targetHead: review.mergeCommit, completionHead: job.completion?.head,
+        disposition: job.integration?.disposition || "integrated",
+      };
+      job.terminalDisposition = {
+        kind: "merged_verified", recordedAt: Date.now(),
+        evidence: {
+          method: "reviewed-integration", detail: detail || "Guarded integration and verification completed.",
+          sourceCommit: job.completion?.head, targetRef: review.targetBranch, targetCommit: review.mergeCommit,
+        },
+      };
+    }
     if (["blocked", "conflict", "failed", "ci_failed", "post_ci_failed"].includes(status)) review.error = detail; else delete review.error;
     review.transitions.push({ status, at: review.updatedAt, detail, owner }); this.publish(job);
   }
@@ -574,9 +636,12 @@ export class LocalReviewAdapter implements ReviewAdapter {
   }
 
   async runCi(cwd: string): Promise<CheckEvidence[]> {
-    const commands = this.options.command || process.env.NEOCODE_CI_COMMAND
-      ? [this.options.command || process.env.NEOCODE_CI_COMMAND!]
-      : await detectedCommands(cwd);
+    const configured = this.options.command || process.env.NEOCODE_CI_COMMAND;
+    // npm exposes `npm test` as the canonical product-test entry point. Record
+    // that literal command even when a legacy coordinator environment still
+    // supplies the equivalent `npm run test` spelling.
+    const explicit = configured?.trim() === "npm run test" ? "npm test" : configured;
+    const commands = explicit ? [explicit] : await detectedCommands(cwd);
     const targetHead = (await git(this.root, ["rev-parse", this.targetBranch])).trim();
     // These are standard candidate checks, not worker-report prose. Keep the
     // exact base, clean identity, tree, changed paths, and whitespace gate in
@@ -595,7 +660,9 @@ export class LocalReviewAdapter implements ReviewAdapter {
   }
 
   productCiEvidence(checks: CheckEvidence[]): CheckEvidence[] {
-    return classifyProductCiEvidence(checks, this.options.command || process.env.NEOCODE_CI_COMMAND);
+    const configured = this.options.command || process.env.NEOCODE_CI_COMMAND;
+    const explicit = configured?.trim() === "npm run test" ? "npm test" : configured;
+    return classifyProductCiEvidence(checks, explicit);
   }
 
   readDiff(job: AgentJob): Promise<string> {
@@ -781,7 +848,7 @@ export async function detectedCommands(cwd: string): Promise<string[]> {
     if (value.scripts?.test) commands.push("npm test");
     commands.push(...["check", "build"]
       .filter((name) => value.scripts?.[name])
-      .map((name) => `npm run ${name}`));
+      .map((name) => name === "test" ? "npm test" : `npm run ${name}`));
     return commands;
   } catch { return []; }
 }

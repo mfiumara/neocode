@@ -46,6 +46,17 @@ export function discoverDiffBase(env = process.env) {
   throw new Error("Cannot discover a verified base commit. Fetch main or set NEOCODE_DIFF_BASE_SHA.");
 }
 
+function mainWorktreePath() {
+  const listed = git(["worktree", "list", "--porcelain"], { allowFailure: true });
+  if (listed.status !== 0) return undefined;
+  for (const record of listed.stdout.split(/\n\n+/)) {
+    const lines = record.split("\n");
+    if (!lines.includes("branch refs/heads/main")) continue;
+    return lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
+  }
+  return undefined;
+}
+
 function reportCommand(command, result, label) {
   process.stdout.write(`$ ${command}\n${label} output begin\n`);
   process.stdout.write(result.stdout);
@@ -92,6 +103,19 @@ export function checkGitState(env = process.env) {
   if (status.stdout.length > 0) {
     process.stderr.write("Working tree is not clean.\n");
     return 1;
+  }
+
+  const root = mainWorktreePath();
+  if (root) {
+    const rootStatus = git(["-C", root, "status", "--porcelain", "--untracked-files=normal"], { allowFailure: true });
+    reportCommand("git -C <main-worktree> status --porcelain --untracked-files=normal", rootStatus, "root-clean-status");
+    if (rootStatus.status !== 0) return rootStatus.status ?? 1;
+    if (rootStatus.stdout.length > 0) {
+      process.stderr.write("Root/main worktree is not clean.\n");
+      return 1;
+    }
+  } else {
+    process.stdout.write("root-clean-status skipped: no checked-out local main worktree\n");
   }
   return 0;
 }

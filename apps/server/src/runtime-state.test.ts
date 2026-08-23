@@ -7,6 +7,7 @@ import type { AgentJob } from "@neocode/protocol";
 import {
   RUNTIME_STATE_VERSION,
   RuntimeStateStore,
+  migrateRuntimeState,
   runtimeStatePath,
   type DurableRuntimeState,
 } from "./runtime-state.js";
@@ -161,6 +162,30 @@ test("streaming saves coalesce to the latest complete snapshot", async () => {
   }
 });
 
+test("migrates coordinator supersession and known cancelled/failed shapes without trusting completed labels", async () => {
+  const root = "/repo";
+  const state = fixture(root);
+  (state as { version: number }).version = 1;
+  const original = state.jobs[0]!.job;
+  original.status = "completed";
+  original.integration = undefined;
+  const superseded = structuredClone(original); superseded.id = "superseded"; superseded.integration = {
+    status: "superseded", targetRef: "main", verifiedAt: 3, completionHead: "old", targetHead: "replacement",
+    disposition: "superseded", dispositionReason: "Coordinator reviewed replacement.",
+    supersededByJobId: "replacement-job", supersededByCommit: "replacement",
+  };
+  const cancelled = structuredClone(original); cancelled.id = "cancelled"; cancelled.status = "cancelled";
+  const failed = structuredClone(original); failed.id = "failed"; failed.status = "failed"; failed.error = "old process failed";
+  state.jobs.push({ job: superseded }, { job: cancelled }, { job: failed });
+  const migrated = await migrateRuntimeState(state);
+  assert.equal(migrated.version, RUNTIME_STATE_VERSION);
+  assert.equal(migrated.jobs[0]!.job.terminalDisposition, undefined, "completed alone is not Done evidence");
+  assert.equal(migrated.jobs[1]!.job.terminalDisposition?.kind, "superseded");
+  assert.equal(migrated.jobs[1]!.job.terminalDisposition?.supersededBy, "replacement-job");
+  assert.equal(migrated.jobs[2]!.job.terminalDisposition?.kind, "cancelled");
+  assert.equal(migrated.jobs[3]!.job.terminalDisposition?.kind, "failed_terminal");
+});
+
 test("invalid or cross-workspace state is ignored", async () => {
   const root = await mkdtemp(join(tmpdir(), "neocode-state-"));
   try {
@@ -173,4 +198,38 @@ test("invalid or cross-workspace state is ignored", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("restart migrates only complete internally consistent version-1 cleaned merge evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-state-cleaned-v1-"));
+  try {
+    const state = fixture(root);
+    (state as { version: number }).version = 1;
+    const valid = state.jobs[0]!.job;
+    valid.id = "valid-cleaned";
+    valid.status = "completed";
+
+    const missingVerification = structuredClone(valid); missingVerification.id = "missing-verification";
+    delete missingVerification.integration!.verifiedAt;
+    const missingIdentity = structuredClone(valid); missingIdentity.id = "missing-identity";
+    delete missingIdentity.worktreeIdentity;
+    const refusedCleanup = structuredClone(valid); refusedCleanup.id = "refused-cleanup";
+    refusedCleanup.cleanup = { status: "refused", checkedAt: 3, reason: "not_merged", detail: "legacy refusal" };
+    const inconsistentCompletion = structuredClone(valid); inconsistentCompletion.id = "inconsistent-completion";
+    inconsistentCompletion.integration!.completionHead = "other-head";
+    const inconsistentTarget = structuredClone(valid); inconsistentTarget.id = "inconsistent-target";
+    if (inconsistentTarget.cleanup?.status === "removed") inconsistentTarget.cleanup.evidence.targetHead = "other-target";
+    state.jobs = [valid, missingVerification, missingIdentity, refusedCleanup, inconsistentCompletion, inconsistentTarget]
+      .map((job) => ({ job }));
+
+    const path = runtimeStatePath(root);
+    await mkdir(join(root, ".neocode", "runtime", "server-v1"), { recursive: true });
+    await writeFile(path, JSON.stringify(state));
+    const restored = await new RuntimeStateStore(root).load();
+    assert.equal(restored?.jobs[0]?.job.terminalDisposition?.kind, "merged_verified");
+    assert.equal(restored?.jobs[0]?.job.terminalDisposition?.evidence.method, "commit-ancestry");
+    for (const entry of restored?.jobs.slice(1) || []) {
+      assert.equal(entry.job.terminalDisposition, undefined, `${entry.job.id} remains actionable`);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

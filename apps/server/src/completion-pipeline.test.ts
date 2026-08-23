@@ -100,8 +100,10 @@ class FakeAdapter implements ReviewAdapter {
   concurrentMerges = 0;
   maxConcurrentMerges = 0;
   mergeGate?: Promise<void>;
+  ciGate?: Promise<void>;
 
   async runCi(cwd: string): Promise<CheckEvidence[]> {
+    await this.ciGate;
     if (cwd === "/root") this.postCalls += 1;
     else this.ciCalls += 1;
     return [pass];
@@ -178,6 +180,8 @@ test("worker, judge, and server cannot merge; judge and coordinator approval sta
   assert.match(toolResult.content[0].text, /Coordinator authorized/);
   await pipeline.idle();
   assert.equal(value.review?.status, "merged");
+  assert.equal(value.terminalDisposition?.kind, "merged_verified");
+  assert.equal(value.terminalDisposition?.evidence.method, "reviewed-integration");
   assert.ok(value.review?.coordinatorAuthorizedAt);
   assert.equal(adapter.reconcileCalls, 1);
   assert.deepEqual(value.review?.transitions.map((entry) => entry.owner), ["worker", "coordinator", "server", "coordinator", "judge", "coordinator", "coordinator", "server", "server"]);
@@ -675,4 +679,107 @@ test("local integration rebases untracked work and fast-forwards main without a 
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("terminal history fences enqueue, startup recovery, judging, and review scheduling", () => {
+  const published: AgentJob[] = [];
+  const pipeline = new CompletionPipeline(new FakeAdapter(), (value) => published.push(structuredClone(value)));
+  const settled = job("settled");
+  settled.status = "completed";
+  settled.integration = { status: "merged", targetRef: "main", targetHead: "target", completionHead: "source", verifiedAt: 2 };
+  settled.terminalDisposition = {
+    kind: "merged_verified", recordedAt: 2,
+    evidence: { method: "commit-ancestry", detail: "Reconciled before startup review recovery.", sourceCommit: "source", targetRef: "main", targetCommit: "target" },
+  };
+  assert.equal(pipeline.enqueue(settled), false);
+  pipeline.recover([settled]);
+  assert.equal(settled.review, undefined);
+  assert.equal(settled.integration.status, "merged");
+
+  const archived = job("archived-review");
+  archived.status = "completed";
+  pipeline.enqueue(archived);
+  archived.terminalDisposition = { kind: "archived", recordedAt: 3, evidence: { method: "manual-archive", detail: "Explicit archive fence." } };
+  const reviewBefore = structuredClone(archived.review);
+  const integrationBefore = structuredClone(archived.integration);
+  assert.throws(() => pipeline.startJudge(archived), /settled as archived/);
+  pipeline.recover([archived]);
+  assert.deepEqual(archived.review, reviewBefore);
+  assert.deepEqual(archived.integration, integrationBefore);
+  assert.equal(pipeline.invalidateApprovalForTargetAdvance(archived, "advanced"), false);
+  assert.equal(published.at(-1)?.id, archived.id, "only pre-archive enqueue published");
+});
+
+test("detected product CI executes literal npm test separately from Git evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-literal-npm-test-"));
+  try {
+    await execFileAsync("git", ["init", "-b", "main"], { cwd: root });
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: root });
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "true", check: "true", build: "true" } }));
+    await execFileAsync("git", ["add", "."], { cwd: root }); await execFileAsync("git", ["commit", "-m", "base"], { cwd: root });
+    await writeFile(join(root, "feature.txt"), "feature\n");
+    await execFileAsync("git", ["add", "."], { cwd: root }); await execFileAsync("git", ["commit", "-m", "feature"], { cwd: root });
+    const reviewAdapter = new LocalReviewAdapter(root, { targetBranch: "main", judge: async (_job, _diff, hash) => verdict(hash) });
+    const checks = await reviewAdapter.runCi(root);
+    assert.ok(checks.some((check) => check.command === "npm test" && check.ok));
+    assert.ok(!checks.some((check) => check.command === "npm run test"));
+    assert.deepEqual(reviewAdapter.productCiEvidence(checks).map((check) => check.command), ["npm test", "npm run check", "npm run build"]);
+
+    const legacyConfigured = new LocalReviewAdapter(root, {
+      targetBranch: "main", command: "npm run test", judge: async (_job, _diff, hash) => verdict(hash),
+    });
+    const configuredChecks = await legacyConfigured.runCi(root);
+    assert.ok(configuredChecks.some((check) => check.command === "npm test" && check.ok));
+    assert.ok(!configuredChecks.some((check) => check.command === "npm run test"));
+    assert.deepEqual(legacyConfigured.productCiEvidence(configuredChecks).map((check) => check.command), ["npm test"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("terminal authority excludes paused judge and reconcile operations in both orderings", async () => {
+  const adapter = new FakeAdapter();
+  let releaseCi!: () => void;
+  adapter.ciGate = new Promise<void>((resolve) => { releaseCi = resolve; });
+  const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root", undefined, coordinatorMergeCapability);
+  const judging = job("authority-judge");
+  pipeline.enqueue(judging);
+  pipeline.startJudge(judging);
+  assert.equal(pipeline.isActive(judging.id), true);
+  await assert.rejects(
+    pipeline.withTerminalSettlement(judging, async () => { judging.terminalDisposition = { kind: "cancelled", recordedAt: 3, evidence: { method: "explicit-cancellation", detail: "must not run" } }; }),
+    /active lifecycle operation/,
+  );
+  assert.equal(judging.terminalDisposition, undefined);
+  releaseCi(); adapter.ciGate = undefined;
+  await pipeline.idle();
+  assert.equal(judging.review?.status, "approved");
+
+  const settling = job("authority-settlement-first");
+  pipeline.enqueue(settling);
+  let releaseSettlement!: () => void;
+  const settlementGate = new Promise<void>((resolve) => { releaseSettlement = resolve; });
+  const settlement = pipeline.withTerminalSettlement(settling, async () => {
+    await settlementGate;
+    settling.terminalDisposition = { kind: "cancelled", recordedAt: 4, evidence: { method: "explicit-cancellation", detail: "settled first" } };
+  });
+  assert.throws(() => pipeline.startJudge(settling), /terminal settlement operation/);
+  releaseSettlement();
+  await settlement;
+  const settledReview = structuredClone(settling.review);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(settling.review, settledReview, "no judge callback mutates settled metadata");
+
+  const merging = job("authority-reconcile");
+  pipeline.enqueue(merging); pipeline.startJudge(merging); await pipeline.idle();
+  let releaseMerge!: () => void;
+  adapter.mergeGate = new Promise<void>((resolve) => { releaseMerge = resolve; });
+  pipeline.requestMerge(merging, coordinatorMergeCapability);
+  assert.equal(pipeline.isActive(merging.id), true);
+  await assert.rejects(pipeline.withTerminalSettlement(merging, async () => undefined), /active lifecycle operation/);
+  assert.equal(merging.terminalDisposition, undefined);
+  releaseMerge();
+  await pipeline.idle();
+  assert.equal(adapter.reconcileCalls, 1);
+  assert.equal((merging as AgentJob).terminalDisposition?.kind, "merged_verified");
+  assert.equal(merging.review?.status, "merged");
 });
