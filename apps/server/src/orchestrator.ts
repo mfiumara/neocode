@@ -32,6 +32,7 @@ import {
 } from "@neocode/protocol";
 import { activity, ActivityTimeline, toolActivity } from "./activity.js";
 import { CompletionPipeline, LocalReviewAdapter, readWorktreeDiff } from "./completion-pipeline.js";
+import { CoordinatorNotificationQueue } from "./coordinator-notifications.js";
 import { imagesForPi } from "./image-attachments.js";
 
 
@@ -49,6 +50,8 @@ import {
 import {
   RUNTIME_STATE_VERSION,
   RuntimeStateStore,
+  type CoordinatorNotificationState,
+  type CoordinatorWorkerEvent,
   type DurableRuntimeState,
 } from "./runtime-state.js";
 import { OperationLock, WorktreeJanitor } from "./worktree-janitor.js";
@@ -157,6 +160,8 @@ export class Orchestrator {
   private readonly recoveryTimers = new Map<string, NodeJS.Timeout>();
   private readonly startupRecoveryIds = new Set<string>();
   private readonly recoveryConfig: RecoveryConfig;
+  private readonly notificationState: CoordinatorNotificationState = { events: [], lastSignals: {} };
+  private coordinatorNotifications?: CoordinatorNotificationQueue;
   private coordinatorSessionFile?: string;
   private coordinatorStatus: AgentStatus = "idle";
   private coordinatorActivity: AgentActivity | undefined;
@@ -221,6 +226,13 @@ export class Orchestrator {
       for (const entry of restored.jobs) {
         this.jobs.set(entry.job.id, entry.job);
         if (entry.piSessionFile) this.piSessionFiles.set(entry.job.id, entry.piSessionFile);
+      }
+      if (restored.coordinatorNotifications) {
+        this.notificationState.events.push(...restored.coordinatorNotifications.events);
+        Object.assign(this.notificationState.lastSignals, restored.coordinatorNotifications.lastSignals);
+      } else {
+        // Upgrading an existing runtime must not replay every historical terminal job.
+        for (const job of this.jobs.values()) this.notificationState.lastSignals[job.id] = `baseline:${job.updatedAt}`;
       }
       if (restored.maintenance) this.maintenance = { ...restored.maintenance, state: "idle" };
       await this.reconcileRestoredJobs();
@@ -325,9 +337,18 @@ export class Orchestrator {
       targetBranch,
       judge: (job, diff, diffSha256) => this.runJudge(job, diff, diffSha256),
     });
-    this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd);
+    this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock);
     this.completionPipeline.recover(this.listJobs());
+    this.coordinatorNotifications = new CoordinatorNotificationQueue(this.notificationState, {
+      append: (event) => this.appendCoordinatorWorkerEvent(event),
+      persist: () => this.persist(),
+      isIdle: () => this.coordinatorStatus === "idle" && this.coordinator.isIdle,
+      wake: (event) => this.coordinator.prompt(
+        `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\nGive the user one concise status update. Do not delegate or inspect unless the event says attention is needed.`,
+      ),
+    });
     this.persist();
+    this.coordinatorNotifications.settled();
     await this.resumeRestoredJobs();
     if (this.maintenanceConfig.startup) this.startCleanup("startup");
     if (this.maintenanceConfig.intervalMs > 0) {
@@ -646,6 +667,7 @@ export class Orchestrator {
         }
         this.setCoordinatorActivity(undefined, this.coordinatorAborting ? "aborted" : "completed");
         this.persist();
+        this.coordinatorNotifications?.settled();
       }
     });
   }
@@ -1005,6 +1027,19 @@ export class Orchestrator {
   private publishJob(job: AgentJob): void {
     this.persist();
     this.emit({ type: "job_updated", job: structuredClone(job) });
+    this.coordinatorNotifications?.observe(job);
+  }
+
+  private appendCoordinatorWorkerEvent(event: CoordinatorWorkerEvent): void {
+    const message: TranscriptMessage = {
+      id: event.messageId,
+      role: "system",
+      text: event.text,
+      timestamp: event.createdAt,
+    };
+    if (this.coordinatorMessages.some((entry) => entry.id === message.id)) return;
+    this.coordinatorMessages.push(message);
+    this.emit({ type: "coordinator_message", message });
   }
 
   private persist(): void {
@@ -1019,6 +1054,7 @@ export class Orchestrator {
         piSessionFile: this.coordinatorSessionFile,
       },
       maintenance: { ...this.maintenance },
+      coordinatorNotifications: structuredClone(this.notificationState),
       jobs: this.listJobs().map((job) => ({
         job: structuredClone(job),
         piSessionFile: this.piSessionFiles.get(job.id),

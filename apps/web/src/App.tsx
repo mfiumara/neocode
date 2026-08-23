@@ -3,7 +3,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -865,14 +864,15 @@ function JobSidebarRow({ job, active, activityReady, onOpen }: {
 }) {
   const live = activityReady && (job.status === "queued" || job.status === "running");
   const semanticClass = job.integration?.status || job.status;
-  return <button className={`job-row ${active ? "active" : ""}`} onClick={onOpen} title={jobLifecycleLabel(job)}>
-    <span className={`job-glyph ${activityReady || !live ? semanticClass : "disconnected"}`}>
+  return <Button variant="ghost" className={`job-row ${active ? "active" : ""}`} onClick={onOpen} title={jobLifecycleLabel(job)} aria-current={active ? "page" : undefined}>
+    <span className={`job-glyph ${activityReady || !live ? semanticClass : "disconnected"}`} aria-hidden="true">
       {job.integration?.status === "merged" ? "✓" : statusGlyph(job.status)}
     </span>
     <span><strong>{job.title}</strong><small>{live
-      ? job.activity?.description || "Working"
-      : `${jobLifecycleLabel(job)} · ${isolationLabel(job)}`}</small></span>
-  </button>;
+      ? <>{job.activity?.description || "Working"} {job.activity && <ActivityDuration activity={job.activity} />}</>
+      : <>{jobLifecycleLabel(job)} · {isolationLabel(job)}{job.durationMs !== undefined ? ` · ${formatDuration(job.durationMs)} total` : ""}</>}</small></span>
+    <span className="sr-only">Status: {jobLifecycleLabel(job)}</span>
+  </Button>;
 }
 
 function AttachmentGallery({ attachments }: { attachments: ImageAttachment[] }) {

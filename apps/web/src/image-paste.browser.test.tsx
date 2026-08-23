@@ -26,6 +26,7 @@ function snapshot(): AppSnapshot {
     cwd: "/tmp/repo",
     coordinator: {
       status: "idle",
+      activityHistory: [],
       messages: [{
         id: "persisted",
         role: "user",
@@ -38,6 +39,7 @@ function snapshot(): AppSnapshot {
       models: [],
     },
     jobs: [],
+    maintenance: { state: "idle" },
   };
 }
 

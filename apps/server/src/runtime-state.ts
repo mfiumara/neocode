@@ -11,6 +11,26 @@ export interface DurableJob {
   piSessionFile?: string;
 }
 
+export type CoordinatorWorkerEventKind =
+  | "completed" | "merged" | "review_rejected" | "review_blocked"
+  | "review_conflict" | "review_failed" | "failed" | "needs_attention";
+
+export interface CoordinatorWorkerEvent {
+  id: string;
+  jobId: string;
+  kind: CoordinatorWorkerEventKind;
+  text: string;
+  createdAt: number;
+  messageId: string;
+  wakeRequested: boolean;
+  wakeDeliveredAt?: number;
+}
+
+export interface CoordinatorNotificationState {
+  events: CoordinatorWorkerEvent[];
+  lastSignals: Record<string, string>;
+}
+
 export interface DurableRuntimeState {
   version: typeof RUNTIME_STATE_VERSION;
   workspaceRoot: string;
@@ -22,6 +42,7 @@ export interface DurableRuntimeState {
     piSessionFile?: string;
   };
   maintenance?: MaintenanceStatus;
+  coordinatorNotifications?: CoordinatorNotificationState;
   jobs: DurableJob[];
 }
 

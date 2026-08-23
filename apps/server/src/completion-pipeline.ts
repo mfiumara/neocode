@@ -17,7 +17,7 @@ export class PipelineError extends Error {
 
 const execFileAsync = promisify(execFile);
 
-export interface ReconcileResult { commit: string; alreadyMerged?: boolean }
+export interface ReconcileResult { commit: string; completionCommit?: string; alreadyMerged?: boolean }
 export interface ReviewAdapter {
   runCi(cwd: string): Promise<CheckEvidence[]>;
   readDiff(job: AgentJob): Promise<string>;
@@ -26,6 +26,18 @@ export interface ReviewAdapter {
 }
 
 type Publish = (job: AgentJob) => void;
+export interface OperationLock { run<T>(operation: () => Promise<T>): Promise<T> }
+
+class SerialOperationLock implements OperationLock {
+  private tail: Promise<void> = Promise.resolve();
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); } finally { release(); }
+  }
+}
 
 /**
  * Event-driven completion pipeline. The durable hookToken is written before any
@@ -34,14 +46,17 @@ type Publish = (job: AgentJob) => void;
  */
 export class CompletionPipeline {
   private readonly active = new Set<string>();
-  private mergeTail: Promise<void> = Promise.resolve();
+  private readonly operationLock: OperationLock;
 
   constructor(
     private readonly adapter: ReviewAdapter,
     private readonly publish: Publish,
     private readonly targetBranch = process.env.NEOCODE_MERGE_BRANCH || "main",
     private readonly rootCwd?: string,
-  ) {}
+    operationLock?: OperationLock,
+  ) {
+    this.operationLock = operationLock ?? new SerialOperationLock();
+  }
 
   enqueue(job: AgentJob): boolean {
     if (job.status !== "completed" || job.review) return false;
@@ -98,7 +113,6 @@ export class CompletionPipeline {
 
   async idle(): Promise<void> {
     while (this.active.size) await new Promise((resolve) => setTimeout(resolve, 5));
-    await this.mergeTail;
   }
 
   private launch(job: AgentJob, mode: "full" | "merge" | "post"): void {
@@ -147,6 +161,7 @@ export class CompletionPipeline {
           }
           const result = await this.adapter.reconcile(job);
           job.review!.mergeCommit = result.commit;
+          if (result.completionCommit && job.completion) job.completion.head = result.completionCommit;
           this.transition(job, "post_merge_ci", result.alreadyMerged ? "Merge already present; rerunning CI" : "Reconciled; rerunning CI");
           await this.runPostMergeCi(job);
         });
@@ -171,16 +186,27 @@ export class CompletionPipeline {
   }
 
   private async withMergeLock<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.mergeTail;
-    let release!: () => void;
-    this.mergeTail = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try { return await operation(); } finally { release(); }
+    return this.operationLock.run(operation);
   }
 
   private transition(job: AgentJob, status: ReviewStatus, detail?: string): void {
     const review = job.review!;
     review.status = status;
+    if (["queued", "ci_running", "judging", "approved"].includes(status)) {
+      job.integration = { ...job.integration, status: "reviewing", targetRef: review.targetBranch };
+    } else if (["merge_queued", "merging", "post_merge_ci"].includes(status)) {
+      job.integration = { ...job.integration, status: "integrating", targetRef: review.targetBranch };
+    } else if (["rejected", "blocked", "conflict", "ci_failed", "post_ci_failed", "failed"].includes(status)) {
+      job.integration = { ...job.integration, status: "conflicted", targetRef: review.targetBranch };
+    } else if (status === "merged") {
+      job.integration = {
+        status: "merged",
+        targetRef: review.targetBranch,
+        verifiedAt: Date.now(),
+        targetHead: review.mergeCommit,
+        completionHead: job.completion?.head,
+      };
+    }
     review.updatedAt = Date.now();
     if (["blocked", "conflict", "failed", "ci_failed", "post_ci_failed"].includes(status)) review.error = detail;
     else delete review.error;
@@ -248,8 +274,9 @@ export class LocalReviewAdapter implements ReviewAdapter {
     if (!await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.baseRef, job.branch])) {
       throw new PipelineError("blocked", "Worker branch no longer descends from its recorded base.");
     }
+    const completionCommit = (await git(job.isolation.path, ["rev-parse", "HEAD"])).trim();
     if (await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.branch, this.targetBranch])) {
-      return { commit: (await git(this.root, ["rev-parse", this.targetBranch])).trim(), alreadyMerged: true };
+      return { commit: (await git(this.root, ["rev-parse", this.targetBranch])).trim(), completionCommit, alreadyMerged: true };
     }
     try {
       await git(this.root, ["merge", "--no-ff", "--no-edit", job.branch]);
@@ -257,7 +284,7 @@ export class LocalReviewAdapter implements ReviewAdapter {
       await git(this.root, ["merge", "--abort"]).catch(() => undefined);
       throw new PipelineError("conflict", `Merge conflict; root was restored without forcing: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return { commit: (await git(this.root, ["rev-parse", "HEAD"])).trim() };
+    return { commit: (await git(this.root, ["rev-parse", "HEAD"])).trim(), completionCommit };
   }
 }
 
