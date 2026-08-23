@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AgentJob, TranscriptMessage } from "@neocode/protocol";
+import type { AgentJob, MaintenanceStatus, TranscriptMessage } from "@neocode/protocol";
 
 export const RUNTIME_STATE_VERSION = 1;
 
@@ -18,6 +18,7 @@ export interface DurableRuntimeState {
     messages: TranscriptMessage[];
     piSessionFile?: string;
   };
+  maintenance?: MaintenanceStatus;
   jobs: DurableJob[];
 }
 
