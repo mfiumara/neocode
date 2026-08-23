@@ -51,7 +51,6 @@ test("runtime state atomically round-trips all job and session metadata", async 
     assert.equal(restored?.jobs[0]?.job.diff, "+change");
     assert.match(restored?.coordinator.piSessionFile || "", /pi-sessions/);
     assert.match(runtimeStatePath(root), /\.neocode\/runtime\/server-v1\/state\.json$/);
-    assert.doesNotMatch(runtimeStatePath(root), /\.neocode\/sessions/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

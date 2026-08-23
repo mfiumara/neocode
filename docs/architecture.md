@@ -1,8 +1,10 @@
 # Architecture
 
-## Product boundary
+## Product and implementation boundary
 
-Neocode is an agent cockpit, not a code editor. Pi owns model/provider integration, the tool loop, context compaction and agent sessions. Neocode owns workspaces, background jobs, worktrees, navigation, review and context selection.
+Neocode is an agent cockpit, not a code editor. The repository has one implementation: a TypeScript Node.js server in `apps/server`, a React/Vite client in `apps/web`, and shared TypeScript protocol definitions in `packages/protocol`. The client is a WebSocket consumer and contains no Node.js runtime dependencies. There is no editor-plugin or alternate application runtime.
+
+Pi owns model/provider integration, the tool loop, context compaction, and agent sessions. Neocode owns workspaces, background jobs, worktrees, navigation, review, and context selection.
 
 ## Runtime model
 
@@ -29,7 +31,7 @@ UI-local context basket entries are materialized into the next coordinator promp
 There are two intentionally separate persistence layers:
 
 - The browser stores the active thread, applicable worker tab, unsent draft, isolation picker, and context basket in `localStorage`, keyed by the absolute workspace root received from the server. Invalid data and references to jobs no longer present are ignored. This is same-origin local browser storage: it is suitable for a local cockpit, but is not encrypted and should not be treated as a secrets vault.
-- The server atomically replaces `.neocode/runtime/server-v1/state.json`. This stores coordinator/job transcripts, metadata, summaries, diffs, effective isolation paths and branches, and references to Pi session files. Pi JSONL sessions are kept below the adjacent `pi-sessions` directory and are opened through `SessionManager.open` when it is safe to continue the coordinator context. The `server-v1` namespace deliberately does not collide with legacy Lua `.neocode/sessions` metadata.
+- The server atomically replaces `.neocode/runtime/server-v1/state.json`. This stores coordinator/job transcripts, metadata, summaries, diffs, effective isolation paths and branches, and references to Pi session files. Pi JSONL sessions are kept below the adjacent `pi-sessions` directory and are opened through `SessionManager.open` when it is safe to continue the coordinator context. The versioned namespace permits future state-schema migrations.
 
 On startup, Neocode reconciles worktree jobs against `git worktree list`, their recorded branch, and filesystem paths. A process cannot survive a backend restart: persisted `queued` or `running` jobs become `interrupted`, never `running`. Their transcript, checkout, diff, and Pi session reference remain reviewable and are marked recoverable when the checkout still agrees with git. Worker execution is not automatically resumed because reopening a Pi transcript cannot safely recreate an in-flight tool subprocess. A missing/corrupt Pi file starts fresh model context without discarding Neocode's own transcript.
 
@@ -43,7 +45,7 @@ The architectural boundary is deliberately process-safe:
 Tauri webview ↔ WebSocket/IPC ↔ packaged Neocode server ↔ Pi SDK
 ```
 
-Development uses Vite and a local Node process. Once the backend protocol and lifecycle stabilize:
+Development uses the React client through Vite and the TypeScript server in a local Node.js process. Once the backend protocol and lifecycle stabilize:
 
 1. produce a standalone server artifact
 2. register it as a Tauri sidecar
