@@ -72,7 +72,7 @@ test.beforeAll(async () => {
   fixture = await mkdtemp(join(tmpdir(), "neocode-image-e2e-"));
   await writeFile(join(fixture, "README.md"), "# E2E fixture\n");
   await new Promise<void>((resolveGit, reject) => {
-    const git = spawn("git init -q && git add README.md && git -c user.name=E2E -c user.email=e2e@example.test commit -qm init", { cwd: fixture, shell: true });
+    const git = spawn("git init -q -b main && git add README.md && git -c user.name=E2E -c user.email=e2e@example.test commit -qm init", { cwd: fixture, shell: true });
     git.once("exit", (code) => code === 0 ? resolveGit() : reject(new Error(`git fixture failed: ${code}`)));
   });
   server = await startServer();
