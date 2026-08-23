@@ -1,0 +1,21 @@
+{
+  "name": "neocode",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @neocode/server\" \"npm run dev -w @neocode/web\"",
+    "dev:server": "npm run dev -w @neocode/server",
+    "dev:web": "npm run dev -w @neocode/web",
+    "check": "npm run check --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.2"
+  }
+}
