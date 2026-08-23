@@ -32,7 +32,7 @@ function signalFor(job: AgentJob): { kind: CoordinatorWorkerEventKind; detail?: 
   if (transition) {
     const handoff = transition.owner === "worker" && (transition.status === "queued" || transition.status === "handoff_received");
     const evidence = handoff && job.handoff
-      ? `round=${job.handoff.round} branch=${job.handoff.branch} diff=${job.handoff.diffSha256} tests=${job.handoff.tests.join("; ") || "not reported"} risks=${job.handoff.risks.join("; ") || "none reported"} report=${job.handoff.report}`
+      ? `round=${job.handoff.round} branch=${job.handoff.branch} worktree=${job.handoff.worktree} diff=${job.handoff.diffSha256} requirements=${job.handoff.requirements.join("; ") || "not extracted"} tests=${job.handoff.tests.join("; ") || "not reported"} risks=${job.handoff.risks.join("; ") || "none reported"} report=${job.handoff.report}`
       : `${transition.owner || "server"}:${transition.status} ${transition.detail || ""}`;
     return { kind: handoff ? "handoff" : "lifecycle_transition", detail: evidence, wake: handoff };
   }
@@ -70,13 +70,17 @@ export class CoordinatorNotificationQueue {
       jobId: job.id,
       title: job.title,
       state: signal.kind,
-      ...(signal.detail ? { detail: signal.kind === "action_required" ? signal.detail : concise(signal.detail) } : {}),
+      ...(signal.detail ? { detail: signal.detail } : {}),
     };
     const event: CoordinatorWorkerEvent = {
       id: eventId,
       jobId: job.id,
       kind: signal.kind,
       text: `[worker_status] ${JSON.stringify(payload)}`,
+      summary: signal.kind === "action_required"
+        ? "Action required — review diagnostics and evidence"
+        : concise(signal.detail) || signal.kind.replaceAll("_", " "),
+      title: job.title,
       createdAt: Date.now(),
       messageId: randomUUID(),
       wakeRequested: signal.wake,
@@ -117,6 +121,8 @@ export class CoordinatorNotificationQueue {
       jobId: job.id,
       kind: "backlog_sweep",
       text: `[worker_status] ${JSON.stringify(payload)}`,
+      summary: concise(payload.detail) || "backlog sweep",
+      title: job.title,
       createdAt: Date.now(),
       messageId: randomUUID(),
       wakeRequested: true,

@@ -33,6 +33,11 @@ test("a meaningful transition appends once and duplicate broadcasts do not wake 
   await tick();
   assert.equal(appended.length, 1);
   assert.deepEqual(wakes, [durable.events[0]!.id]);
+  assert.match(durable.events[0]!.text, /branch=neocode\/ship/);
+  assert.match(durable.events[0]!.text, /worktree=\/tmp\/ship/);
+  assert.match(durable.events[0]!.text, /requirements=ship/);
+  assert.match(durable.events[0]!.text, /tests=tests pass/);
+  assert.match(durable.events[0]!.text, /risks=none reported/);
   assert.ok(durable.events[0]!.wakeDeliveredAt);
 });
 

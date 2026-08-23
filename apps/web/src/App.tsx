@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
@@ -10,8 +11,12 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
-import { isDoneJob, jobLifecycleLabel } from "./jobLifecycle";
+import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
+import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
+import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
+import { presentIdentifierText, presentTranscriptMessage, shortReference } from "./transcriptPresentation";
+import { promptStateLabel, reconcilePromptSettlement } from "./transcriptMessages";
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
 
@@ -33,6 +38,7 @@ type JobTab = "conversation" | "diff" | "review";
 interface ContextEntry { id: string; label: string; text: string }
 interface PaletteEntry { id: string; label: string; detail: string; action: () => void }
 interface ComposerImage extends ImageAttachment { previewUrl: string }
+interface RowAnchor { threadKey: string; visibleKey?: string; pixelOffset: number; selectedKey?: string }
 interface BrowserWorkspaceState {
   version: 1;
   active: ActiveView;
@@ -42,6 +48,18 @@ interface BrowserWorkspaceState {
 }
 function imageSource(image: ImageAttachment): string { return `data:${image.mimeType};base64,${image.data}`; }
 function modelKey(model: { provider: string; id: string }): string { return `${model.provider}/${model.id}`; }
+function visibleRowAnchor(viewport: HTMLElement): { key: string; offset: number } | undefined {
+  const viewportRect = viewport.getBoundingClientRect();
+  const viewportTop = viewportRect.top;
+  const visible = [...viewport.querySelectorAll<HTMLElement>("[data-row-key]")]
+    .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+    .filter(({ rect }) => rect.bottom > viewportTop && rect.top < viewportRect.bottom)
+    .sort((left, right) => left.rect.top - right.rect.top)[0];
+  return visible?.element.dataset.rowKey
+    ? { key: visible.element.dataset.rowKey, offset: visible.rect.top - viewportTop }
+    : undefined;
+}
+
 function roleLabel(role: TranscriptMessage["role"]): string {
   return role === "user" ? "YOU" : role === "assistant" ? "AGENT" : role.toUpperCase();
 }
@@ -120,15 +138,24 @@ export function App() {
   const [workspaceStorageKey, setWorkspaceStorageKey] = useState<string>();
   const hydratedWorkspaceRef = useRef<string | undefined>(undefined);
   const socketRef = useRef<WebSocket | undefined>(undefined);
+  const localPromptIdsRef = useRef(new Set<string>());
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const transcriptContentRef = useRef<HTMLDivElement>(null);
   const scrollPositionsRef = useRef<Record<string, number>>({});
+  const scrollAnchorsRef = useRef<Record<string, { key: string; offset: number }>>({});
   const imagesRef = useRef<ComposerImage[]>([]);
   const mountedRef = useRef(true);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   // Content may grow between scroll events. A render must not turn an
   // older-message reader back into a live-output follower.
   const followTranscriptRef = useRef(true);
+  const pendingPagesRef = useRef(new Map<string, string>());
+  const currentThreadRef = useRef("coordinator");
+  const rowsRef = useRef<NavigableRow[]>([]);
+  const selectedRowRef = useRef(0);
+  const selectionScrollSuppressionRef = useRef(0);
+  const prependAnchorRef = useRef<RowAnchor | undefined>(undefined);
 
   const send = (message: ClientMessage): boolean => {
     const socket = socketRef.current;
@@ -146,9 +173,14 @@ export function App() {
   };
 
   useEffect(() => { imagesRef.current = images; }, [images]);
-  useEffect(() => () => {
-    mountedRef.current = false;
-    imagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl));
+  useEffect(() => {
+    // StrictMode runs setup → cleanup → setup in development. Restore this
+    // guard in setup so the second (live) mount can publish prepared images.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      imagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl));
+    };
   }, []);
 
   useEffect(() => {
@@ -167,7 +199,51 @@ export function App() {
         return;
       }
       if (message.type === "snapshot") {
-        setSnapshot(message.snapshot);
+        const reconnectViewport = transcriptRef.current;
+        const reconnectKey = currentThreadRef.current;
+        const reconnectVisible = reconnectViewport ? visibleRowAnchor(reconnectViewport) : undefined;
+        if (reconnectVisible) {
+          selectionScrollSuppressionRef.current = 2;
+          prependAnchorRef.current = {
+            threadKey: reconnectKey,
+            visibleKey: reconnectVisible.key,
+            pixelOffset: reconnectVisible.offset,
+            selectedKey: rowsRef.current[selectedRowRef.current]?.key,
+          };
+        }
+        const durableIds = new Set(message.snapshot.coordinator.messages.map((entry) => entry.id));
+        setSnapshot((current) => {
+          const uncertain = (current?.coordinator.messages || []).filter((entry) =>
+            localPromptIdsRef.current.has(entry.id) && !durableIds.has(entry.id));
+          for (const durableId of durableIds) localPromptIdsRef.current.delete(durableId);
+          if (!current || current.cwd !== message.snapshot.cwd) return message.snapshot;
+          const currentJobs = new Map(current.jobs.map((job) => [job.id, job]));
+          const reconciledCoordinator = reconcileWindow(
+            { messages: current.coordinator.messages, page: current.coordinator.transcriptPage },
+            { messages: message.snapshot.coordinator.messages, page: message.snapshot.coordinator.transcriptPage },
+          );
+          const coordinatorMessages = reconcilePromptSettlement(
+            uncertain.reduce(appendUnique, reconciledCoordinator.messages),
+            message.snapshot.coordinator.promptSettlement,
+          );
+          return {
+            ...message.snapshot,
+            coordinator: {
+              ...message.snapshot.coordinator,
+              messages: coordinatorMessages,
+              transcriptPage: reconciledCoordinator.page,
+            },
+            jobs: message.snapshot.jobs.map((job) => {
+              const old = currentJobs.get(job.id);
+              if (!old) return job;
+              const reconciled = reconcileWindow(
+                { messages: old.messages, page: old.transcriptPage },
+                { messages: job.messages, page: job.transcriptPage },
+              );
+              return { ...job, messages: reconciled.messages, transcriptPage: reconciled.page };
+            }),
+          };
+        });
         setActivitySynced(true);
         setPendingModel(undefined);
         if (hydratedWorkspaceRef.current !== message.snapshot.cwd) {
@@ -203,22 +279,35 @@ export function App() {
         setPendingModel(undefined);
         setSnapshot((current) => current ? { ...current, coordinator: { ...current.coordinator, model: message.model } } : current);
       } else if (message.type === "coordinator_message") {
+        localPromptIdsRef.current.delete(message.message.id);
         setSnapshot((current) => current ? {
           ...current,
           coordinator: {
             ...current.coordinator,
-            messages: [...current.coordinator.messages, message.message],
+            messages: appendUnique(current.coordinator.messages, message.message),
           },
         } : current);
       } else if (message.type === "coordinator_message_updated") {
+        localPromptIdsRef.current.delete(message.message.id);
         setSnapshot((current) => current ? {
           ...current,
           coordinator: {
             ...current.coordinator,
-            messages: current.coordinator.messages.map((entry) =>
-              entry.id === message.message.id ? message.message : entry),
+            messages: appendUnique(current.coordinator.messages, message.message),
           },
         } : current);
+      } else if (message.type === "coordinator_prompt_failed") {
+        localPromptIdsRef.current.delete(message.messageId);
+        setSnapshot((current) => current ? {
+          ...current,
+          coordinator: {
+            ...current.coordinator,
+            messages: current.coordinator.messages.map((entry) => entry.id === message.messageId
+              ? { ...entry, promptState: "failed", promptError: message.error }
+              : entry),
+          },
+        } : current);
+        setError(`Could not send the prompt: ${message.error}`);
       } else if (message.type === "coordinator_delta") {
         setSnapshot((current) => current ? {
           ...current,
@@ -229,11 +318,43 @@ export function App() {
           },
         } : current);
       } else if (message.type === "job_updated") {
-        setSnapshot((current) => current ? {
-          ...current,
-          jobs: [message.job, ...current.jobs.filter((job) => job.id !== message.job.id)]
-            .sort((a, b) => b.createdAt - a.createdAt),
-        } : current);
+        setSnapshot((current) => {
+          if (!current) return current;
+          const old = current.jobs.find((job) => job.id === message.job.id);
+          const reconciled = old ? reconcileWindow(
+            { messages: old.messages, page: old.transcriptPage },
+            { messages: message.job.messages, page: message.job.transcriptPage },
+          ) : undefined;
+          const job = reconciled ? { ...message.job, messages: reconciled.messages, transcriptPage: reconciled.page } : message.job;
+          return { ...current, jobs: [job, ...current.jobs.filter((entry) => entry.id !== job.id)]
+            .sort((a, b) => b.createdAt - a.createdAt) };
+        });
+      } else if (message.type === "transcript_page") {
+        const key = message.thread.kind === "coordinator" ? "coordinator" : `job:${message.thread.jobId}`;
+        const requestedCursor = pendingPagesRef.current.get(key);
+        pendingPagesRef.current.delete(key);
+        const viewport = transcriptRef.current;
+        if (viewport && currentThreadRef.current === key) {
+          const visible = visibleRowAnchor(viewport);
+          selectionScrollSuppressionRef.current = 2;
+          prependAnchorRef.current = {
+            threadKey: key,
+            visibleKey: visible?.key,
+            pixelOffset: visible?.offset || 0,
+            selectedKey: rowsRef.current[selectedRowRef.current]?.key,
+          };
+        }
+        setSnapshot((current) => {
+          if (!current) return current;
+          if (message.thread.kind === "coordinator") return {
+            ...current,
+            coordinator: { ...current.coordinator, messages: insertPageBefore(current.coordinator.messages, message.messages, requestedCursor), transcriptPage: message.page },
+          };
+          const jobId = message.thread.jobId;
+          return { ...current, jobs: current.jobs.map((job) => job.id === jobId
+            ? { ...job, messages: insertPageBefore(job.messages, message.messages, requestedCursor), transcriptPage: message.page }
+            : job) };
+        });
       } else if (message.type === "maintenance_updated") {
         setSnapshot((current) => current ? { ...current, maintenance: message.maintenance } : current);
       } else if (message.type === "error") {
@@ -258,9 +379,16 @@ export function App() {
         setConnected(false);
         setActivitySynced(false);
         setPendingModel(undefined);
+        pendingPagesRef.current.clear();
         setSnapshot((current) => current ? {
           ...current,
-          coordinator: { ...current.coordinator, activity: undefined },
+          coordinator: {
+            ...current.coordinator,
+            activity: undefined,
+            messages: current.coordinator.messages.map((entry) => localPromptIdsRef.current.has(entry.id)
+              ? { ...entry, promptState: "failed", promptError: "Connection closed before the backend acknowledged this prompt; it may not have been received." }
+              : entry),
+          },
           jobs: current.jobs.map((job) => ({ ...job, activity: undefined })),
         } : current);
         if (!disposed) {
@@ -297,12 +425,13 @@ export function App() {
   const messages = active.kind === "coordinator"
     ? snapshot?.coordinator.messages || []
     : activeJob?.messages || [];
+  const activePage = active.kind === "coordinator" ? snapshot?.coordinator.transcriptPage : activeJob?.transcriptPage;
   const activeActivity = active.kind === "coordinator" ? snapshot?.coordinator.activity : activeJob?.activity;
   const activeActivityHistory = active.kind === "coordinator" ? snapshot?.coordinator.activityHistory : activeJob?.activityHistory;
   const activityReady = connected && activitySynced;
   const activeWorking = activityReady && (active.kind === "coordinator"
     ? snapshot?.coordinator.status === "running"
-    : activeJob?.status === "queued" || activeJob?.status === "running");
+    : activeJob?.status === "running");
   const rows = useMemo<NavigableRow[]>(() => {
     const transcriptRows: NavigableRow[] = messages.map((message) => ({
       kind: "message",
@@ -321,7 +450,35 @@ export function App() {
   }, [active.kind, messages, snapshot?.jobs]);
 
   const activeThreadKey = active.kind === "job" ? `job:${active.id}` : "coordinator";
+  currentThreadRef.current = activeThreadKey;
+  const requestOlder = () => {
+    if (!activePage?.hasOlder || !activePage.oldestCursor || pendingPagesRef.current.has(activeThreadKey)) return false;
+    const thread = active.kind === "coordinator" ? { kind: "coordinator" as const } : { kind: "job" as const, jobId: active.id };
+    pendingPagesRef.current.set(activeThreadKey, activePage.oldestCursor);
+    if (!send({ type: "load_older_messages", thread, before: activePage.oldestCursor })) {
+      pendingPagesRef.current.delete(activeThreadKey);
+      return false;
+    }
+    return true;
+  };
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => transcriptRef.current,
+    estimateSize: (index) => rows[index]?.kind === "job" ? 38 : 110,
+    initialRect: { width: 800, height: 600 },
+    overscan: 12,
+    getItemKey: (index) => rows[index]?.key || index,
+  });
+  const measuredVirtualRows = rowVirtualizer.getVirtualItems();
+  // Radix refs and ResizeObserver attach after the first commit. Keep that
+  // bootstrap commit useful (and bounded) in SSR/jsdom as well as browsers.
+  const virtualRows = measuredVirtualRows.length || rows.length > 25 ? measuredVirtualRows : rows.map((_, offset) => {
+    const index = offset;
+    return { index, start: index * 110 };
+  });
   const selectedRow = navigationForView(navigation, activeThreadKey, rows.length).selectedRow;
+  rowsRef.current = rows;
+  selectedRowRef.current = selectedRow;
   const setSelectedRow = (next: number | ((current: number) => number)) => {
     setNavigation((current) => {
       const saved = navigationForView(current, activeThreadKey, rows.length);
@@ -343,12 +500,22 @@ export function App() {
     });
   }, [activeThreadKey, rows.length]);
 
+  const rememberCurrentViewport = () => {
+    const viewport = transcriptRef.current;
+    if (!viewport) return;
+    scrollPositionsRef.current[activeThreadKey] = viewport.scrollTop;
+    const visible = visibleRowAnchor(viewport);
+    if (visible) scrollAnchorsRef.current[activeThreadKey] = visible;
+  };
+
   const openCoordinator = () => {
+    rememberCurrentViewport();
     setActive({ kind: "coordinator" });
     setJobTab("conversation");
   };
 
   const openJob = (job: AgentJob) => {
+    rememberCurrentViewport();
     setActive({ kind: "job", id: job.id });
     setJobTab("conversation");
   };
@@ -389,7 +556,7 @@ export function App() {
     const entry: ContextEntry = {
       id: message.id,
       label: `${active.kind === "coordinator" ? "coordinator" : activeJob?.title} · ${message.role}`,
-      text: message.text,
+      text: messageContextText(message),
     };
     setContext((current) => current.some((item) => item.id === entry.id) ? current : [...current, entry]);
   }
@@ -448,7 +615,10 @@ export function App() {
         if (jobs.length) openJob(jobs[(index - 1 + jobs.length) % jobs.length]!);
       } else if (event.key === "i") focusPrompt();
       else if (event.key === "j" || event.key === "ArrowDown") setSelectedRow((value) => Math.min(Math.max(0, rows.length - 1), value + 1));
-      else if (event.key === "k" || event.key === "ArrowUp") setSelectedRow((value) => Math.max(0, value - 1));
+      else if (event.key === "k" || event.key === "ArrowUp") {
+        if (selectedRow === 0 && activePage?.hasOlder) requestOlder();
+        else setSelectedRow((value) => Math.max(0, value - 1));
+      }
       else if (event.key === "l" || event.key === "ArrowRight") {
         const row = rows[selectedRow];
         if (row?.kind === "job") openJob(row.job);
@@ -471,15 +641,32 @@ export function App() {
     const transcript = transcriptRef.current;
     if (!transcript) return;
     const saved = scrollPositionsRef.current[activeThreadKey];
-    transcript.scrollTop = saved ?? transcript.scrollHeight;
+    const anchor = scrollAnchorsRef.current[activeThreadKey];
+    const anchorIndex = anchor ? rows.findIndex((row) => row.key === anchor.key) : -1;
+    if (anchorIndex >= 0) {
+      rowVirtualizer.scrollToIndex(anchorIndex, { align: "start" });
+      requestAnimationFrame(() => {
+        const viewport = transcriptRef.current;
+        const element = [...(viewport?.querySelectorAll<HTMLElement>("[data-row-key]") || [])]
+          .find((candidate) => candidate.dataset.rowKey === anchor.key);
+        if (viewport && element) viewport.scrollTop += element.getBoundingClientRect().top - viewport.getBoundingClientRect().top - anchor.offset;
+      });
+    } else transcript.scrollTop = saved ?? transcript.scrollHeight;
     followTranscriptRef.current = saved === undefined || isNearTranscriptBottom(transcript);
   }, [activeThreadKey, jobTab]);
 
   useLayoutEffect(() => {
+    if (selectionScrollSuppressionRef.current > 0) {
+      selectionScrollSuppressionRef.current -= 1;
+      return;
+    }
     const transcript = transcriptRef.current;
     const row = transcript?.querySelector<HTMLElement>(`[data-row-index="${selectedRow}"]`);
-    if (!transcript || !row) return;
-
+    if (!transcript) return;
+    if (!row) {
+      rowVirtualizer.scrollToIndex(selectedRow, { align: "auto" });
+      return;
+    }
     const viewport = transcript.getBoundingClientRect();
     const item = row.getBoundingClientRect();
     transcript.scrollTop = nearestTranscriptScrollTop({
@@ -489,7 +676,33 @@ export function App() {
       itemTop: item.top,
       itemBottom: item.bottom,
     });
-  }, [activeThreadKey, jobTab, selectedRow]);
+  }, [activeThreadKey, jobTab, selectedRow, rowVirtualizer]);
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current;
+    const transcript = transcriptRef.current;
+    if (!anchor || !transcript || anchor.threadKey !== activeThreadKey) return;
+    const selectedIndex = anchor.selectedKey ? rows.findIndex((row) => row.key === anchor.selectedKey) : -1;
+    if (selectedIndex >= 0) setNavigation((current) => ({
+      ...current,
+      [activeThreadKey]: { ...navigationForView(current, activeThreadKey, rows.length), selectedRow: selectedIndex },
+    }));
+    const visibleIndex = anchor.visibleKey ? rows.findIndex((row) => row.key === anchor.visibleKey) : -1;
+    prependAnchorRef.current = undefined;
+    if (visibleIndex < 0) return;
+    requestAnimationFrame(() => {
+      rowVirtualizer.scrollToIndex(visibleIndex, { align: "start" });
+      requestAnimationFrame(() => {
+        const viewport = transcriptRef.current;
+        const element = [...(viewport?.querySelectorAll<HTMLElement>("[data-row-key]") || [])]
+          .find((candidate) => candidate.dataset.rowKey === anchor.visibleKey);
+        if (!viewport || !element) return;
+        const actualOffset = element.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
+        viewport.scrollTop += actualOffset - anchor.pixelOffset;
+        scrollPositionsRef.current[activeThreadKey] = viewport.scrollTop;
+      });
+    });
+  }, [rows, activeThreadKey, rowVirtualizer]);
 
   const lastRow = rows[rows.length - 1];
   const outputRevision = lastRow?.kind === "message"
@@ -573,10 +786,31 @@ export function App() {
     const text = prompt.trim();
     if (!text && !images.length) return;
     const attachments = images.map(({ previewUrl: _previewUrl, ...image }) => image);
+    const messageId = globalThis.crypto?.randomUUID?.() || `prompt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     followTranscriptRef.current = true;
-    const sent = send({ type: "prompt", text, attachments, context: context.map((entry) => `${entry.label}\n${entry.text}`) });
+    const sent = send({ type: "prompt", id: messageId, text, attachments, context: context.map((entry) => `${entry.label}\n${entry.text}`) });
     if (!sent) return;
 
+    localPromptIdsRef.current.add(messageId);
+    setSnapshot((current) => {
+      if (!current) return current;
+      const previousTimestamp = current.coordinator.messages.at(-1)?.timestamp ?? 0;
+      const optimistic: TranscriptMessage = {
+        id: messageId,
+        role: "user",
+        text,
+        timestamp: Math.max(Date.now(), previousTimestamp + 1),
+        attachments: attachments.length ? attachments : undefined,
+        promptState: "sending",
+      };
+      return {
+        ...current,
+        coordinator: {
+          ...current.coordinator,
+          messages: appendUnique(current.coordinator.messages, optimistic),
+        },
+      };
+    });
     images.forEach((image) => URL.revokeObjectURL(image.previewUrl));
     imagesRef.current = [];
     setImages([]);
@@ -648,7 +882,7 @@ export function App() {
         <section className="main-panel">
           <div className="view-header">
             <div>
-              <span className="eyebrow">{active.kind === "coordinator" ? "MAIN THREAD" : activeJob ? jobLifecycleLabel(activeJob).toUpperCase() : "WORKER"}</span>
+              <span className="eyebrow">{active.kind === "coordinator" ? "MAIN THREAD · RECONCILIATION & INTEGRATION" : activeJob ? jobLifecycleLabel(activeJob).toUpperCase() : "WORKER"}</span>
               <h1>{active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"}</h1>
             </div>
             {active.kind === "coordinator" && (<>
@@ -677,7 +911,10 @@ export function App() {
                 <Tooltip><TooltipTrigger asChild><Badge className={`isolation-badge ${activeJob.isolation.mode}`}>
                   {isolationLabel(activeJob)} · {shortPath(activeJob.isolation.path)}
                 </Badge></TooltipTrigger><TooltipContent>{activeJob.isolation.path}</TooltipContent></Tooltip>
-                <code>{activeJob.id}</code>
+                <details className="technical-identity">
+                  <summary>Technical identity</summary>
+                  <code>{activeJob.id}</code>
+                </details>
                 <Tabs value={jobTab} onValueChange={(value) => setJobTab(value as JobTab)}>
                   <TabsList className="view-tabs" aria-label="Worker view">
                     <TabsTrigger value="conversation">Conversation</TabsTrigger>
@@ -697,7 +934,7 @@ export function App() {
           {jobTab === "diff" && activeJob ? (
             <DiffView diff={activeJob.diff || ""} />
           ) : jobTab === "review" && activeJob ? (
-            <ReviewView job={activeJob} />
+            <ReviewView job={activeJob} jobs={snapshot?.jobs || []} />
           ) : (
             <ScrollArea
               className="transcript"
@@ -705,7 +942,13 @@ export function App() {
               viewportClassName="transcript-viewport"
               onViewportScroll={(event) => {
                 scrollPositionsRef.current[activeThreadKey] = event.currentTarget.scrollTop;
+                const visible = visibleRowAnchor(event.currentTarget);
+                if (visible) scrollAnchorsRef.current[activeThreadKey] = visible;
                 followTranscriptRef.current = isNearTranscriptBottom(event.currentTarget);
+                if (event.currentTarget.scrollTop <= 80) {
+                  const viewport = event.currentTarget;
+                  requestAnimationFrame(() => { if (viewport.scrollTop <= 80) requestOlder(); });
+                }
               }}
             >
               <div className="transcript-content" ref={transcriptContentRef}>
@@ -715,45 +958,58 @@ export function App() {
                   {active.kind === "coordinator" ? "Type a prompt to start." : "Worker is starting."}
                 </div>
               )}
-              {rows.map((row, index) => row.kind === "message" ? (
-                <article
+              {activePage?.hasOlder
+                ? <div className="transcript-older" role="status" aria-live="polite">Scroll up to load older history</div>
+                : <div className="transcript-older" aria-hidden="true">{"\u00a0"}</div>}
+              <div className="transcript-window" data-row-count={rows.length} style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
+              {virtualRows.map((virtualRow) => {
+                const index = virtualRow.index;
+                const row = rows[index]!;
+                return <div
                   key={row.key}
-                  data-row-index={index}
-                  className={`message ${row.message.role} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
-                  onClick={() => setSelectedRow(index)}
-                >
-                  <div className="message-meta">
-                    <span>{roleLabel(row.message.role)}</span>
-                    <time>{new Date(row.message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
-                    <Button variant="ghost" title="Add to context" onClick={(event) => { event.stopPropagation(); setSelectedRow(index); addMessageToContext(row.message); }}>+context</Button>
-                  </div>
-                  <div className="message-body">
-                    {row.message.text ? <Markdown>{row.message.text}</Markdown> : (!row.message.attachments?.length && <span className="stream-caret">▋</span>)}
-                  </div>
-                  {!!row.message.attachments?.length && <AttachmentGallery attachments={row.message.attachments} />}
-                </article>
-              ) : (
-                <Button
-                  variant="ghost"
-                  key={row.key}
-                  data-row-index={index}
-                  className={`worker-line ${row.job.integration?.status || row.job.status} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
-                  onClick={() => setSelectedRow(index)}
-                  onDoubleClick={() => openJob(row.job)}
-                >
-                  <span className="worker-arrow">→</span>
-                  <span className="worker-status">{jobLifecycleLabel(row.job)}{row.job.attempts?.length ? ` · attempt ${row.job.attempts.length}` : ""}</span>
-
-                  <span className="worker-title">{row.job.title}</span>
-                  {row.job.durationMs !== undefined && <span className="worker-duration">{formatDuration(row.job.durationMs)} total</span>}
-                  <code>{row.job.id}</code>
-                  <span className="worker-open">l</span>
-                </Button>
-              ))}
-              {!!activeActivityHistory?.length && <ActivityHistory activities={activeActivityHistory} />}
-              {activeWorking && (
+                  data-virtual-row=""
+                  data-row-key={row.key}
+                  data-index={index}
+                  ref={rowVirtualizer.measureElement}
+                  style={{ position: "absolute", width: "100%", transform: `translateY(${virtualRow.start}px)` }}
+                >{row.kind === "message" ? (
+                  <article
+                    data-row-index={index}
+                    className={`message ${row.message.role} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
+                    onClick={() => setSelectedRow(index)}
+                  >
+                    <div className="message-meta">
+                      <span>{roleLabel(row.message.role)}</span>
+                      <time>{new Date(row.message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                      {promptStateLabel(row.message) && <span className={`prompt-state ${row.message.promptState}`} title={row.message.promptError}>{promptStateLabel(row.message)}</span>}
+                      <Button variant="ghost" title="Add to context" onClick={(event) => { event.stopPropagation(); setSelectedRow(index); addMessageToContext(row.message); }}>+context</Button>
+                    </div>
+                    {parseWorkerEvent(row.message)
+                      ? <div className="message-body"><WorkerEventCard message={row.message} jobs={snapshot?.jobs || []} /></div>
+                      : <TranscriptMessageBody message={row.message} jobs={snapshot?.jobs || []} />}
+                    {!!row.message.attachments?.length && <AttachmentGallery attachments={row.message.attachments} />}
+                  </article>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    data-row-index={index}
+                    className={`worker-line ${row.job.integration?.status || row.job.status} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
+                    onClick={() => setSelectedRow(index)}
+                    onDoubleClick={() => openJob(row.job)}
+                  >
+                    <span className="worker-arrow">→</span>
+                    <span className="worker-status">{jobLifecycleLabel(row.job)}{row.job.attempts?.length ? ` · attempt ${row.job.attempts.length}` : ""}</span>
+                    <span className="worker-title">{row.job.title}</span>
+                    {row.job.durationMs !== undefined && <span className="worker-duration">{formatDuration(row.job.durationMs)} total</span>}
+                    <span className="worker-open">l</span>
+                  </Button>
+                )}</div>;
+              })}
+              </div>
+              {activeWorking && <>
+                {!!activeActivityHistory?.length && <ActivityHistory activities={activeActivityHistory} />}
                 <WorkingIndicator activity={activeActivity} agentLabel={active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"} />
-              )}
+              </>}
               <div className="transcript-end" aria-hidden="true" />
               </div>
             </ScrollArea>
@@ -793,7 +1049,7 @@ export function App() {
                   if (!clipboardPlainText(event.clipboardData)) event.preventDefault();
                   void addPastedImages(files);
                 } else if (unreadableFileItems) {
-                  setError("The browser reported a clipboard image but did not make its bytes available. Try copying the image again or save it as PNG and paste the file.");
+                  setError("The browser reported a clipboard image but did not make its bytes available. Copy it again or use Attach images.");
                 }
               }}
               onKeyDown={(event) => {
@@ -804,7 +1060,6 @@ export function App() {
               }}
             />
             <div className="composer-actions">
-              <span className={`mode-badge ${mode.toLowerCase()}`}>{mode}</span>
               <div className="runtime-controls" aria-label="Pi runtime settings">
                 <Button variant="outline" type="button" className={`runtime-chip variant-${settings?.variant || "loading"}`} disabled={!settings?.availableVariants.length} onClick={() => send({ type: "cycle_variant" })} title="Cycle Build / Plan (Shift+Tab)">
                   <span>mode</span><strong>{settings?.variant || "loading"}</strong><kbd>⇧Tab</kbd>
@@ -815,8 +1070,23 @@ export function App() {
               </div>
               <span className="muted composer-hint">↵ send · ⇧↵ newline · esc normal</span>
               <div className="action-buttons">
+                <input
+                  ref={imageInputRef}
+                  className="sr-only"
+                  type="file"
+                  accept="image/png,image/jpeg,image/gif,image/webp"
+                  multiple
+                  aria-label="Choose image attachments"
+                  onChange={(event) => {
+                    const files = Array.from(event.currentTarget.files || []);
+                    event.currentTarget.value = "";
+                    if (files.length) void addPastedImages(files);
+                  }}
+                />
+                <Button variant="outline" type="button" className="attach-button" onClick={() => imageInputRef.current?.click()}>
+                  Attach images
+                </Button>
                 <Button className="send-button" disabled={!prompt.trim() && !images.length} onClick={submit}>Send <span>↵</span></Button>
-
               </div>
             </div>
           </div>
@@ -854,19 +1124,44 @@ export function App() {
   );
 }
 
-function JobSidebarRow({ job, active, activityReady, onOpen }: {
+export function TechnicalEvidence({ label = "Technical details", children }: { label?: string; children: ReactNode }) {
+  return <details className="technical-evidence"><summary>{label}</summary><pre>{children}</pre></details>;
+}
+
+function ReadableReviewText({ text, jobs, label, emphasis = false }: {
+  text: string; jobs: AgentJob[]; label: string; emphasis?: boolean;
+}) {
+  const presentation = presentIdentifierText(text, jobs);
+  return <div className="readable-review-text">
+    {emphasis ? <strong>{presentation.primary}</strong> : <span>{presentation.primary}</span>}
+    {presentation.secondary && <small className="identifier-reference">{presentation.secondary}</small>}
+    {presentation.technical && <TechnicalEvidence label={label}>{presentation.technical}</TechnicalEvidence>}
+  </div>;
+}
+
+export function TranscriptMessageBody({ message, jobs }: { message: TranscriptMessage; jobs: AgentJob[] }) {
+  const presentation = presentTranscriptMessage(message, jobs);
+  return <div className={`message-body ${presentation.lifecycle ? "lifecycle-message" : ""}`}>
+    {presentation.primary ? <Markdown>{presentation.primary}</Markdown> : (!message.attachments?.length && <span className="stream-caret">▋</span>)}
+    {presentation.secondary && <small className="identifier-reference">{presentation.secondary}</small>}
+    {presentation.technical && <TechnicalEvidence>{presentation.technical}</TechnicalEvidence>}
+  </div>;
+}
+
+export function JobSidebarRow({ job, active, activityReady, onOpen }: {
   job: AgentJob; active: boolean; activityReady: boolean; onOpen: () => void;
 }) {
-  const live = activityReady && (job.status === "queued" || job.status === "running");
+  const activeState = jobActiveState(job, activityReady);
   const semanticClass = job.integration?.status || job.status;
-  return <Button variant="ghost" className={`job-row ${active ? "active" : ""}`} onClick={onOpen} title={jobLifecycleLabel(job)} aria-current={active ? "page" : undefined}>
-    <span className={`job-glyph ${activityReady || !live ? semanticClass : "disconnected"}`} aria-hidden="true">
+  const statusLabel = activeState?.label || jobLifecycleLabel(job);
+  return <Button variant="ghost" className={`job-row ${active ? "active" : ""}`} onClick={onOpen} title={statusLabel} aria-current={active ? "page" : undefined}>
+    <span className={`job-glyph ${activeState ? "in-progress" : semanticClass}`} aria-hidden="true">
       {job.integration?.status === "merged" ? "✓" : statusGlyph(job.status)}
     </span>
-    <span><strong>{job.title}</strong><small>{live
-      ? <>{job.activity?.description || "Working"} {job.activity && <ActivityDuration activity={job.activity} />}</>
+    <span><strong>{job.title}</strong><small>{activeState
+      ? <>{activeState.label}{activeState.kind === "worker" && job.activity && <> <ActivityDuration activity={job.activity} /></>}</>
       : <>{jobLifecycleLabel(job)} · {isolationLabel(job)}{job.durationMs !== undefined ? ` · ${formatDuration(job.durationMs)} total` : ""}</>}</small></span>
-    <span className="sr-only">Status: {jobLifecycleLabel(job)}</span>
+    <span className="sr-only">Status: {statusLabel}</span>
   </Button>;
 }
 
@@ -905,16 +1200,24 @@ function WorkingIndicator({ activity: current, agentLabel }: { activity?: AgentA
   </div>;
 }
 
-function ReviewView({ job }: { job: AgentJob }) {
+export function ReviewView({ job, jobs = [job] }: { job: AgentJob; jobs?: AgentJob[] }) {
   const review = job.review;
   if (!review) return <div className="review-view"><h2>Awaiting successful completion</h2><p>Completion will hand evidence to the main coordinator; it will not auto-judge or auto-merge.</p></div>;
   return <div className="review-view">
     <header><span className={`review-status ${review.status}`}>{review.status.replaceAll("_", " ")}</span><span>coordinator-owned · attempt {review.attempt} · target {review.targetBranch}</span></header>
-    {job.handoff && <><h2>Worker handoff · round {job.handoff.round}</h2><p>{job.handoff.report}</p><code>diff sha256 {job.handoff.diffSha256}</code></>}
-    {review.error && <pre className="review-error">{review.error}</pre>}
+    {job.handoff && <section className="handoff-evidence">
+      <h2>Worker handoff · round {job.handoff.round}</h2>
+      <ReadableReviewText text={job.handoff.report} jobs={jobs} label="Exact worker report" />
+      <p><strong>Requirements:</strong> {job.handoff.requirements.join("; ") || "Not extracted"}</p>
+      <p><strong>Tests:</strong> {job.handoff.tests.join("; ") || "Not reported"}</p>
+      <p><strong>Risks:</strong> {job.handoff.risks.join("; ") || "None reported"}</p>
+      <p className="identifier-reference">Reviewed changes · {shortReference(job.handoff.diffSha256)}</p>
+      <TechnicalEvidence label="Exact handoff evidence">{`diff sha256 ${job.handoff.diffSha256}\nbranch ${job.handoff.branch}\nworktree ${job.handoff.worktree}`}</TechnicalEvidence>
+    </section>}
+    {review.error && <><p className="review-error">Review needs attention.</p><TechnicalEvidence label="Exact review error">{review.error}</TechnicalEvidence></>}
     {review.remediation?.actions.length ? <>
       <h2>Action-required remediation</h2>
-      <div className="check-list">{review.remediation.actions.map((action) => <details key={action.id} open={action.id === review.remediation?.currentActionId} className={action.state === "resolved" ? "pass" : "fail"}>
+      <div className="check-list">{review.remediation.actions.map((action) => <details key={action.id} className={action.state === "resolved" ? "pass" : "fail"}>
         <summary>{action.failureClass.replaceAll("_", " ")} · {action.state} · repair {action.attempt}/{action.maxAttempts}</summary>
         <pre>{action.evidence.detail}</pre>
         {action.feedback && <p><strong>Coordinator feedback:</strong> {action.feedback}</p>}
@@ -926,23 +1229,40 @@ function ReviewView({ job }: { job: AgentJob }) {
     <h2>Independent Pi judge</h2>
     {review.judge ? <section className="judge-evidence">
       <p><strong>{review.judge.approved ? "APPROVED" : "REJECTED"}</strong> · {review.judge.model.provider}/{review.judge.model.id}</p>
-      <p>{review.judge.summary}</p>
-      <code>diff sha256 {review.judge.diffSha256}</code>
-      <ul>{review.judge.requirements.map((item, index) => <li key={index} className={item.satisfied ? "pass" : "fail"}><b>{item.satisfied ? "✓" : "×"} {item.requirement}</b><span>{item.evidence}</span></li>)}</ul>
+      <ReadableReviewText text={review.judge.summary} jobs={jobs} label="Exact judge summary" />
+      <p className="identifier-reference">Reviewed changes · {shortReference(review.judge.diffSha256)}</p>
+      <TechnicalEvidence label="Exact judge evidence">diff sha256 {review.judge.diffSha256}</TechnicalEvidence>
+      <ul>{review.judge.requirements.map((item, index) => <li key={index} className={item.satisfied ? "pass" : "fail"}>
+        <span aria-hidden="true">{item.satisfied ? "✓" : "×"}</span><ReadableReviewText text={item.requirement} jobs={jobs} label="Exact requirement" emphasis />
+        <ReadableReviewText text={item.evidence} jobs={jobs} label="Exact requirement evidence" />
+      </li>)}</ul>
     </section> : <p className="muted">No structured verdict yet.</p>}
     <h2>Reconciliation</h2>
-    <p>{review.mergeCommit ? `commit ${review.mergeCommit}` : "Not reconciled."}</p>
+    {review.mergeCommit ? <><p>Integrated · {shortReference(review.mergeCommit)}</p><TechnicalEvidence label="Exact integration evidence">commit {review.mergeCommit}</TechnicalEvidence></> : <p>Not reconciled.</p>}
     <CheckList checks={review.postMergeCi} empty="Post-merge checks have not run." />
     <h2>Transition log</h2>
-    <ol className="transition-log">{review.transitions.map((entry, index) => <li key={index}><time>{new Date(entry.at).toLocaleTimeString()}</time><b>{entry.owner || "server"} · {entry.status}</b><span>{entry.detail}</span></li>)}</ol>
+    <ol className="transition-log">{review.transitions.map((entry, index) => <li key={index}><time>{new Date(entry.at).toLocaleTimeString()}</time><b>{entry.status.replaceAll("_", " ")}</b><span>{entry.owner || "server"}</span>{entry.detail && <details><summary>Technical details</summary><pre>{entry.detail}</pre></details>}</li>)}</ol>
   </div>;
+}
+
+function checkCommandLabel(command: string): string {
+  if (/\bgit\s+diff\s+--check\b/i.test(command)) return "Diff validation";
+  if (/\bgit\s+status\b/i.test(command)) return "Clean worktree validation";
+  if (/\bnpm\s+(?:run\s+)?test\b/i.test(command)) return "Tests";
+  if (/\bnpm\s+run\s+check\b/i.test(command)) return "Type and consistency checks";
+  if (/\bnpm\s+run\s+build\b/i.test(command)) return "Production build";
+  if (/\bnpm\s+(?:ci|install)\b/i.test(command)) return "Install dependencies";
+  return presentIdentifierText(command, []).primary;
 }
 
 function CheckList({ checks, empty = "No checks recorded." }: { checks?: NonNullable<AgentJob["review"]>["ci"]; empty?: string }) {
   if (!checks?.length) return <p className="muted">{empty}</p>;
   return <div className="check-list">{checks.map((check, index) => <details key={index} className={check.ok ? "pass" : "fail"}>
-    <summary>{check.ok ? "✓" : "×"} {check.command} <span>{check.durationMs}ms{check.timedOut ? " · timed out" : ""}{check.truncated ? " · truncated" : ""}</span></summary>
-    <pre>{check.output || "(no output)"}</pre>
+    <summary>{check.ok ? "✓" : "×"} {checkCommandLabel(check.command)} <span>{check.durationMs}ms{check.timedOut ? " · timed out" : ""}{check.truncated ? " · truncated" : ""}</span></summary>
+    <div className="check-technical-evidence">
+      <strong>Exact command</strong><pre>{check.command}</pre>
+      <strong>Exact output</strong><pre>{check.output || "(no output)"}</pre>
+    </div>
   </details>)}</div>;
 }
 

@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .vite/
+playwright-report/
+test-results/
 *.log
 .DS_Store
 apps/desktop/src-tauri/target/

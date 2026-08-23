@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AgentActivity, AgentJob, MaintenanceStatus, TranscriptMessage } from "@neocode/protocol";
+import type { AgentActivity, AgentJob, MaintenanceStatus, PromptSettlementSnapshot, TranscriptMessage } from "@neocode/protocol";
 
 
 export const RUNTIME_STATE_VERSION = 1;
@@ -19,6 +19,9 @@ export interface CoordinatorWorkerEvent {
   jobId: string;
   kind: CoordinatorWorkerEventKind;
   text: string;
+  /** Concise UI text stored alongside, never instead of, raw event evidence. */
+  summary?: string;
+  title?: string;
   createdAt: number;
   messageId: string;
   wakeRequested: boolean;
@@ -33,6 +36,17 @@ export interface CoordinatorNotificationState {
   lastSignals: Record<string, string>;
 }
 
+export interface DurableCoordinatorPrompt {
+  messageId: string;
+  context: string[];
+  mode: "build" | "plan";
+  createdAt: number;
+  state: "queued" | "processing" | "responded";
+  /** Durable correlation checkpoint written with the completed assistant turn. */
+  responseMessageId?: string;
+  responseCompletedAt?: number;
+}
+
 export interface DurableRuntimeState {
   version: typeof RUNTIME_STATE_VERSION;
   workspaceRoot: string;
@@ -42,6 +56,9 @@ export interface DurableRuntimeState {
     activity?: AgentActivity;
     activityHistory?: AgentActivity[];
     piSessionFile?: string;
+    /** Prompts accepted by the server but not yet settled by the coordinator. */
+    pendingPrompts?: DurableCoordinatorPrompt[];
+    promptSettlement?: PromptSettlementSnapshot;
   };
   maintenance?: MaintenanceStatus;
   coordinatorNotifications?: CoordinatorNotificationState;
@@ -65,6 +82,19 @@ function isRuntimeState(value: unknown, workspaceRoot: string): value is Durable
     && !!candidate.coordinator
     && Array.isArray(candidate.coordinator.messages)
     && candidate.coordinator.messages.every((message) => !!message && typeof message.id === "string" && typeof message.text === "string")
+    && (candidate.coordinator.promptSettlement === undefined || (typeof candidate.coordinator.promptSettlement.throughTimestamp === "number"
+      && Array.isArray(candidate.coordinator.promptSettlement.failures)
+      && candidate.coordinator.promptSettlement.failures.every((failure) => !!failure
+        && typeof failure.messageId === "string" && typeof failure.error === "string")))
+    && (candidate.coordinator.pendingPrompts === undefined || (Array.isArray(candidate.coordinator.pendingPrompts)
+      && candidate.coordinator.pendingPrompts.every((prompt) => !!prompt
+        && typeof prompt.messageId === "string"
+        && Array.isArray(prompt.context) && prompt.context.every((entry) => typeof entry === "string")
+        && (prompt.mode === "build" || prompt.mode === "plan")
+        && (prompt.state === "queued" || prompt.state === "processing" || prompt.state === "responded")
+        && (prompt.responseMessageId === undefined || typeof prompt.responseMessageId === "string")
+        && (prompt.responseCompletedAt === undefined || typeof prompt.responseCompletedAt === "number")
+        && (prompt.state !== "responded" || typeof prompt.responseCompletedAt === "number"))))
     && Array.isArray(candidate.jobs)
     && candidate.jobs.every((entry) => {
       if (!entry || typeof entry !== "object" || !entry.job || typeof entry.job !== "object") return false;
@@ -83,9 +113,15 @@ function isRuntimeState(value: unknown, workspaceRoot: string): value is Durable
 export class RuntimeStateStore {
   readonly root: string;
   readonly path: string;
-  private latest?: DurableRuntimeState;
+  private latest?: { state: DurableRuntimeState; generation: number };
   private writing?: Promise<void>;
-  private writeError?: unknown;
+  private generation = 0;
+  private readonly completions = new Map<number, {
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  }>();
+  private currentOutcome?: { generation: number; error?: unknown };
 
   constructor(readonly workspaceRoot: string) {
     this.root = runtimeRoot(workspaceRoot);
@@ -105,38 +141,60 @@ export class RuntimeStateStore {
 
   /** Coalesce streaming updates while still serializing every atomic replace. */
   save(state: DurableRuntimeState): void {
-    this.latest = structuredClone(state);
+    const generation = ++this.generation;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((onResolve, onReject) => { resolve = onResolve; reject = onReject; });
+    // Fire-and-forget saves must not create an unhandled rejection; flush()
+    // still awaits the original operation-scoped promise.
+    void promise.catch(() => undefined);
+    this.completions.set(generation, { promise, resolve, reject });
+    this.latest = { state: structuredClone(state), generation };
     if (!this.writing) this.startDrain();
   }
 
   async flush(): Promise<void> {
-    while (this.writing) await this.writing;
-    if (this.writeError) {
-      const error = this.writeError;
-      this.writeError = undefined;
-      throw error;
+    const target = this.generation;
+    if (!target) return;
+    const pending = this.completions.get(target);
+    if (pending) return pending.promise;
+    if (this.currentOutcome?.generation === target) {
+      if (this.currentOutcome.error !== undefined) throw this.currentOutcome.error;
+      return;
     }
+    throw new Error(`Runtime state generation ${target} has no completion outcome.`);
   }
 
   private startDrain(): void {
-    this.writing = this.drain().catch((error: unknown) => {
-      // Save is intentionally fire-and-forget; retain the error for an explicit
-      // lifecycle flush without creating an unhandled rejection.
-      this.writeError = error;
+    // Start in a microtask so synchronous/concurrent saves can share one atomic
+    // write and, critically, one non-consumable completion outcome.
+    this.writing = Promise.resolve().then(() => this.drain()).finally(() => {
+      this.writing = undefined;
+      if (this.latest) this.startDrain();
     });
   }
 
+  private settleThrough(generation: number, error?: unknown): void {
+    for (const [candidate, completion] of this.completions) {
+      if (candidate > generation) continue;
+      if (error === undefined) completion.resolve();
+      else completion.reject(error);
+      this.completions.delete(candidate);
+    }
+    this.currentOutcome = { generation, ...(error === undefined ? {} : { error }) };
+  }
+
   private async drain(): Promise<void> {
-    try {
-      while (this.latest) {
-        const state = this.latest;
-        this.latest = undefined;
+    while (this.latest) {
+      const { state, generation } = this.latest;
+      this.latest = undefined;
+      try {
         await this.writeAtomic(state);
+        this.settleThrough(generation);
+      } catch (error) {
+        this.settleThrough(generation, error);
+        return;
       }
-    } finally {
-      this.writing = undefined;
-      // A save can race the finally block after the loop condition.
-      if (this.latest) this.startDrain();
     }
   }
 

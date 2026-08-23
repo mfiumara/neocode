@@ -14,11 +14,20 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Candidate checks validate the complete PR range, never a shallow
+          # HEAD^ fallback that can omit earlier feature commits.
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Install Chromium and Linux browser dependencies
+        run: npx playwright install --with-deps chromium
       - run: npm test
-      - run: npm run check
+      - name: Check types, complete base diff, and clean status
+        run: npm run check
+        env:
+          NEOCODE_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       - run: npm run build

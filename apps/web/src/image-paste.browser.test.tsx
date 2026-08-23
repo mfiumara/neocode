@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { File } from "node:buffer";
 import { JSDOM } from "jsdom";
-import type { AppSnapshot } from "@neocode/protocol";
+import type { AppSnapshot, ImageAttachment } from "@neocode/protocol";
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const pngBytes = Buffer.from(pngBase64, "base64");
@@ -47,7 +47,7 @@ async function settle(act: (callback: () => void | Promise<void>) => Promise<voi
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
 }
 
-test("the React textarea paste path handles item MIME quirks, files fallback, text, previews, and image-only send", async () => {
+test("the React composer preserves image prompts and deduplicates durable lifecycle truth after reconnect", async () => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost/" });
   const previous = new Map<string, PropertyDescriptor | undefined>();
   for (const [key, value] of Object.entries({
@@ -120,12 +120,57 @@ test("the React textarea paste path handles item MIME quirks, files fallback, te
 
     // Empty text with one image remains sendable and serializes the normalized attachment.
     await act(async () => (document.querySelector<HTMLButtonElement>(".send-button")!).click());
-    const sent = JSON.parse(socket.sent.at(-1)!) as { text: string; attachments: Array<{ mimeType: string; data: string }> };
+    const sent = JSON.parse(socket.sent.at(-1)!) as { id: string; text: string; attachments: ImageAttachment[] };
     assert.equal(sent.text, "");
     assert.equal(sent.attachments[0]?.mimeType, "image/png");
     assert.equal(sent.attachments[0]?.data, pngBase64);
+    assert.equal(document.querySelector(".prompt-state")?.textContent, "sending…", "submitted prompts render before backend acknowledgement");
     assert.equal(document.querySelectorAll(".attachment-preview").length, 0);
     assert.equal(revoked.length, 2);
+
+    // A disconnect before acknowledgement is visibly uncertain, then the
+    // reconnect snapshot becomes authoritative without duplicating the row.
+    await act(async () => socket.onclose?.());
+    assert.equal(document.querySelector(".prompt-state")?.textContent, "send failed");
+    assert.match(document.querySelector(".prompt-state")?.getAttribute("title") || "", /may not have been received/);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
+    const reconnected = MockSocket.instances.at(-1)!;
+    const durablePrompt = {
+      id: sent.id, role: "user" as const, text: "", timestamp: 2,
+      attachments: [{ ...sent.attachments[0]!, id: "queued-image", size: pngBytes.length, name: "queued.png" }],
+      promptState: "queued" as const,
+    };
+    const reconnectSnapshot = snapshot();
+    reconnectSnapshot.coordinator.messages.push(durablePrompt);
+    await act(async () => reconnected.onmessage?.(new dom.window.MessageEvent("message", {
+      data: JSON.stringify({ type: "snapshot", snapshot: reconnectSnapshot }),
+    }) as unknown as MessageEvent));
+    assert.equal(document.querySelector(".prompt-state")?.textContent, "queued");
+    assert.equal(document.querySelectorAll("article.message.user").length, 2, "durable reconnect acknowledgement deduplicates the optimistic row");
+    assert.equal(document.querySelectorAll<HTMLImageElement>("article.message.user img")[1]?.alt, "queued.png");
+
+    reconnectSnapshot.coordinator.messages[1] = { ...durablePrompt, promptState: "processing" };
+    await act(async () => reconnected.onmessage?.(new dom.window.MessageEvent("message", {
+      data: JSON.stringify({ type: "snapshot", snapshot: reconnectSnapshot }),
+    }) as unknown as MessageEvent));
+    assert.equal(document.querySelector(".prompt-state")?.textContent, "processing");
+
+    reconnectSnapshot.coordinator.messages[1] = { ...durablePrompt, promptState: undefined };
+    await act(async () => reconnected.onmessage?.(new dom.window.MessageEvent("message", {
+      data: JSON.stringify({ type: "snapshot", snapshot: reconnectSnapshot }),
+    }) as unknown as MessageEvent));
+    assert.equal(document.querySelector(".prompt-state"), null, "settled durable truth clears temporary failure and pending state");
+    assert.equal(document.querySelectorAll("article.message.user").length, 2);
+
+    await act(async () => reconnected.onmessage?.(new dom.window.MessageEvent("message", { data: JSON.stringify({
+      type: "coordinator_message",
+      message: { id: "failed-prompt", role: "user", text: "fails", timestamp: 3, promptState: "queued" },
+    }) }) as unknown as MessageEvent));
+    await act(async () => reconnected.onmessage?.(new dom.window.MessageEvent("message", { data: JSON.stringify({
+      type: "coordinator_prompt_failed", messageId: "failed-prompt", error: "queue rejected",
+    }) }) as unknown as MessageEvent));
+    assert.equal(document.querySelector(".prompt-state.failed")?.textContent, "send failed");
+    assert.match(document.querySelector(".error-toast")?.textContent || "", /queue rejected/);
 
     // Bad clipboard metadata/data is not silent: the composer shows a useful error.
     const badFile = new File(["not an image"], "broken.png", { type: "image/png" }) as unknown as globalThis.File;

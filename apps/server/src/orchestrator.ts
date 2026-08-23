@@ -26,13 +26,16 @@ import {
   type ModelChoice,
   type ModelRef,
   type MaintenanceStatus,
+  type PromptSettlementSnapshot,
   type RequestedIsolationMode,
   type ServerMessage,
   type TranscriptMessage,
+  type TranscriptThread,
 } from "@neocode/protocol";
 import { activity, ActivityTimeline, toolActivity } from "./activity.js";
 import { CompletionPipeline, LocalReviewAdapter, readWorktreeDiff } from "./completion-pipeline.js";
 import { CoordinatorNotificationQueue } from "./coordinator-notifications.js";
+import { checkpointPromptResponse, queuedCoordinatorPrompt, reconcileRestoredPromptStates, setPromptProcessing, settlePrompt } from "./coordinator-prompt-state.js";
 import { imagesForPi } from "./image-attachments.js";
 
 
@@ -52,9 +55,11 @@ import {
   RuntimeStateStore,
   type CoordinatorNotificationState,
   type CoordinatorWorkerEvent,
+  type DurableCoordinatorPrompt,
   type DurableRuntimeState,
 } from "./runtime-state.js";
 import { OperationLock, WorktreeJanitor } from "./worktree-janitor.js";
+import { transcriptPage } from "./transcript-pagination.js";
 import { integrationComplexityScore } from "./integration-priority.js";
 
 const execFileAsync = promisify(execFile);
@@ -80,12 +85,31 @@ export interface MaintenanceConfig {
   startup?: boolean;
 }
 
-const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "mark_not_required", "reconcile_jobs", "clean_worktrees"];
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "verify_integration", "mark_not_required", "reconcile_jobs", "clean_worktrees"];
 const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
 const VARIANTS: AgentVariant[] = ["build", "plan"];
 
 function id(): string {
   return randomUUID();
+}
+
+export function executeCoordinatorGuardedMerge(
+  pipeline: Pick<CompletionPipeline, "requestMerge">,
+  capability: symbol,
+  requireJob: (jobId: string) => AgentJob,
+  jobId: string,
+) {
+  pipeline.requestMerge(requireJob(jobId), capability);
+  return { content: [{ type: "text" as const, text: `Coordinator authorized guarded rebased fast-forward for ${jobId}.` }], details: { jobId } };
+}
+
+export function workerSystemPrompt(base: string | undefined, job: Pick<AgentJob, "isolation">): string {
+  const inWorktree = job.isolation.mode === "worktree";
+  const checkout = inWorktree ? "an isolated git worktree" : "the explicitly selected shared root checkout";
+  const assignment = inWorktree
+    ? "Complete the assigned task autonomously, including edits when requested. Keep all implementation and conflict-resolution edits inside this assigned checkout; never mutate root/main."
+    : "Root isolation remains recorded as requested, but background workers are read-only there: inspect and report only; do not edit or mutate the shared checkout.";
+  return `${base ?? ""}\n\n# Neocode background worker\nYou are a background worker running in ${checkout} at ${job.isolation.path}. ${assignment} You never merge or advance the main ref, launch a judge, judge the work yourself, or directly start integration; only the MAIN coordinator owns those decisions and tool calls. Run relevant checks. Do not ask conversational questions unless completely blocked. End with a structured, concise handoff covering requirements, changes, tests, and unresolved risks.`;
 }
 
 function normalizeActivityTiming(value: AgentActivity): AgentActivity {
@@ -156,6 +180,13 @@ export class Orchestrator {
   private readonly workerConfigs = new Map<string, WorkerConfig>();
   private readonly workerTimelines = new Map<string, ActivityTimeline>();
   private readonly coordinatorMessages: TranscriptMessage[] = [];
+  private readonly pendingCoordinatorPrompts: DurableCoordinatorPrompt[] = [];
+  private readonly acceptingCoordinatorPromptIds = new Set<string>();
+  private promptDrain?: Promise<void>;
+  private coordinatorPromptDrainBlocked = false;
+  private activeCoordinatorPromptId?: string;
+  private promptResponseCheckpoint?: { messageId: string; flushed: Promise<void> };
+  private promptSettlement: PromptSettlementSnapshot = { throughTimestamp: 0, failures: [] };
   private readonly coordinatorActivityHistory: AgentActivity[] = [];
   private readonly coordinatorTimeline = new ActivityTimeline(undefined, this.coordinatorActivityHistory);
   private readonly piSessionFiles = new Map<string, string>();
@@ -174,6 +205,7 @@ export class Orchestrator {
   private modelRuntime!: ModelRuntime;
   private coordinator!: AgentSession;
   private completionPipeline!: CompletionPipeline;
+  readonly #coordinatorMergeCapability = Symbol("main coordinator guarded integration");
   private readonly operationLock = new OperationLock();
   private readonly janitor: WorktreeJanitor;
   private maintenance: MaintenanceStatus = { state: "idle" };
@@ -218,6 +250,18 @@ export class Orchestrator {
     const restored = await this.stateStore.load();
     if (restored) {
       this.coordinatorMessages.push(...restored.coordinator.messages);
+      this.pendingCoordinatorPrompts.push(...(restored.coordinator.pendingPrompts || []).map((entry) => ({
+        ...entry,
+        context: [...entry.context],
+      })));
+      this.promptSettlement = structuredClone(restored.coordinator.promptSettlement || this.promptSettlement);
+      const respondedTimestamps = this.pendingCoordinatorPrompts
+        .filter((entry) => entry.state === "responded")
+        .map((entry) => entry.createdAt);
+      reconcileRestoredPromptStates(this.coordinatorMessages, this.pendingCoordinatorPrompts);
+      if (respondedTimestamps.length) this.promptSettlement.throughTimestamp = Math.max(
+        this.promptSettlement.throughTimestamp, ...respondedTimestamps,
+      );
       this.coordinatorActivityHistory.push(...(restored.coordinator.activityHistory || []).map(normalizeActivityTiming));
       if (restored.coordinator.activity) {
         const completedAt = Date.now();
@@ -336,7 +380,28 @@ export class Orchestrator {
       {
         name: "guarded_merge", label: "Guarded fast-forward", description: "Authorize serialized integration of the exact rebased diff with --ff-only after fresh judge approval.",
         parameters: Type.Object({ jobId: Type.String() }),
-        execute: async (_callId: string, params: { jobId: string }) => { this.completionPipeline.requestMerge(this.requireJob(params.jobId)); return { content: [{ type: "text" as const, text: `Coordinator authorized guarded rebased fast-forward for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
+        execute: async (_callId: string, params: { jobId: string }) => executeCoordinatorGuardedMerge(
+          this.completionPipeline, this.#coordinatorMergeCapability, (jobId) => this.requireJob(jobId), params.jobId,
+        ),
+      },
+      {
+        name: "verify_integration", label: "Verify integration", description: "Verify one job against main and return its persisted merge and CI evidence without authorizing a merge.",
+        parameters: Type.Object({ jobId: Type.String() }),
+        execute: async (_callId: string, params: { jobId: string }) => {
+          await this.reconcileIntegratedJobs();
+          const job = this.requireJob(params.jobId);
+          if (job.integration?.status !== "merged") throw new Error(`Job ${params.jobId} is not verified on main.`);
+          const evidence = {
+            jobId: job.id,
+            targetRef: job.integration.targetRef,
+            targetHead: job.integration.targetHead,
+            completionHead: job.integration.completionHead,
+            verifiedAt: job.integration.verifiedAt,
+            reviewedDiffSha256: job.review?.judge?.diffSha256,
+            checks: job.review?.postMergeCi || [],
+          };
+          return { content: [{ type: "text" as const, text: `Verified ${job.id} on ${evidence.targetRef || "main"} at ${evidence.targetHead || "unknown head"}.` }], details: evidence };
+        },
       },
       {
         name: "mark_not_required", label: "Mark not required", description: "Mark clean committed work as superseded only when a replacement job or commit is already verified on main. The branch is retained.",
@@ -400,7 +465,7 @@ export class Orchestrator {
       targetBranch,
       judge: (job, diff, diffSha256) => this.runJudge(job, diff, diffSha256),
     });
-    this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock);
+    this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock, this.#coordinatorMergeCapability);
     await this.reconcileIntegratedJobs(targetBranch);
     this.coordinatorNotifications = new CoordinatorNotificationQueue(this.notificationState, {
       append: (event) => this.appendCoordinatorWorkerEvent(event),
@@ -425,7 +490,7 @@ export class Orchestrator {
     // recovery is visible without replaying side effects.
     for (const job of this.listJobs()) this.coordinatorNotifications.observe(job);
     this.persist();
-    this.coordinatorNotifications.settled();
+    if (!this.pendingCoordinatorPrompts.length) this.coordinatorNotifications.settled();
     await this.resumeRestoredJobs();
     if (this.maintenanceConfig.startup) this.startCleanup("startup");
     if (this.maintenanceConfig.intervalMs > 0) {
@@ -437,47 +502,168 @@ export class Orchestrator {
       this.sweepTimer.unref();
       this.scheduleBacklogSweep();
     }
+    this.schedulePromptDrain();
 
   }
 
   snapshot(): AppSnapshot {
+    const coordinatorWindow = transcriptPage(this.coordinatorMessages);
     return {
       cwd: this.cwd,
       coordinator: {
         status: this.coordinatorStatus,
         activity: this.coordinatorActivity,
         activityHistory: [...this.coordinatorActivityHistory],
-        messages: [...this.coordinatorMessages],
+        messages: coordinatorWindow.messages,
+        transcriptPage: coordinatorWindow.page,
+        promptSettlement: structuredClone(this.promptSettlement),
         settings: this.settings(),
         model: this.currentModel(),
         models: this.modelChoices(),
       },
-      jobs: this.listJobs(),
+      jobs: this.listJobs().map((job) => this.transportJob(job)),
       maintenance: { ...this.maintenance },
     };
   }
 
-  async prompt(text: string, context: string[] = [], attachments: ImageAttachment[] = []): Promise<void> {
-    const modeInstruction = this.coordinatorVariant === "plan"
-      ? "<neocode-mode>PLAN: investigate and propose a plan only. Do not delegate implementation.</neocode-mode>"
-      : "<neocode-mode>BUILD: implementation work may be delegated to background workers.</neocode-mode>";
-    const content = `${text}${context.length
-      ? `\n\n<context-basket>\n${context.join("\n\n---\n\n")}\n</context-basket>`
-      : ""}\n\n${modeInstruction}`;
+  transcriptPage(thread: TranscriptThread, before?: string, limit?: number) {
+    const source = thread.kind === "coordinator"
+      ? this.coordinatorMessages
+      : this.jobs.get(thread.jobId)?.messages;
+    if (!source) throw new Error("Unknown transcript thread.");
+    return transcriptPage(source, before, limit);
+  }
 
-    const userMessage: TranscriptMessage = { id: id(), role: "user", text, timestamp: Date.now(), attachments: attachments.length ? attachments : undefined };
+  private transportJob(job: AgentJob): AgentJob {
+    const window = transcriptPage(job.messages);
+    // Exclude the durable transcript before cloning metadata. Cloning the full
+    // job and then replacing messages makes every update O(total history).
+    const { messages: _durableMessages, transcriptPage: _transportPage, ...metadata } = job;
+    return { ...structuredClone(metadata), messages: window.messages, transcriptPage: window.page };
+  }
+
+  async prompt(text: string, context: string[] = [], attachments: ImageAttachment[] = [], requestId?: string): Promise<void> {
+    const messageId = requestId || id();
+    // A reconnecting client may retry an accepted command. Its client id is the
+    // durable idempotency key, so neither transcript nor queue can duplicate it.
+    if (this.coordinatorMessages.some((message) => message.id === messageId)) return;
+    const { message: userMessage, pending } = queuedCoordinatorPrompt({
+      id: messageId,
+      text,
+      context,
+      attachments,
+      mode: this.coordinatorVariant,
+      now: Date.now(),
+      previousTimestamp: this.coordinatorMessages.at(-1)?.timestamp,
+    });
     this.coordinatorMessages.push(userMessage);
+    this.pendingCoordinatorPrompts.push(pending);
+    this.acceptingCoordinatorPromptIds.add(messageId);
     this.persist();
-    this.emit({ type: "coordinator_message", message: userMessage });
-
     try {
-      await this.coordinator.prompt(content, {
-        ...(attachments.length ? { images: imagesForPi(attachments) } : {}),
-        ...(this.coordinator.isStreaming ? { streamingBehavior: "steer" as const } : {}),
-      });
+      // Queue acknowledgement is acceptance truth, so it must never race the
+      // atomic durable write that makes this prompt recoverable.
+      await this.stateStore.flush();
     } catch (error) {
-      if (!this.coordinatorAborting) this.fail(error);
+      this.acceptingCoordinatorPromptIds.delete(messageId);
+      this.pendingCoordinatorPrompts.splice(this.pendingCoordinatorPrompts.indexOf(pending), 1);
+      this.coordinatorMessages.splice(this.coordinatorMessages.indexOf(userMessage), 1);
+      this.persist();
+      throw error;
     }
+    this.acceptingCoordinatorPromptIds.delete(messageId);
+    this.emit({ type: "coordinator_message", message: { ...userMessage } });
+    this.schedulePromptDrain();
+  }
+
+  private schedulePromptDrain(): void {
+    if (this.promptDrain || this.coordinatorPromptDrainBlocked || !this.coordinator) return;
+    this.promptDrain = this.drainCoordinatorPrompts().finally(() => {
+      this.promptDrain = undefined;
+      const head = this.pendingCoordinatorPrompts[0];
+      if (head && !this.coordinatorPromptDrainBlocked && !this.acceptingCoordinatorPromptIds.has(head.messageId)
+        && this.coordinatorStatus !== "running" && this.coordinator.isIdle) this.schedulePromptDrain();
+    });
+  }
+
+  private async drainCoordinatorPrompts(): Promise<void> {
+    while (this.pendingCoordinatorPrompts.length
+      && !this.acceptingCoordinatorPromptIds.has(this.pendingCoordinatorPrompts[0]!.messageId)
+      && this.coordinatorStatus !== "running" && this.coordinator.isIdle) {
+      const pending = this.pendingCoordinatorPrompts[0]!;
+      const message = this.coordinatorMessages.find((entry) => entry.id === pending.messageId);
+      if (!message) {
+        this.pendingCoordinatorPrompts.shift();
+        this.persist();
+        continue;
+      }
+      setPromptProcessing(message, pending);
+      this.activeCoordinatorPromptId = pending.messageId;
+      this.promptResponseCheckpoint = undefined;
+      this.persist();
+      this.emit({ type: "coordinator_message_updated", message: { ...message } });
+
+      const modeInstruction = pending.mode === "plan"
+        ? "<neocode-mode>PLAN: investigate and propose a plan only. Do not delegate implementation.</neocode-mode>"
+        : "<neocode-mode>BUILD: implementation work may be delegated to background workers.</neocode-mode>";
+      const content = `${message.text}${pending.context.length
+        ? `\n\n<context-basket>\n${pending.context.join("\n\n---\n\n")}\n</context-basket>`
+        : ""}\n\n${modeInstruction}`;
+      try {
+        await this.coordinator.prompt(content, message.attachments?.length ? { images: imagesForPi(message.attachments) } : undefined);
+        // Persist a completed-response checkpoint before removing the queue
+        // entry. If the backend dies in this window, startup settles without
+        // replaying a turn whose assistant response was already durable.
+        if (pending.state !== "responded") {
+          checkpointPromptResponse(pending);
+          this.persist();
+          this.promptResponseCheckpoint = { messageId: pending.messageId, flushed: this.stateStore.flush() };
+        }
+        if (this.promptResponseCheckpoint?.messageId === pending.messageId) await this.promptResponseCheckpoint.flushed;
+        this.pendingCoordinatorPrompts.shift();
+        settlePrompt(message);
+        this.recordPromptSettlement(message);
+        this.activeCoordinatorPromptId = undefined;
+        this.promptResponseCheckpoint = undefined;
+        this.persist();
+        this.emit({ type: "coordinator_message_updated", message: { ...message } });
+      } catch (error) {
+        this.pendingCoordinatorPrompts.shift();
+        this.activeCoordinatorPromptId = undefined;
+        this.promptResponseCheckpoint = undefined;
+        const promptError = error instanceof Error ? error.message : String(error);
+        settlePrompt(message, promptError);
+        this.recordPromptSettlement(message, promptError);
+        this.persist();
+        try {
+          // Terminal backend failure is authoritative only after the failed row,
+          // settlement watermark, and queue removal share one durable write.
+          await this.stateStore.flush();
+        } catch (persistenceError) {
+          // Fail closed: expose neither terminal prompt events nor later FIFO
+          // progress when the claimed durable failure did not commit.
+          this.coordinatorPromptDrainBlocked = true;
+          if (!this.coordinatorAborting) this.fail(persistenceError);
+          break;
+        }
+        this.emit({ type: "coordinator_message_updated", message: { ...message } });
+        this.emit({ type: "coordinator_prompt_failed", messageId: message.id, error: promptError });
+        if (!this.coordinatorAborting) this.fail(error);
+        // This item is durably terminal; later independent FIFO entries may run.
+        continue;
+      }
+    }
+    if (!this.pendingCoordinatorPrompts.length && this.coordinator.isIdle) {
+      this.coordinatorNotifications?.settled();
+      this.scheduleBacklogSweep();
+    }
+  }
+
+  private recordPromptSettlement(message: TranscriptMessage, error?: string): void {
+    this.promptSettlement.throughTimestamp = Math.max(this.promptSettlement.throughTimestamp, message.timestamp);
+    this.promptSettlement.failures = this.promptSettlement.failures.filter((entry) => entry.messageId !== message.id);
+    if (error) this.promptSettlement.failures.push({ messageId: message.id, error });
+    this.promptSettlement.failures = this.promptSettlement.failures.slice(-100);
   }
 
   async abort(): Promise<void> {
@@ -490,6 +676,7 @@ export class Orchestrator {
       this.setCoordinatorActivity(undefined, "aborted");
       this.coordinatorAborting = false;
       this.persist();
+      this.schedulePromptDrain();
     }
   }
 
@@ -714,8 +901,10 @@ export class Orchestrator {
   private bindCoordinator(): void {
     let streaming: TranscriptMessage | undefined;
     let emitted = false;
+    let lastAssistantMessageId: string | undefined;
     this.coordinator.subscribe((event) => {
       if (event.type === "agent_start") {
+        lastAssistantMessageId = undefined;
         this.coordinatorStatus = "running";
         this.persist();
         this.emit({ type: "coordinator_status", status: "running" });
@@ -759,6 +948,7 @@ export class Orchestrator {
             this.emit({ type: "coordinator_message", message: { ...streaming } });
           } else this.emit({ type: "coordinator_message_updated", message: { ...streaming } });
         }
+        lastAssistantMessageId = streaming.id;
         this.persist();
         streaming = undefined;
         emitted = false;
@@ -768,9 +958,19 @@ export class Orchestrator {
           this.emit({ type: "coordinator_status", status: "idle" });
         }
         this.setCoordinatorActivity(undefined, this.coordinatorAborting ? "aborted" : "completed");
-        this.persist();
-        this.coordinatorNotifications?.settled();
-        this.scheduleBacklogSweep();
+        const pending = this.pendingCoordinatorPrompts[0];
+        if (!this.coordinatorAborting && pending?.messageId === this.activeCoordinatorPromptId && pending.state === "processing") {
+          // Only agent settlement proves the assistant/tool loop is complete;
+          // intermediate assistant message_end events may merely request tools.
+          checkpointPromptResponse(pending, lastAssistantMessageId);
+          this.persist();
+          this.promptResponseCheckpoint = { messageId: pending.messageId, flushed: this.stateStore.flush() };
+        } else this.persist();
+        if (this.pendingCoordinatorPrompts.length) this.schedulePromptDrain();
+        else {
+          this.coordinatorNotifications?.settled();
+          this.scheduleBacklogSweep();
+        }
       }
     });
   }
@@ -786,7 +986,7 @@ export class Orchestrator {
       const loader = new DefaultResourceLoader({
         cwd: job.isolation.path,
         agentDir: getAgentDir(),
-        systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode background worker\nYou are a background worker running in ${job.isolation.mode === "worktree" ? "an isolated git worktree" : "the shared root checkout"} at ${job.isolation.path}. ${job.isolation.mode === "root" && job.isolation.requested === "auto" ? "This task was classified as non-mutating: inspect and report only; do not edit files." : "Complete the assigned task autonomously, including edits when requested."} Run relevant checks. Do not ask conversational questions unless completely blocked. End with a concise report covering changes, tests, and remaining risks.`,
+        systemPromptOverride: (base) => workerSystemPrompt(base, job),
       });
       await loader.reload();
       const workerSessionDir = join(this.stateStore.root, "pi-sessions", "workers", job.id);
@@ -1346,7 +1546,7 @@ export class Orchestrator {
 
   private publishJob(job: AgentJob): void {
     this.persist();
-    this.emit({ type: "job_updated", job: structuredClone(job) });
+    this.emit({ type: "job_updated", job: this.transportJob(job) });
     this.coordinatorNotifications?.observe(job);
     this.scheduleBacklogSweep();
   }
@@ -1355,8 +1555,16 @@ export class Orchestrator {
     const message: TranscriptMessage = {
       id: event.messageId,
       role: "system",
-      text: event.text,
+      text: `[worker_status] ${event.title || event.jobId}: ${event.kind.replaceAll("_", " ")} — ${event.summary || "status updated"}`,
       timestamp: event.createdAt,
+      workerEvent: {
+        jobId: event.jobId,
+        title: event.title || event.jobId,
+        state: event.kind,
+        summary: event.summary || event.kind.replaceAll("_", " "),
+        rawEvidence: event.text,
+        actionRequired: event.kind === "action_required" || event.kind === "failed" || event.kind === "needs_attention",
+      },
     };
     if (this.coordinatorMessages.some((entry) => entry.id === message.id)) return;
     this.coordinatorMessages.push(message);
@@ -1373,6 +1581,8 @@ export class Orchestrator {
         activity: this.coordinatorActivity,
         activityHistory: [...this.coordinatorActivityHistory],
         piSessionFile: this.coordinatorSessionFile,
+        pendingPrompts: structuredClone(this.pendingCoordinatorPrompts),
+        promptSettlement: structuredClone(this.promptSettlement),
       },
       maintenance: { ...this.maintenance },
       coordinatorNotifications: structuredClone(this.notificationState),

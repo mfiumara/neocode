@@ -1,8 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdtemp, readFile, rename, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type {
   ActionRequired,
@@ -35,6 +34,8 @@ export interface ReviewAdapter {
   /** Rebase the worker onto the current target before CI and exact-diff judgment. */
   prepareForReview?(job: AgentJob): Promise<void>;
   runCi(cwd: string): Promise<CheckEvidence[]>;
+  /** Separate required product validation from informational Git packet checks. */
+  productCiEvidence?(checks: CheckEvidence[]): CheckEvidence[];
   readDiff(job: AgentJob): Promise<string>;
   judge(job: AgentJob, diff: string, diffSha256: string): Promise<JudgeEvidence>;
   reconcile(job: AgentJob): Promise<ReconcileResult>;
@@ -63,6 +64,7 @@ export class CompletionPipeline {
   private readonly active = new Set<string>();
   private readonly scheduled = new Set<string>();
   private readonly operationLock: OperationLock;
+  readonly #coordinatorMergeCapability: symbol;
 
   constructor(
     private readonly adapter: ReviewAdapter,
@@ -70,7 +72,11 @@ export class CompletionPipeline {
     private readonly targetBranch = process.env.NEOCODE_MERGE_BRANCH || "main",
     private readonly rootCwd?: string,
     operationLock?: OperationLock,
-  ) { this.operationLock = operationLock ?? new SerialOperationLock(); }
+    coordinatorMergeCapability: symbol = Symbol("unbound coordinator merge capability"),
+  ) {
+    this.operationLock = operationLock ?? new SerialOperationLock();
+    this.#coordinatorMergeCapability = coordinatorMergeCapability;
+  }
 
   enqueue(job: AgentJob): boolean {
     if (job.status !== "completed" || job.review) return false;
@@ -210,7 +216,8 @@ export class CompletionPipeline {
     return true;
   }
 
-  requestMerge(job: AgentJob): void {
+  requestMerge(job: AgentJob, capability: symbol): void {
+    if (capability !== this.#coordinatorMergeCapability) throw new Error("Only the bound main coordinator tool can authorize guarded merge.");
     if (!job.review?.judge?.approved) throw new Error("A fresh independent judge approval is required before guarded merge.");
     if (this.active.has(job.id)) throw new Error("A lifecycle action is already running.");
     if (job.review.status !== "approved") {
@@ -260,10 +267,11 @@ export class CompletionPipeline {
     try {
       if (mode === "post") {
         const checks = await this.adapter.runCi(this.rootCwd || job.isolation.path);
+        const productChecks = this.productCiEvidence(checks);
         job.review!.postMergeCi = checks; this.publish(job);
-        if (!checks.length || checks.some((check) => !check.ok)) {
+        if (!productChecks.length || checks.some((check) => !check.ok)) {
           this.requireAction(job, "post_merge_ci", "post_ci_failed",
-            !checks.length ? "No post-merge CI checks detected" : "Post-merge CI failed", checks);
+            !productChecks.length ? "No post-merge product CI checks detected" : "Post-merge CI failed", checks);
           return;
         }
         this.resolveInfrastructureRetry(job);
@@ -275,18 +283,25 @@ export class CompletionPipeline {
         await this.adapter.prepareForReview?.(job);
         this.publish(job);
         const ci = await this.adapter.runCi(job.isolation.path);
+        const productChecks = this.productCiEvidence(ci);
         job.review!.ci = ci; this.publish(job);
-        if (!ci.length || ci.some((check) => !check.ok)) {
-          const transient = !ci.length || ci.some((check) => check.timedOut || check.exitCode === null);
+        if (!productChecks.length || ci.some((check) => !check.ok)) {
+          const transient = productChecks.some((check) => check.timedOut || check.exitCode === null);
           this.requireAction(job, transient ? "infrastructure" : "worker_ci", "ci_failed",
-            !ci.length ? "No CI checks configured" : "Worker CI failed", ci);
+            !productChecks.length ? "No product CI checks configured; Git metadata alone cannot authorize review" : "Worker CI failed", ci);
           return;
         }
         this.transition(job, "ci_running", `CI passed: ${ci.map((check) => check.command).join(", ")}`, "server");
         const diff = await this.adapter.readDiff(job);
         job.diff = diff;
         const hash = createHash("sha256").update(diff).digest("hex");
-        this.transition(job, "judging", "Coordinator launched a fresh independent judge session", "coordinator");
+        const packetHash = ci.find((check) => check.command === CANONICAL_DIFF_COMMAND)?.output.trim().split(/\s+/)[0];
+        if (packetHash && packetHash !== hash) {
+          throw new PipelineError("failed", `Candidate Git packet hash ${packetHash} does not match reviewed diff ${hash}.`, "candidate_ci", ci);
+        }
+        if (job.handoff) job.handoff.diffSha256 = hash;
+        this.publish(job);
+        this.transition(job, "judging", `Coordinator launched a fresh independent judge session for exact diff ${hash}${packetHash ? ` with matching Git packet ${packetHash}` : ""}`, "coordinator");
         const verdict = await this.adapter.judge(job, diff, hash);
         if (verdict.diffSha256 !== hash) throw new PipelineError("failed", "Judge verdict was not tied to the reviewed diff.");
         job.review!.judge = verdict; this.publish(job);
@@ -317,10 +332,11 @@ export class CompletionPipeline {
         }
         this.transition(job, "post_merge_ci", "Merge completed; running serialized post-merge checks", "server");
         const checks = await this.adapter.runCi(this.rootCwd || job.isolation.path);
+        const productChecks = this.productCiEvidence(checks);
         job.review!.postMergeCi = checks; this.publish(job);
-        if (!checks.length || checks.some((check) => !check.ok)) {
+        if (!productChecks.length || checks.some((check) => !check.ok)) {
           this.requireAction(job, "post_merge_ci", "post_ci_failed",
-            !checks.length ? "No post-merge CI checks detected" : "Post-merge CI failed", checks);
+            !productChecks.length ? "No post-merge product CI checks detected" : "Post-merge CI failed", checks);
           return;
         }
         this.resolveInfrastructureRetry(job);
@@ -436,6 +452,10 @@ export class CompletionPipeline {
     this.transition(job, "needs_attention", job.recoveryIssue, "server");
   }
 
+  private productCiEvidence(checks: CheckEvidence[]): CheckEvidence[] {
+    return this.adapter.productCiEvidence?.(checks) ?? checks;
+  }
+
   private transition(job: AgentJob, status: ReviewStatus, detail?: string, owner: "worker" | "coordinator" | "judge" | "server" = "server"): void {
     const review = job.review!; review.status = status; review.updatedAt = Date.now();
     if (["queued", "ci_running", "judging", "approved", "feedback_sent", "worker_resumed", "handoff_received"].includes(status)) job.integration = { ...job.integration, status: "reviewing", targetRef: review.targetBranch };
@@ -500,6 +520,18 @@ export class LocalReviewAdapter implements ReviewAdapter {
         throw new PipelineError("conflict", `Worker rebase onto ${this.targetBranch} conflicts; main was not changed and the same worktree must resolve it: ${error instanceof Error ? error.message : String(error)}`, "conflict");
       }
     }
+    // A worker may have merged main into its own branch. Even when current main
+    // is already an ancestor, flatten candidate-local merge commits before
+    // review so --ff-only can never import non-linear history.
+    const mergeCommits = (await git(job.isolation.path, ["rev-list", "--min-parents=2", `${targetHead}..HEAD`])).trim();
+    if (mergeCommits) {
+      await git(job.isolation.path, ["reset", "--soft", targetHead]);
+      if (await gitSucceeds(job.isolation.path, ["diff", "--cached", "--quiet"])) {
+        await git(job.isolation.path, ["reset", "--hard", targetHead]);
+      } else {
+        await git(job.isolation.path, ["commit", "-m", `neocode: ${job.title}`]);
+      }
+    }
     const completionHead = (await git(job.isolation.path, ["rev-parse", "HEAD"])).trim();
     // Keep job.baseRef/worktreeIdentity.baseRef as immutable creation
     // provenance. The mutable target used for exact review is separate.
@@ -512,13 +544,28 @@ export class LocalReviewAdapter implements ReviewAdapter {
     const commands = this.options.command || process.env.NEOCODE_CI_COMMAND
       ? [this.options.command || process.env.NEOCODE_CI_COMMAND!]
       : await detectedCommands(cwd);
+    const targetHead = (await git(this.root, ["rev-parse", this.targetBranch])).trim();
+    // These are standard candidate checks, not worker-report prose. Keep the
+    // exact base, clean identity, tree, changed paths, and whitespace gate in
+    // durable CheckEvidence consumed by the independent judge.
+    commands.push(
+      `git diff --check ${targetHead} HEAD`,
+      `test -z "$(git status --porcelain)" && printf 'BASE=${targetHead}\\nHEAD=' && git rev-parse HEAD && printf 'PARENT=' && git rev-parse HEAD^ && printf 'TREE=' && git rev-parse 'HEAD^{tree}' && git diff --name-status ${shellQuote(targetHead)} HEAD`,
+    );
     const evidence: CheckEvidence[] = [];
-    for (const command of commands) {
+    for (const command of [...candidateGitPacketCommands(this.targetBranch), ...commands]) {
       const check = await runBounded(command, cwd, this.options.timeoutMs, this.options.maxOutputBytes);
       evidence.push(check);
       if (!check.ok) break;
     }
     return evidence;
+  }
+
+  productCiEvidence(checks: CheckEvidence[]): CheckEvidence[] {
+    const explicit = this.options.command || process.env.NEOCODE_CI_COMMAND;
+    return explicit
+      ? checks.filter((check) => check.command === explicit)
+      : checks.filter((check) => /^npm run (?:test|check|build)$/.test(check.command));
   }
 
   readDiff(job: AgentJob): Promise<string> {
@@ -549,9 +596,16 @@ export class LocalReviewAdapter implements ReviewAdapter {
       || !await gitSucceeds(this.root, ["merge-base", "--is-ancestor", targetHead, job.branch]))) {
       throw new PipelineError("blocked", "Main advanced after review or the worker is not rebased onto it; a fresh rebase, CI, and judge are required.", "judge_changes");
     }
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "neocode-integration-"));
+    // Keep the temporary worktree outside the repository so it cannot make a
+    // fixture or checkout dirty, but on the same filesystem so node_modules can
+    // be atomically activated with rename(2).
+    const temporaryRoot = await mkdtemp(join(dirname(this.root), ".neocode-integration-"));
     const candidate = join(temporaryRoot, "candidate");
+    const dependencyBackup = join(temporaryRoot, "previous-node-modules");
     let candidateAdded = false;
+    let dependenciesActivated = false;
+    let hadRootDependencies = false;
+    let integrationSucceeded = false;
 
     try {
       // Main must not change until the exact prospective merge tree has passed
@@ -563,11 +617,12 @@ export class LocalReviewAdapter implements ReviewAdapter {
       candidateAdded = true;
 
       const candidateCi = await this.runCi(candidate);
-      if (!candidateCi.length || candidateCi.some((check) => !check.ok)) {
+      const productChecks = this.productCiEvidence(candidateCi);
+      if (!productChecks.length || candidateCi.some((check) => !check.ok)) {
         const failed = candidateCi.find((check) => !check.ok);
         throw new PipelineError("failed", failed
           ? `Candidate CI failed before main changed: ${failed.command}`
-          : "No candidate CI checks were configured; refusing to change main.",
+          : "No candidate product CI checks were configured; Git metadata alone cannot change main.",
           candidateCi.some((check) => check.timedOut || check.exitCode === null) ? "infrastructure" : "candidate_ci", candidateCi);
       }
       const candidateTree = (await git(candidate, ["rev-parse", "HEAD^{tree}"])).trim();
@@ -579,6 +634,31 @@ export class LocalReviewAdapter implements ReviewAdapter {
       }
       if ((await git(this.root, ["status", "--porcelain", "--untracked-files=normal"])).trim()) {
         throw new PipelineError("blocked", "Root became dirty while candidate CI was running; main was not changed.");
+      }
+
+      // Candidate CI proves a clean dependency graph, but a long-running dev
+      // checkout may still have node_modules from the previous lockfile. When
+      // dependencies changed, atomically activate the tested candidate graph
+      // before the source fast-forward so Vite can never observe new imports
+      // with old installed packages.
+      const candidateLock = await readFile(join(candidate, "package-lock.json"), "utf8").catch(() => undefined);
+      const rootLock = await readFile(join(this.root, "package-lock.json"), "utf8").catch(() => undefined);
+      if (candidateLock !== undefined && candidateLock !== rootLock) {
+        const candidateModules = join(candidate, "node_modules");
+        const rootModules = join(this.root, "node_modules");
+        try {
+          await rename(rootModules, dependencyBackup);
+          hadRootDependencies = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        try {
+          await rename(candidateModules, rootModules);
+          dependenciesActivated = true;
+        } catch (error) {
+          if (hadRootDependencies) await rename(dependencyBackup, rootModules).catch(() => undefined);
+          throw new PipelineError("failed", `Tested candidate dependencies could not be activated; main was not changed: ${error instanceof Error ? error.message : String(error)}`, "infrastructure", candidateCi);
+        }
       }
 
       if (!alreadyMerged) {
@@ -596,8 +676,13 @@ export class LocalReviewAdapter implements ReviewAdapter {
         await git(this.root, ["reset", "--hard", targetHead]);
         throw new PipelineError("failed", "Integrated tree differed from the CI-validated candidate; main was rolled back.");
       }
+      integrationSucceeded = true;
       return { commit, completionCommit, alreadyMerged: alreadyMerged || undefined, candidateCi };
     } finally {
+      if (dependenciesActivated && !integrationSucceeded) {
+        await rm(join(this.root, "node_modules"), { recursive: true, force: true });
+        if (hadRootDependencies) await rename(dependencyBackup, join(this.root, "node_modules")).catch(() => undefined);
+      }
       if (candidateAdded) await git(this.root, ["worktree", "remove", "--force", candidate]).catch(() => undefined);
       await rm(temporaryRoot, { recursive: true, force: true });
     }
@@ -627,6 +712,24 @@ export async function readWorktreeDiff(cwd: string, baseRef: string): Promise<st
     }
   }
   return patches.join("");
+}
+
+export const CANONICAL_DIFF_COMMAND = "git diff --binary main...HEAD | shasum -a 256";
+
+export function candidateGitPacketCommands(targetBranch = "main"): string[] {
+  const target = targetBranch === "main" ? "main" : shellQuote(targetBranch);
+  const canonicalDiff = targetBranch === "main"
+    ? CANONICAL_DIFF_COMMAND
+    : `git diff --binary ${target}...HEAD | shasum -a 256`;
+  return [
+    `git rev-parse ${target} HEAD HEAD^`,
+    "git rev-parse HEAD^{tree}",
+    `git merge-base ${target} HEAD`,
+    `git diff --name-status ${target}...HEAD`,
+    canonicalDiff,
+    "git status --porcelain",
+    `git diff --check ${target}...HEAD`,
+  ];
 }
 
 async function detectedCommands(cwd: string): Promise<string[]> {

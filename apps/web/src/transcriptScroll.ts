@@ -6,6 +6,11 @@ export interface ScrollMetrics {
   scrollTop: number;
 }
 
+/** Keep the same visible content after older rows increase scrollHeight. */
+export function anchoredScrollTop(scrollTop: number, previousScrollHeight: number, nextScrollHeight: number): number {
+  return Math.max(0, scrollTop + nextScrollHeight - previousScrollHeight);
+}
+
 /** Whether content growth should continue following the end of the transcript. */
 export function isNearTranscriptBottom(
   metrics: ScrollMetrics,

@@ -165,12 +165,36 @@ export interface JobIsolation {
   path: string;
 }
 
+export interface WorkerEventPresentation {
+  jobId: string;
+  title: string;
+  state: string;
+  summary: string;
+  /** Full structured payload, rendered only inside the disclosure. */
+  rawEvidence?: string;
+  actionRequired?: boolean;
+}
+
+export type PromptState = "sending" | "queued" | "processing" | "failed";
+export interface PromptSettlementSnapshot {
+  /** All FIFO prompts at or before this timestamp are terminal. */
+  throughTimestamp: number;
+  /** Bounded recent failure tombstones; other terminal prompts settled normally. */
+  failures: Array<{ messageId: string; error: string }>;
+}
+
 export interface TranscriptMessage {
   id: string;
   role: "user" | "assistant" | "tool" | "system";
+  /** Durable transcript text; structured event evidence may live in workerEvent. */
   text: string;
   timestamp: number;
   attachments?: ImageAttachment[];
+  /** Compact transport/presentation metadata for structured lifecycle events. */
+  workerEvent?: WorkerEventPresentation;
+  /** Coordinator user-prompt delivery state. Absence means the prompt settled. */
+  promptState?: PromptState;
+  promptError?: string;
 }
 
 export interface WorkerAttempt {
@@ -246,6 +270,14 @@ export type JobCleanup =
   | { status: "removed"; checkedAt: number; removedAt: number; evidence: CleanupEvidence };
 
 
+export interface TranscriptPageInfo {
+  /** Message id immediately anchoring the loaded window. Opaque to clients. */
+  oldestCursor?: string;
+  hasOlder: boolean;
+}
+
+export type TranscriptThread = { kind: "coordinator" } | { kind: "job"; jobId: string };
+
 export interface AgentJob {
   id: string;
   title: string;
@@ -259,6 +291,8 @@ export interface AgentJob {
   createdAt: number;
   updatedAt: number;
   messages: TranscriptMessage[];
+  /** Transport-only window metadata; omitted from durable state. */
+  transcriptPage?: TranscriptPageInfo;
   activity?: AgentActivity;
   activityHistory?: AgentActivity[];
   /** Total worker lifetime, including startup and queued time. */
@@ -307,6 +341,9 @@ export interface AppSnapshot {
     activity?: AgentActivity;
     activityHistory: AgentActivity[];
     messages: TranscriptMessage[];
+    transcriptPage?: TranscriptPageInfo;
+    /** Bounded authority for reconciling lifecycle state in cached older pages. */
+    promptSettlement?: PromptSettlementSnapshot;
     settings: AgentSettings;
     model: ModelRef | null;
     models: ModelChoice[];
@@ -316,7 +353,7 @@ export interface AppSnapshot {
 }
 
 export type ClientMessage =
-  | { type: "prompt"; text: string; context?: string[]; attachments?: ImageAttachment[] }
+  | { type: "prompt"; id?: string; text: string; context?: string[]; attachments?: ImageAttachment[] }
   | { type: "abort" }
   | { type: "delegate"; text: string; isolation?: RequestedIsolationMode; attachments?: ImageAttachment[] }
   | { type: "cancel_job"; jobId: string }
@@ -325,6 +362,7 @@ export type ClientMessage =
   | { type: "cycle_thinking" }
   | { type: "set_model"; model: ModelRef }
   | { type: "refresh" }
+  | { type: "load_older_messages"; thread: TranscriptThread; before?: string; limit?: number }
   | { type: "clean_now" };
 
 export type ServerMessage =
@@ -335,7 +373,9 @@ export type ServerMessage =
   | { type: "coordinator_model_updated"; model: ModelRef }
   | { type: "coordinator_message"; message: TranscriptMessage }
   | { type: "coordinator_message_updated"; message: TranscriptMessage }
+  | { type: "coordinator_prompt_failed"; messageId: string; error: string }
   | { type: "coordinator_delta"; messageId: string; delta: string }
   | { type: "job_updated"; job: AgentJob }
+  | { type: "transcript_page"; thread: TranscriptThread; messages: TranscriptMessage[]; page: TranscriptPageInfo }
   | { type: "maintenance_updated"; maintenance: MaintenanceStatus }
   | { type: "error"; message: string };
