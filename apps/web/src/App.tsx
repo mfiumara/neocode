@@ -1187,11 +1187,24 @@ export function ReviewView({ job, jobs = [job] }: { job: AgentJob; jobs?: AgentJ
   </div>;
 }
 
+function checkCommandLabel(command: string): string {
+  if (/\bgit\s+diff\s+--check\b/i.test(command)) return "Diff validation";
+  if (/\bgit\s+status\b/i.test(command)) return "Clean worktree validation";
+  if (/\bnpm\s+(?:run\s+)?test\b/i.test(command)) return "Tests";
+  if (/\bnpm\s+run\s+check\b/i.test(command)) return "Type and consistency checks";
+  if (/\bnpm\s+run\s+build\b/i.test(command)) return "Production build";
+  if (/\bnpm\s+(?:ci|install)\b/i.test(command)) return "Install dependencies";
+  return presentIdentifierText(command, []).primary;
+}
+
 function CheckList({ checks, empty = "No checks recorded." }: { checks?: NonNullable<AgentJob["review"]>["ci"]; empty?: string }) {
   if (!checks?.length) return <p className="muted">{empty}</p>;
   return <div className="check-list">{checks.map((check, index) => <details key={index} className={check.ok ? "pass" : "fail"}>
-    <summary>{check.ok ? "✓" : "×"} {check.command} <span>{check.durationMs}ms{check.timedOut ? " · timed out" : ""}{check.truncated ? " · truncated" : ""}</span></summary>
-    <pre>{check.output || "(no output)"}</pre>
+    <summary>{check.ok ? "✓" : "×"} {checkCommandLabel(check.command)} <span>{check.durationMs}ms{check.timedOut ? " · timed out" : ""}{check.truncated ? " · truncated" : ""}</span></summary>
+    <div className="check-technical-evidence">
+      <strong>Exact command</strong><pre>{check.command}</pre>
+      <strong>Exact output</strong><pre>{check.output || "(no output)"}</pre>
+    </div>
   </details>)}</div>;
 }
 

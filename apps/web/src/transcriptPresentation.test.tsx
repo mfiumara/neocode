@@ -142,6 +142,28 @@ test("review free-form fields stay readable while exact identifiers remain colla
   assert.doesNotMatch(markup, /<details[^>]* open/);
 });
 
+test("CI check summaries hide exact commands and hashes in closed technical details", () => {
+  const value = job();
+  const target = "ab1234567890ab1234567890ab1234567890abcd";
+  const localCommand = `git diff --check ${target} HEAD # fingerprint ${exactDiff}`;
+  const postCommand = `git diff --check ${exactDiff} HEAD # target ${target}`;
+  value.review = {
+    hookToken: "hook", status: "post_merge_ci", attempt: 1, targetBranch: "main", updatedAt: 3, transitions: [],
+    ci: [{ command: localCommand, ok: true, exitCode: 0, durationMs: 12, output: `checked ${target}` }],
+    postMergeCi: [{ command: postCommand, ok: true, exitCode: 0, durationMs: 15, output: `fingerprint ${exactDiff}` }],
+  };
+
+  const markup = renderToStaticMarkup(<ReviewView job={value} />);
+  const visible = markup.replace(/<details[^>]*><summary>([\s\S]*?)<\/summary>[\s\S]*?<\/details>/g, "$1");
+  assert.equal((visible.match(/Diff validation/g) || []).length, 2);
+  assert.doesNotMatch(visible, new RegExp(target));
+  assert.doesNotMatch(visible, new RegExp(exactDiff));
+  for (const exact of [localCommand, postCommand, `checked ${target}`, `fingerprint ${exactDiff}`]) {
+    assert.ok(markup.includes(exact), `missing exact check audit evidence: ${exact}`);
+  }
+  assert.doesNotMatch(markup, /<details[^>]* open/);
+});
+
 test("exact hashes and identifiers remain available only in collapsed technical evidence", () => {
   const value = job();
   value.handoff = {

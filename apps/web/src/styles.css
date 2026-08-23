@@ -250,6 +250,7 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .check-list summary { padding: 7px; cursor: pointer; }
 .check-list summary span { float: right; color: var(--dim); }
 .check-list pre { max-height: 280px; margin: 0; padding: 9px; overflow: auto; border-top: 1px solid var(--line); background: #0d0f12; color: #aaaeb6; white-space: pre-wrap; }
+.check-technical-evidence > strong { display: block; padding: 7px 9px; color: var(--dim); font-size: 9px; text-transform: uppercase; }
 .readable-review-text { margin: 5px 0; white-space: pre-wrap; }
 .readable-review-text > span, .readable-review-text > strong { overflow-wrap: anywhere; }
 .judge-evidence code { color: var(--dim); font-size: 9px; }
