@@ -20,9 +20,13 @@ test("completed unmerged, review, conflict, and interrupted jobs remain actionab
   assert.equal(jobLifecycleLabel(job("completed", { status: "conflicted" })), "Conflict · needs attention");
 });
 
-test("only verified merges and non-actionable terminal failures are Done", () => {
+test("verified integration, supersession, and non-actionable terminal failures are Done", () => {
   assert.equal(isDoneJob(job("completed", { status: "merged" })), true);
-  assert.equal(jobLifecycleLabel(job("completed", { status: "merged" })), "Merged · verified");
+  assert.equal(jobLifecycleLabel(job("completed", { status: "merged" })), "Integrated · verified");
+  assert.equal(isDoneJob(job("completed", { status: "merged", disposition: "already_integrated" })), true);
+  assert.equal(jobLifecycleLabel(job("completed", { status: "merged", disposition: "already_integrated" })), "Already integrated · verified");
+  assert.equal(isDoneJob(job("completed", { status: "superseded", disposition: "superseded", dispositionReason: "replaced" })), true);
+  assert.equal(jobLifecycleLabel(job("completed", { status: "superseded" })), "Not required · superseded");
   assert.equal(isDoneJob(job("failed")), true);
   assert.equal(isDoneJob(job("cancelled")), true);
 });

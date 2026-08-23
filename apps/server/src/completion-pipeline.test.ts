@@ -352,6 +352,21 @@ test("candidate and post-merge verification failures become evidence-complete ac
   assert.notEqual(post.integration?.status, "merged", "post-merge failure must never appear Done");
 });
 
+test("target advancement invalidates concurrent approval before integration", async () => {
+  const adapter = new FakeAdapter();
+  const value = job();
+  const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+  pipeline.enqueue(value);
+  value.review!.reviewBaseRef = "old-main";
+  pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(value.review?.status, "approved");
+  assert.equal(pipeline.invalidateApprovalForTargetAdvance(value, "new-main"), true);
+  assert.equal(value.review?.status, "handoff_received");
+  assert.equal(value.review?.judge, undefined);
+  pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(value.review?.status, "approved");
+});
+
 test("changed diff after approval blocks guarded integration", async () => {
   const adapter = new FakeAdapter(); let reads = 0;
   adapter.readDiff = async () => ++reads === 1 ? "reviewed" : "changed";

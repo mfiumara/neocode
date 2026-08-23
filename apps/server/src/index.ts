@@ -62,6 +62,7 @@ const orchestrator = new Orchestrator(cwd, broadcast, {
   graceMs: envMs("NEOCODE_JANITOR_GRACE_MS", 7 * 24 * 60 * 60 * 1000),
   intervalMs: envMs("NEOCODE_JANITOR_INTERVAL_MS", 6 * 60 * 60 * 1000),
   sweepIntervalMs: envMs("NEOCODE_SWEEP_INTERVAL_MS", 30_000),
+  reviewConcurrency: envMs("NEOCODE_REVIEW_CONCURRENCY", 2),
   targetRef: process.env.NEOCODE_JANITOR_TARGET_REF || "main",
   startup: process.env.NEOCODE_JANITOR_STARTUP !== "false",
 });

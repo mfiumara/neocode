@@ -201,6 +201,15 @@ export class CompletionPipeline {
     this.transition(job, "handoff_received", `New handoff ${job.handoff.diffSha256} delivered from the same worktree for review round ${job.handoff.round}`, "worker");
   }
 
+  invalidateApprovalForTargetAdvance(job: AgentJob, targetHead: string): boolean {
+    if (job.review?.status !== "approved" || job.review.reviewBaseRef === targetHead || !job.handoff) return false;
+    delete job.review.judge;
+    delete job.review.coordinatorAuthorizedAt;
+    job.review.judgeHandoffRound = Math.max(0, job.handoff.round - 1);
+    this.transition(job, "handoff_received", `Main advanced to ${targetHead}; prior approval invalidated before integration and the candidate requires rebase plus fresh judgment`, "server");
+    return true;
+  }
+
   requestMerge(job: AgentJob): void {
     if (!job.review?.judge?.approved) throw new Error("A fresh independent judge approval is required before guarded merge.");
     if (this.active.has(job.id)) throw new Error("A lifecycle action is already running.");
@@ -432,7 +441,11 @@ export class CompletionPipeline {
     if (["queued", "ci_running", "judging", "approved", "feedback_sent", "worker_resumed", "handoff_received"].includes(status)) job.integration = { ...job.integration, status: "reviewing", targetRef: review.targetBranch };
     else if (["merge_queued", "merging", "post_merge_ci"].includes(status)) job.integration = { ...job.integration, status: "integrating", targetRef: review.targetBranch };
     else if (["rejected", "blocked", "conflict", "ci_failed", "post_ci_failed", "failed"].includes(status)) job.integration = { ...job.integration, status: "conflicted", targetRef: review.targetBranch };
-    else if (status === "merged") job.integration = { status: "merged", targetRef: review.targetBranch, verifiedAt: Date.now(), targetHead: review.mergeCommit, completionHead: job.completion?.head };
+    else if (status === "merged") job.integration = {
+      status: "merged", targetRef: review.targetBranch, verifiedAt: Date.now(),
+      targetHead: review.mergeCommit, completionHead: job.completion?.head,
+      disposition: job.integration?.disposition || "integrated",
+    };
     if (["blocked", "conflict", "failed", "ci_failed", "post_ci_failed"].includes(status)) review.error = detail; else delete review.error;
     review.transitions.push({ status, at: review.updatedAt, detail, owner }); this.publish(job);
   }

@@ -1,6 +1,6 @@
 export type AgentStatus = "idle" | "running" | "error";
 export type JobStatus = "queued" | "running" | "interrupted" | "needs_attention" | "completed" | "failed" | "cancelled";
-export type IntegrationStatus = "unmerged" | "reviewing" | "integrating" | "conflicted" | "merged";
+export type IntegrationStatus = "unmerged" | "reviewing" | "integrating" | "conflicted" | "merged" | "superseded";
 export type CleanupRefusalReason =
   | "not_completed" | "missing_durable_identity" | "grace_period" | "integration_active" | "conflicted"
   | "identity_mismatch" | "not_registered" | "branch_mismatch" | "head_mismatch" | "dirty"
@@ -215,6 +215,18 @@ export interface JobIntegration {
   verifiedAt?: number;
   targetHead?: string;
   completionHead?: string;
+  disposition?: "integrated" | "already_integrated" | "superseded";
+  dispositionReason?: string;
+  supersededByJobId?: string;
+  supersededByCommit?: string;
+  priority?: {
+    files: number;
+    additions: number;
+    deletions: number;
+    overlappingFiles: number;
+    score: number;
+    assessedAt: number;
+  };
 }
 
 export interface CleanupEvidence {
@@ -223,7 +235,7 @@ export interface CleanupEvidence {
   targetHead: string;
   completionHead: string;
   intendedCommits: string[];
-  mergeMethod: "commit-ancestry" | "patch-equivalent" | "identical-content" | "no-changes";
+  mergeMethod: "commit-ancestry" | "patch-equivalent" | "identical-content" | "no-changes" | "superseded-branch-retained";
   cleanPorcelain: true;
   registeredPath: string;
   registeredBranch: string;

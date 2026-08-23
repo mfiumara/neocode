@@ -627,7 +627,7 @@ export function App() {
             {doneJobs.map((job) => (
               <JobSidebarRow key={job.id} job={job} active={active.kind === "job" && active.id === job.id} activityReady={activityReady} onOpen={() => openJob(job)} />
             ))}
-            {!doneJobs.length && <p className="empty-copy">Verified merges and terminal jobs appear here.</p>}
+            {!doneJobs.length && <p className="empty-copy">Verified integrations, superseded work, and terminal jobs appear here.</p>}
           </div>}
           <button className="clean-now" disabled={!connected || snapshot?.maintenance.state === "running"} onClick={() => send({ type: "clean_now" })}>
             {snapshot?.maintenance.state === "running" ? "Cleaning…" : "Clean merged worktrees now"}
