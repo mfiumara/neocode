@@ -22,6 +22,9 @@ export interface CoordinatorWorkerEvent {
   createdAt: number;
   messageId: string;
   wakeRequested: boolean;
+  /** Durable at-least-once delivery state; claimed events are redelivered after restart. */
+  wakeState?: "pending" | "claimed" | "delivered";
+  wakeClaimedAt?: number;
   wakeDeliveredAt?: number;
 }
 

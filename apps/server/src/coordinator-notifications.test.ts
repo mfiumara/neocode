@@ -61,6 +61,33 @@ test("busy coordinator queues durably and restart delivers the pending id exactl
   assert.deepEqual(wakes, [durable.events[0]!.id]);
 });
 
+test("restart redelivers the same event id after a crash between persisted claim and wake", async () => {
+  const durable = state();
+  let idle = false;
+  const first = new CoordinatorNotificationQueue(durable, {
+    append: () => undefined, persist: () => undefined, isIdle: () => idle,
+    wake: async () => { throw new Error("the crashed process must not wake"); },
+  });
+  first.observe(job());
+  const eventId = durable.events[0]!.id;
+  // Exact durable snapshot after drain persisted its claim but before invoking
+  // the external wake side effect.
+  durable.events[0]!.wakeState = "claimed";
+  durable.events[0]!.wakeClaimedAt = 10;
+  assert.equal(durable.events[0]!.wakeDeliveredAt, undefined);
+
+  const wakes: string[] = [];
+  idle = true;
+  const restarted = new CoordinatorNotificationQueue(durable, {
+    append: () => undefined, persist: () => undefined, isIdle: () => idle,
+    wake: async (event) => { wakes.push(event.id); },
+  });
+  restarted.settled(); await tick();
+  assert.deepEqual(wakes, [eventId]);
+  assert.equal(durable.events[0]!.wakeState, "delivered");
+  assert.ok(durable.events[0]!.wakeDeliveredAt);
+});
+
 test("action-required diagnostics stay exact while a user prompt is busy and wake once afterward", async () => {
   const durable = state();
   const wakes: string[] = [];

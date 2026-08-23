@@ -108,6 +108,8 @@ export interface JobReview {
   mergeCommit?: string;
   /** Set only by the coordinator's guarded_merge tool call. */
   coordinatorAuthorizedAt?: number;
+  /** Handoff round durably claimed by the most recent explicit judge start. */
+  judgeHandoffRound?: number;
   feedback?: string[];
   /** Durable coordinator-owned repair accounting and complete failure evidence. */
   remediation?: {

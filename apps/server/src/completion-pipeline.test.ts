@@ -132,6 +132,47 @@ test("feedback preserves worktree and creates a fresh handoff round", async () =
   assert.equal(adapter.judgeCalls, 2);
 });
 
+test("rejected handoff cannot be rejudged unchanged before a claimed repair and new handoff", async () => {
+  const adapter = new FakeAdapter();
+  adapter.judge = async (_job, _diff, hash) => {
+    adapter.judgeCalls += 1;
+    return { ...verdict(hash), approved: false, summary: "mandatory finding remains" };
+  };
+  const value = job("rejudge-gate");
+  const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+  pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(value.review?.status, "rejected");
+  assert.throws(() => pipeline.startJudge(value), /Cannot judge from rejected/);
+  assert.throws(() => pipeline.startJudge(value), /Cannot judge from rejected/);
+  assert.equal(adapter.ciCalls, 1);
+  assert.equal(adapter.judgeCalls, 1, "unchanged rejected evidence cannot trigger unlimited judges");
+
+  pipeline.requestChanges(value, "Address mandatory finding and add its reproduction test");
+  assert.throws(() => pipeline.startJudge(value), /Cannot judge from feedback_sent/);
+  pipeline.workerResumed(value);
+  assert.throws(() => pipeline.startJudge(value), /Cannot judge from worker_resumed/);
+  value.diff = "corrected implementation";
+  pipeline.nextHandoff(value);
+  pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(adapter.judgeCalls, 2, "only the genuinely new handoff gets another judge");
+});
+
+test("CI-failed handoff cannot create unlimited unchanged action-required rounds", async () => {
+  const adapter = new FakeAdapter();
+  const failed: CheckEvidence = { command: "npm test", ok: false, exitCode: 1, durationMs: 1, output: "same deterministic failure" };
+  adapter.runCi = async () => { adapter.ciCalls += 1; return [failed]; };
+  const value = job("ci-rejudge-gate");
+  const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+  pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(value.review?.status, "ci_failed");
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    assert.throws(() => pipeline.startJudge(value), /Cannot judge from ci_failed/);
+  }
+  assert.equal(adapter.ciCalls, 1);
+  assert.equal(value.review?.remediation?.actions.length, 1, "repeated start requests cannot mint unchanged failures");
+  assert.equal(value.review?.remediation?.rounds.worker_ci?.attempts, 0);
+});
+
 test("a failing branch is resumed, corrected, rechecked, and freshly judged on the next round", async () => {
   const adapter = new FakeAdapter();
   const value = job("repair");
@@ -176,6 +217,53 @@ test("unchanged failures are bounded per class and preserve complete evidence", 
   assert.equal(value.review?.remediation?.rounds.worker_ci?.attempts, 3);
   assert.equal(value.review?.remediation?.actions.at(-1)?.state, "exhausted");
   assert.equal(value.review?.remediation?.actions.at(-1)?.evidence.checks?.[0]?.output, failed.output);
+});
+
+test("no-content completion commit does not reset the unchanged failure budget", async () => {
+  const adapter = new FakeAdapter(); const value = job("no-content-commit");
+  const failed: CheckEvidence = { command: "npm test", ok: false, exitCode: 1, durationMs: 1, output: "same failure" };
+  adapter.runCi = async () => [failed];
+  value.completion = { head: "implementation-commit", finishedAt: 1 };
+  const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+  pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle();
+  const fingerprint = value.review!.remediation!.rounds.worker_ci!.fingerprint;
+  pipeline.requestChanges(value, "Fix exact deterministic test failure");
+  pipeline.workerResumed(value);
+  value.completion.head = "empty-follow-up-commit";
+  pipeline.nextHandoff(value); pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(value.review?.remediation?.rounds.worker_ci?.fingerprint, fingerprint);
+  assert.equal(value.review?.remediation?.rounds.worker_ci?.attempts, 1);
+  assert.equal(value.review?.remediation?.actions.length, 2);
+});
+
+test("successful infrastructure retry resolves durably and restart cannot reschedule terminal work", async () => {
+  const previousBackoff = process.env.NEOCODE_REMEDIATION_BACKOFF_MS;
+  process.env.NEOCODE_REMEDIATION_BACKOFF_MS = "0";
+  try {
+    const adapter = new FakeAdapter(); const value = job("infra-success");
+    const transient: CheckEvidence = { command: "npm test", ok: false, exitCode: null, durationMs: 1, output: "runner disappeared", timedOut: true };
+    adapter.runCi = async () => adapter.ciCalls++ === 0 ? [transient] : [pass];
+    const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+    pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle();
+    pipeline.retryInfrastructure(value, "ephemeral runner timeout");
+    while (value.review?.status !== "approved") await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(value.review.remediation?.actions[0]?.state, "resolved");
+    assert.equal(value.review.remediation?.currentActionId, undefined);
+    pipeline.requestMerge(value); await pipeline.idle();
+    assert.equal(value.review.status, "merged");
+
+    const callsAfterSuccess = adapter.ciCalls;
+    const restored = structuredClone(value);
+    const restarted = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+    restarted.recover([restored]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(adapter.ciCalls, callsAfterSuccess);
+    assert.equal(restored.review?.status, "merged");
+    assert.equal(restored.integration?.status, "merged");
+  } finally {
+    if (previousBackoff === undefined) delete process.env.NEOCODE_REMEDIATION_BACKOFF_MS;
+    else process.env.NEOCODE_REMEDIATION_BACKOFF_MS = previousBackoff;
+  }
 });
 
 test("restart recovery does not duplicate a claimed source repair attempt", async () => {

@@ -95,13 +95,20 @@ export class CompletionPipeline {
   }
 
   startJudge(job: AgentJob): void {
-    if (job.status !== "completed" || !job.review) throw new Error("A completed worker handoff is required.");
+    if (job.status !== "completed" || !job.review || !job.handoff) throw new Error("A completed worker handoff is required.");
     if (this.active.has(job.id)) throw new Error("A lifecycle action is already running.");
-    if (["merging", "post_merge_ci", "merged"].includes(job.review.status)) throw new Error("Cannot judge while integration is active or complete.");
-    job.review.attempt += job.review.judge ? 1 : 0;
+    if (!["queued", "handoff_received"].includes(job.review.status)) {
+      throw new Error(`Cannot judge from ${job.review.status}; claim the pending repair, resume the same worker, and await its new handoff.`);
+    }
+    if ((job.review.judgeHandoffRound || 0) >= job.handoff.round) {
+      throw new Error("This handoff has already been judged; a genuinely new worker handoff is required.");
+    }
+    job.review.attempt += job.review.judgeHandoffRound ? 1 : 0;
+    job.review.judgeHandoffRound = job.handoff.round;
     delete job.review.error;
     delete job.review.judge;
     delete job.review.coordinatorAuthorizedAt;
+    this.publish(job); // persist the handoff claim before CI or judge side effects
     this.launch(job, "judge");
   }
 
@@ -134,11 +141,18 @@ export class CompletionPipeline {
 
   workerResumed(job: AgentJob): void {
     if (!job.review) throw new Error("No review exists for this job.");
+    const action = this.currentAction(job);
+    if (!action || action.state !== "repairing") throw new Error("A bounded repair attempt must be claimed before resuming the worker.");
     this.transition(job, "worker_resumed", `Same implementation worktree resumed: ${job.isolation.path}`, "coordinator");
   }
 
   nextHandoff(job: AgentJob): void {
     if (!job.review) { this.enqueue(job); return; }
+    const action = this.currentAction(job);
+    const lastTransition = job.review.transitions.at(-1);
+    if (!action || action.state !== "repairing" || lastTransition?.status !== "worker_resumed") {
+      throw new Error("A new handoff is accepted only after a bounded repair claim resumes the same worker.");
+    }
     const now = Date.now();
     const diff = job.diff || "";
     job.handoff = {
@@ -151,8 +165,7 @@ export class CompletionPipeline {
     };
     delete job.review.judge;
     delete job.review.coordinatorAuthorizedAt;
-    const action = this.currentAction(job);
-    if (action?.state === "repairing") {
+    if (action.state === "repairing") {
       action.state = "resolved";
       action.updatedAt = now;
       delete job.review.remediation!.currentActionId;
@@ -184,13 +197,17 @@ export class CompletionPipeline {
         continue;
       }
       const action = this.currentAction(job);
+      if (job.review.status === "merged" || job.integration?.status === "merged") {
+        if (action?.state === "repairing") this.resolveAction(job, action);
+        continue;
+      }
       if (action?.state === "repairing" && action.failureClass === "infrastructure") {
         this.scheduleInfrastructureRetry(job);
       } else if (["ci_running", "judging"].includes(job.review.status)) {
-        this.transition(job, "queued", "Interrupted judge action recovered; awaiting coordinator restart", "server");
+        this.requireAction(job, "infrastructure", "failed", "Interrupted judge action requires a bounded recovery decision");
       } else if (["merge_queued", "merging", "post_merge_ci"].includes(job.review.status)) {
         delete job.review.coordinatorAuthorizedAt;
-        this.transition(job, "blocked", "Interrupted merge recovered safely; coordinator must re-authorize guarded merge", "server");
+        this.requireAction(job, "judge_changes", "blocked", "Interrupted merge recovered safely; return to the same worker before a fresh review");
       }
     }
   }
@@ -212,6 +229,7 @@ export class CompletionPipeline {
             !checks.length ? "No post-merge CI checks detected" : "Post-merge CI failed", checks);
           return;
         }
+        this.resolveInfrastructureRetry(job);
         this.transition(job, "merged", `Post-merge verification passed for ${job.review!.mergeCommit}: ${checks.map((check) => check.command).join(", ")}`, "server");
         return;
       }
@@ -237,6 +255,7 @@ export class CompletionPipeline {
           this.requireAction(job, "judge_changes", "rejected", verdict.summary || "Judge requested changes", undefined, verdict);
           return;
         }
+        this.resolveInfrastructureRetry(job);
         this.transition(job, "approved", verdict.summary, "judge");
         return;
       }
@@ -253,6 +272,7 @@ export class CompletionPipeline {
         if (result.candidateCi) {
           job.review!.postMergeCi = result.candidateCi;
           this.publish(job);
+          this.resolveInfrastructureRetry(job);
           this.transition(job, "merged", `Guarded merge verified as ${result.commit}; exact candidate checks passed before main changed`, "server");
           return;
         }
@@ -264,6 +284,7 @@ export class CompletionPipeline {
             !checks.length ? "No post-merge CI checks detected" : "Post-merge CI failed", checks);
           return;
         }
+        this.resolveInfrastructureRetry(job);
         this.transition(job, "merged", `Guarded merge verified as ${result.commit}; post-merge checks passed: ${checks.map((check) => check.command).join(", ")}`, "server");
       });
     } catch (error) {
@@ -291,9 +312,10 @@ export class CompletionPipeline {
     const review = job.review!;
     review.remediation ??= { maxAttempts: remediationLimit(), rounds: {}, actions: [] };
     const diffHash = createHash("sha256").update(job.diff || "").digest("hex");
-    // Attempts reset only for a materially different implementation or target
-    // commit, never because timestamps or nondeterministic command output vary.
-    const fingerprint = `${failureClass}:${diffHash}:${job.completion?.head || "uncommitted"}:${review.mergeCommit || "unmerged"}`;
+    // The implementation patch is the material identity. Completion commits,
+    // merge commits, timestamps, and command output can change without changing
+    // the implementation and therefore must never replenish the failure budget.
+    const fingerprint = `${failureClass}:${diffHash}`;
     let round = review.remediation.rounds[failureClass];
     if (!round || round.fingerprint !== fingerprint) {
       round = { failureClass, fingerprint, attempts: 0, maxAttempts: review.remediation.maxAttempts, updatedAt: Date.now() };
@@ -331,15 +353,35 @@ export class CompletionPipeline {
     return round;
   }
 
+  private resolveAction(job: AgentJob, action: ActionRequired): void {
+    action.state = "resolved";
+    action.updatedAt = Date.now();
+    if (job.review?.remediation?.currentActionId === action.id) delete job.review.remediation.currentActionId;
+    this.publish(job);
+  }
+
+  private resolveInfrastructureRetry(job: AgentJob): void {
+    const action = this.currentAction(job);
+    if (action?.state === "repairing" && action.failureClass === "infrastructure") {
+      // The following lifecycle transition persists this mutation atomically
+      // with the successful status, so avoid an intermediate publish here.
+      action.state = "resolved";
+      action.updatedAt = Date.now();
+      delete job.review!.remediation!.currentActionId;
+    }
+  }
+
   private scheduleInfrastructureRetry(job: AgentJob): void {
     const action = this.currentAction(job);
     const round = action && job.review?.remediation?.rounds[action.failureClass];
-    if (!action || !round || this.scheduled.has(action.id)) return;
+    if (!action || !round || this.scheduled.has(action.id)
+      || job.review?.status === "merged" || job.integration?.status === "merged") return;
     this.scheduled.add(action.id);
     const delay = Math.max(0, (round.nextRetryAt || Date.now()) - Date.now());
     const timer = setTimeout(() => {
       this.scheduled.delete(action.id);
-      if (this.currentAction(job)?.id !== action.id || action.state !== "repairing") return;
+      if (this.currentAction(job)?.id !== action.id || action.state !== "repairing"
+        || job.review?.status === "merged" || job.integration?.status === "merged") return;
       this.transition(job, "ci_running", `Infrastructure retry ${round.attempts}/${round.maxAttempts} after ${delay}ms backoff`, "coordinator");
       this.launch(job, action.evidence.mergeCommit ? "post" : "judge");
     }, delay);

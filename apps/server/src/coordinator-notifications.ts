@@ -80,12 +80,13 @@ export class CoordinatorNotificationQueue {
       createdAt: Date.now(),
       messageId: randomUUID(),
       wakeRequested: signal.wake,
+      wakeState: signal.wake ? "pending" : undefined,
     };
     this.state.events.push(event);
     // Bound delivered history only. An action-required wake may never be
     // discarded merely because the coordinator stayed busy for a long time.
     while (this.state.events.length > 500) {
-      const removable = this.state.events.findIndex((entry) => !entry.wakeRequested || entry.wakeDeliveredAt !== undefined);
+      const removable = this.state.events.findIndex((entry) => !entry.wakeRequested || entry.wakeState === "delivered" || entry.wakeDeliveredAt !== undefined);
       if (removable < 0) break;
       this.state.events.splice(removable, 1);
     }
@@ -99,21 +100,30 @@ export class CoordinatorNotificationQueue {
 
   private async drain(): Promise<void> {
     if (this.draining || !this.hooks.isIdle()) return;
-    const event = this.state.events.find((entry) => entry.wakeRequested && !entry.wakeDeliveredAt);
+    const event = this.state.events.find((entry) => entry.wakeRequested
+      && entry.wakeState !== "delivered" && entry.wakeDeliveredAt === undefined);
     if (!event) return;
     this.draining = true;
-    // Persist the delivery claim before the external model side effect. A
-    // restart can therefore never issue the same wake twice.
-    event.wakeDeliveredAt = Date.now();
+    // Persist only a claim before the external side effect. If the process
+    // crashes here, restart redelivers the same stable event id; completion is
+    // persisted only after wake resolves.
+    event.wakeState = "claimed";
+    event.wakeClaimedAt = Date.now();
     this.hooks.persist();
+    let delivered = false;
     try {
       await this.hooks.wake(event);
+      event.wakeState = "delivered";
+      event.wakeDeliveredAt = Date.now();
+      this.hooks.persist();
+      delivered = true;
     } catch {
-      // The structured transcript event is already delivered. Keep the durable
-      // claim to avoid duplicate model chatter if the process restarts.
+      event.wakeState = "pending";
+      delete event.wakeClaimedAt;
+      this.hooks.persist();
     } finally {
       this.draining = false;
-      if (this.hooks.isIdle()) void this.drain();
+      if (delivered && this.hooks.isIdle()) void this.drain();
     }
   }
 }
