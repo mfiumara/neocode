@@ -79,6 +79,20 @@ test("removes a clean worktree whose commits were integrated with rewritten hash
   });
 });
 
+test("removes a clean superseded checkout while retaining its committed branch", async () => {
+  await withFixture({ commit: true }, async ({ root, worktree, job }) => {
+    job.integration = {
+      status: "superseded", disposition: "superseded", dispositionReason: "Verified replacement is on main",
+      supersededByCommit: await git(root, ["rev-parse", "main"]),
+    };
+    assert.equal(await janitor(root).review(job), true);
+    assert.equal(job.integration?.status, "superseded");
+    assert.equal(job.cleanup?.status, "removed");
+    if (job.cleanup?.status === "removed") assert.equal(job.cleanup.evidence.mergeMethod, "superseded-branch-retained");
+    assert.equal(await stat(worktree).then(() => true, () => false), false);
+  });
+});
+
 test("refuses completed but unmerged work", async () => {
   await withFixture({}, async ({ root, job }) => {
     assert.equal(await janitor(root).review(job), false);

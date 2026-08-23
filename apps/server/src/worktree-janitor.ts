@@ -104,12 +104,13 @@ export class WorktreeJanitor {
       .split("\n").filter(Boolean);
 
     const targetHead = await this.git(["rev-parse", this.options.targetRef], this.workspaceRoot);
-    let mergeMethod: CleanupEvidence["mergeMethod"] = commits.length ? "commit-ancestry" : "no-changes";
-    // A clean branch with no commits after its immutable base contains no work
-    // to lose. This safely removes wrapper/recovery jobs that touched another
-    // checkout while retaining every branch with unique commits or dirty files.
-    let merged = commits.length === 0;
-    for (const commit of commits) {
+    const superseded = integration === "superseded";
+    let mergeMethod: CleanupEvidence["mergeMethod"] = superseded
+      ? "superseded-branch-retained" : commits.length ? "commit-ancestry" : "no-changes";
+    // Superseded work remains committed on its retained branch, so removing the
+    // clean checkout cannot lose it. Other jobs still require Git integration.
+    let merged = superseded || commits.length === 0;
+    for (const commit of superseded ? [] : commits) {
       if (!(await this.gitSuccess(["merge-base", "--is-ancestor", commit, targetHead], this.workspaceRoot))) {
         merged = false;
         break;
@@ -151,12 +152,14 @@ export class WorktreeJanitor {
       registeredPath: identity.path,
       registeredBranch: identity.branch,
     };
-    job.integration = {
+    if (!superseded) job.integration = {
+      ...job.integration,
       status: "merged",
       targetRef: this.options.targetRef,
       verifiedAt: checkedAt,
       targetHead,
       completionHead: job.completion.head,
+      disposition: job.integration?.disposition || "already_integrated",
     };
 
     await this.git(["worktree", "remove", "--", identity.path], this.workspaceRoot);

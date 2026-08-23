@@ -3,12 +3,14 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { App } from "./App";
 
-test("the composer exposes one normal coordinator action", () => {
+test("the composer exposes send and an accessible image-picker fallback", () => {
   const markup = renderToStaticMarkup(<App />);
   const actions = markup.match(/<div class="action-buttons">(.*?)<\/div>/)?.[1];
 
   assert.ok(actions);
-  assert.equal(actions.match(/<button/g)?.length, 1);
+  assert.equal(actions.match(/<button/g)?.length, 2);
+  assert.match(actions, /aria-label="Choose image attachments"/);
+  assert.match(actions, />Attach images<\/button>/);
   assert.match(actions, />Send <span>↵<\/span><\/button>/);
 });
 

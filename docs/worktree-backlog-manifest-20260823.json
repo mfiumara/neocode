@@ -1,0 +1,948 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-23T15:15:45.671022+00:00",
+  "baseline": {
+    "ref": "main",
+    "commit": "71f7cc5be8c9bdb9eabeb07efb55bdb65c1a5fb1",
+    "rootUntouched": true
+  },
+  "salvage": [
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.neocode/runtime/worktree-salvage/20260823T150623Z",
+      "purpose": "Initial 38-registration capture, including conflicted lifecycle index/worktree before external worker committed",
+      "aggregateChecksumsSha256": "1e2acd609aee4cee30db7ed742c4722d4219263ae8420561546aa8eecb064442",
+      "verified": true
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.neocode/runtime/worktree-salvage/20260823T150859Z",
+      "purpose": "39-registration refresh after f91c790b appeared; all 14 then-dirty worktrees preserved",
+      "aggregateChecksumsSha256": "eedcd5b77fa6bc516be2247e100a3896421fcacf3e0352d991cd47528c7b9940",
+      "verified": true
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.neocode/runtime/worktree-salvage/20260823T151256Z",
+      "purpose": "Authoritative 40-registration refresh after a8102299 appeared; all 16 then-dirty worktrees (including this uncommitted manifest) preserved",
+      "aggregateChecksumsSha256": "8ca84920448b669f943071c5bb2d86e4b33f1a029ee0c38bd4de52ab0c0cb472",
+      "verified": true
+    }
+  ],
+  "candidates": [
+    {
+      "commit": "75352e21fdda78c89964b9c600665ff9b7cf9d7b",
+      "branch": "neocode/verify-image-paste-on-current-ma-e32120ea",
+      "parent": "71f7cc5be8c9bdb9eabeb07efb55bdb65c1a5fb1",
+      "ownerJob": "e32120ea",
+      "status": "ready for independent re-judge; do not merge without coordinator authorization",
+      "evidence": "Full unit/check/build CI passed in recorded review; Playwright Chromium E2E independently rerun with system Chrome: 1 passed."
+    },
+    {
+      "commit": "684f2ada1193b62370fb9f172b7c872cbb863eae",
+      "branch": "neocode/reconcile-coordinator-lifecycle--62c4e517",
+      "parent": "71f7cc5be8c9bdb9eabeb07efb55bdb65c1a5fb1",
+      "ownerJob": "62c4e517",
+      "status": "rejected for missing coordinator wake after async judge and missing captured diff-check evidence; remediation is externally owned",
+      "evidence": "Worker reported npm test (54 server, 25 web), check, build, diff-check; candidate is clean/directly based on main. Preserve as input to f91c790b rather than merging now."
+    },
+    {
+      "commit": null,
+      "branch": "neocode/add-coordinator-ci-remediation-l-f91c790b",
+      "parent": "71f7cc5be8c9bdb9eabeb07efb55bdb65c1a5fb1",
+      "ownerJob": "f91c790b",
+      "status": "running/reserved; no candidate yet",
+      "evidence": "Dirty worktree preserved; intentionally not touched."
+    },
+    {
+      "commit": null,
+      "branch": "neocode/correct-done-and-stale-job-class-a8102299",
+      "parent": "71f7cc5be8c9bdb9eabeb07efb55bdb65c1a5fb1",
+      "ownerJob": "a8102299",
+      "status": "running/reserved; no candidate yet",
+      "evidence": "Dirty worktree preserved; explicitly tasked to consume this manifest and backfill dispositions without cleanup."
+    }
+  ],
+  "worktrees": [
+    {
+      "path": "/Users/mattiafiumara/repos/neocode",
+      "branch": "main",
+      "head": "71f7cc5be8c9bdb9eabeb07efb55bdb65c1a5fb1",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Root checkout is clean at the fixed baseline 71f7cc5; it was inventoried read-only and never mutated."
+    },
+    {
+      "path": "/Users/mattiafiumara/.paseo/worktrees/13yqxxws/rampant-parrot",
+      "branch": "orchestrator-macos",
+      "head": "b09d36c0ac625481785f659f375ca75c89a1c64a",
+      "valid": false,
+      "dirty": null,
+      "statusLines": null,
+      "disposition": "broken registration",
+      "evidence": "git worktree lists it, but its .git points to missing /Users/mattiafiumara/repos/orchestrator/.git/worktrees/rampant-parrot; status fails. It belongs to orchestrator-macos, not this Neocode backlog.",
+      "error": "fatal: not a git repository: /Users/mattiafiumara/repos/orchestrator/.git/worktrees/rampant-parrot"
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/add-coordinator-ci-remediation-l-f91c790b",
+      "branch": "neocode/add-coordinator-ci-remediation-l-f91c790b",
+      "head": "3337f0035117518b7d6cc9513e43042780405a13",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 9,
+      "disposition": "actionable unique work",
+      "evidence": "Coordinator-spawned job f91c790b is running and owns its dirty files. Preserved in refreshed snapshots; do not commit/rebase/overwrite while active."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/add-model-selection-ui-98cf0e6a",
+      "branch": "neocode/add-model-selection-ui-98cf0e6a",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 20,
+      "disposition": "superseded duplicate",
+      "evidence": "Dirty pre-integration web implementation was semantically reconciled by d913671; current main exposes the runtime-backed model picker. Snapshot preserves all 20 paths."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/add-per-step-activity-timers-011964e9",
+      "branch": "neocode/add-per-step-activity-timers-011964e9",
+      "head": "49f5b8a15face9d5448f5b7c364b83aec2e73005",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Feature commit 49f5b8a was semantically reconciled as main commit c1a6d09; transcript records the same timing requirements and passing tests."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/adopt-shadcn-ui-components-ee87c4d3",
+      "branch": "neocode/adopt-shadcn-ui-components-ee87c4d3",
+      "head": "d913671041d1c3bbd9b0a33a37b7dfa9f15dc820",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 18,
+      "disposition": "superseded duplicate",
+      "evidence": "Interrupted dirty prototype was resumed by job 00779657 (2ac7c54) and semantically landed as ab72094; 13 UI primitive files are byte-identical to main."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/automated-review-and-merge-pipel-e8b1a035",
+      "branch": "neocode/automated-review-and-merge-pipel-e8b1a035",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 7,
+      "disposition": "intentionally cancelled",
+      "evidence": "Implemented the pipeline in removed legacy Lua. Explicit follow-up 3ca0d2c3 rejected that target; TypeScript pipeline was delivered by 663fc0f/80952ea."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/automatically-resume-interrupted-be3dbf65",
+      "branch": "neocode/automatically-resume-interrupted-be3dbf65",
+      "head": "7d573d787382d10a3cb3142dfe6329d3934750a8",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "7d573d7 was reconciled into main as 83840ab, with prerequisite pipeline represented by 80952ea."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/backtick-command-palette-navigat-541a551d",
+      "branch": "neocode/backtick-command-palette-navigat-541a551d",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 5,
+      "disposition": "intentionally cancelled",
+      "evidence": "Wrong-target legacy Lua implementation. Its intended web behavior was ported in d913671 and retained by 5322a17; legacy Lua was removed by 409b1f0."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/change-palette-shortcut-to-comma-9d06babc",
+      "branch": "neocode/change-palette-shortcut-to-comma-9d06babc",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 2,
+      "disposition": "superseded duplicate",
+      "evidence": "No current durable job/transcript. Its comma shortcut conflicts with the later explicit Cmd/Ctrl-K plus NORMAL-mode backtick architecture in 5322a17."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/clipboard-image-attachments-f7324f9f",
+      "branch": "neocode/clipboard-image-attachments-f7324f9f",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 20,
+      "disposition": "superseded duplicate",
+      "evidence": "Dirty initial implementation was semantically reconciled into d913671, then hardened by 47b416d and candidate 75352e2. Snapshot preserves the original 20 paths."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/correct-done-and-stale-job-class-a8102299",
+      "branch": "neocode/correct-done-and-stale-job-class-a8102299",
+      "head": "4ae6a6d73e2f76d1d81d2a8ef036b0f1a467a53e",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 12,
+      "disposition": "actionable unique work",
+      "evidence": "Coordinator-spawned job a8102299 is running the metadata/disposition migration requested by this audit and owns its dirty files. Preserved in the third snapshot; do not duplicate or overwrite."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/fix-transcript-bottom-scrolling-c616e48c",
+      "branch": "neocode/fix-transcript-bottom-scrolling-c616e48c",
+      "head": "4144b98c0eee05d81e7f6b8de23678a124d07ea5",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "4144b98 was semantically reconciled as c676606; both implement local near-bottom scrolling and clipping fixes."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/flexible-worker-isolation-policy-6e7402c3",
+      "branch": "neocode/flexible-worker-isolation-policy-6e7402c3",
+      "head": "e1930fbee05e7ffc8aa7c7163cbc33ac86c09cb2",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Patch-id a8fbda8b0fd10cd8769348641bd8449f5ea4222c is identical for e1930fb and main commit 531db9a."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/investigate-and-fix-image-paste-59dc2307",
+      "branch": "neocode/investigate-and-fix-image-paste-59dc2307",
+      "head": "530e1a4cd9df5d7159015063bec42983e0365b29",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "530e1a4 was semantically reconciled as 47b416d. The StrictMode follow-up remains separately actionable at 75352e2."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/live-agent-activity-visibility-a38c2084",
+      "branch": "neocode/live-agent-activity-visibility-a38c2084",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 19,
+      "disposition": "superseded duplicate",
+      "evidence": "Dirty initial implementation was semantically reconciled into d913671; main contains activity.ts/tests and integrated UI."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/make-coordinator-own-review-and--870fa4f3",
+      "branch": "neocode/make-coordinator-own-review-and--870fa4f3",
+      "head": "d913671041d1c3bbd9b0a33a37b7dfa9f15dc820",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "superseded duplicate",
+      "evidence": "Interrupted before producing a commit; its explicit coordinator-owned architecture was implemented by 83d2a97 and reconciled by 684f2ad."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/make-reconciliation-a-durable-ha-6e225474",
+      "branch": "neocode/make-reconciliation-a-durable-ha-6e225474",
+      "head": "d913671041d1c3bbd9b0a33a37b7dfa9f15dc820",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 10,
+      "disposition": "superseded duplicate",
+      "evidence": "Dirty auto-supervisor design is superseded by the later explicit coordinator-owned architecture. Snapshot preserves lifecycle-supervisor files; do not combine its autonomous product decisions."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/model-variant-and-effort-control-5e425212",
+      "branch": "neocode/model-variant-and-effort-control-5e425212",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 20,
+      "disposition": "superseded duplicate",
+      "evidence": "Dirty initial implementation was semantically reconciled into d913671 with live Pi capability handling."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/persist-and-restore-neocode-stat-d4d5f95c",
+      "branch": "neocode/persist-and-restore-neocode-stat-d4d5f95c",
+      "head": "0f21b7b2e0545f5e530c55ff614577a9ee5fe780",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "0f21b7b and 7dd4bc2 have identical stable patch-id 68a28e5c980be39b3d922e201bed066a3268ca96."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/port-completion-hooks-pipeline-t-3ca0d2c3",
+      "branch": "neocode/port-completion-hooks-pipeline-t-3ca0d2c3",
+      "head": "d913671041d1c3bbd9b0a33a37b7dfa9f15dc820",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 6,
+      "disposition": "superseded duplicate",
+      "evidence": "Interrupted dirty TypeScript implementation was resumed as 663fc0f and landed patch-equivalently as 80952ea (stable patch-id 3dca43e4c7f13891ba08a5b7a333edd1c836ad41)."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/reconcile-and-integrate-complete-6a2c4ad2",
+      "branch": "neocode/reconcile-and-integrate-complete-6a2c4ad2",
+      "head": "d913671041d1c3bbd9b0a33a37b7dfa9f15dc820",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "d913671 is an ancestor of main and is the explicit semantic reconciliation for the first feature batch."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/reconcile-coordinator-lifecycle--62c4e517",
+      "branch": "neocode/reconcile-coordinator-lifecycle--62c4e517",
+      "head": "684f2ada1193b62370fb9f172b7c872cbb863eae",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "actionable unique work",
+      "evidence": "External lifecycle worker completed clean commit 684f2ada1193b62370fb9f172b7c872cbb863eae directly on 71f7cc5 and entered independent review. Its earlier conflicted/index state is preserved in snapshot 20260823T150623Z; do not duplicate or overwrite."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/remove-legacy-lua-implementation-8c8c3865",
+      "branch": "neocode/remove-legacy-lua-implementation-8c8c3865",
+      "head": "26d429036ec111f18415b103a494cc4ee47da4a7",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "26d4290 was semantically reconciled as main commit 409b1f0; main has no lua/neocode or plugin legacy tree."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/render-transcript-markdown-ac316d50",
+      "branch": "neocode/render-transcript-markdown-ac316d50",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 20,
+      "disposition": "superseded duplicate",
+      "evidence": "Dirty implementation was semantically reconciled into d913671; Markdown.tsx and Markdown.test.tsx are byte-identical to main."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/restore-cursor-per-thread-50a773d3",
+      "branch": "neocode/restore-cursor-per-thread-50a773d3",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 19,
+      "disposition": "superseded duplicate",
+      "evidence": "Dirty implementation was semantically reconciled into d913671; threadNavigation.ts and its test are byte-identical to main."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/restore-root-after-audit-violati-ae65aed6",
+      "branch": "neocode/restore-root-after-audit-violati-ae65aed6",
+      "head": "71f7cc5be8c9bdb9eabeb07efb55bdb65c1a5fb1",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Clean no-op worktree equals main at 71f7cc5; root recovery evidence remains under ignored runtime storage."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-blocked-batch-reconciliat-e883120c",
+      "branch": "neocode/resume-blocked-batch-reconciliat-e883120c",
+      "head": "d913671041d1c3bbd9b0a33a37b7dfa9f15dc820",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Its continuation produced/fed 1832651, which is an ancestor of main; stale branch pointer d913671 contains no unique remaining tree."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-coordinator-owned-lifecyc-1a1855a0",
+      "branch": "neocode/resume-coordinator-owned-lifecyc-1a1855a0",
+      "head": "83d2a97b5ed9227583f34df12b9df06fb23949d3",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "superseded duplicate",
+      "evidence": "83d2a97 is the source architecture reconciled by active follow-up 62c4e517 into candidate 684f2ad on current main."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-interrupted-shadcn-migrat-00779657",
+      "branch": "neocode/resume-interrupted-shadcn-migrat-00779657",
+      "head": "2ac7c5401562090af70625e70ffeffc41dbd21b3",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "2ac7c54 was semantically reconciled as ab72094 while preserving later overlapping UI changes."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-web-completion-pipeline-770d3f76",
+      "branch": "neocode/resume-web-completion-pipeline-770d3f76",
+      "head": "663fc0f1a792f1a3460aee535b5d8e639d7bad85",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "663fc0f and main 80952ea share stable patch-id 3dca43e4c7f13891ba08a5b7a333edd1c836ad41."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/review-reconcile-and-land-comple-e50094b9",
+      "branch": "neocode/review-reconcile-and-land-comple-e50094b9",
+      "head": "18326516c5be222836629d60754376ac32406c73",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "1832651 is an ancestor of main and contains the coordinator notification/lifecycle reconciliation batch."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/safely-land-reconciled-ui-on-mai-ba959014",
+      "branch": "neocode/safely-land-reconciled-ui-on-mai-ba959014",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "superseded duplicate",
+      "evidence": "Interrupted landing helper made no branch commit; root recovery and later guarded integration landed d913671 and successors without needing this stale checkout."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/salvage-and-reconcile-every-work-4856566e",
+      "branch": "neocode/salvage-and-reconcile-every-work-4856566e",
+      "head": "ac011cdc04f1e2050a489477e3e601105f040ddd",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "actionable unique work",
+      "evidence": "This isolated worker owns only the tracked manifest candidate and never mutates root/main."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/session-6a8a0557cb51",
+      "branch": "orch/session-6a8a0557cb51",
+      "head": "28261f0df79239d8f771c949f88d49bcc7949a6d",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "unknown",
+      "evidence": "Legacy metadata says active, but branch remains at initial 28261f0 and transcript is empty; no evidence supports merge or deletion."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/session-6a8ac2319711",
+      "branch": "orch/session-6a8ac2319711",
+      "head": "28261f0df79239d8f771c949f88d49bcc7949a6d",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "unknown",
+      "evidence": "Legacy metadata says active, but branch remains at initial 28261f0 and transcript is empty; no evidence supports merge or deletion."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/simplify-composer-and-polish-pal-39ba9695",
+      "branch": "neocode/simplify-composer-and-polish-pal-39ba9695",
+      "head": "8af57109ffd8503cbc9ebd76b49c1946420128e0",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "8af5710 was semantically reconciled as main commit 5322a17, preserving Cmd-K/backtick and removing handoff/isolation composer UI."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/verify-image-paste-on-current-ma-e32120ea",
+      "branch": "neocode/verify-image-paste-on-current-ma-e32120ea",
+      "head": "75352e21fdda78c89964b9c600665ff9b7cf9d7b",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "actionable unique work",
+      "evidence": "Clean commit 75352e21fdda78c89964b9c600665ff9b7cf9d7b is directly based on 71f7cc5. Review rejected only for absent captured browser evidence; independent rerun with system Chrome passed 1/1."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/visual-model-picker-0476be99",
+      "branch": "neocode/visual-model-picker-0476be99",
+      "head": "578c7eb65aadaac4885e9c5c4c5a4be78973e989",
+      "valid": true,
+      "dirty": true,
+      "statusLines": 8,
+      "disposition": "intentionally cancelled",
+      "evidence": "Wrong-target legacy Lua implementation. Intended runtime-backed web picker was ported in d913671; legacy tree was deliberately removed."
+    },
+    {
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/worker-done-section-and-safe-jan-a2547df6",
+      "branch": "neocode/worker-done-section-and-safe-jan-a2547df6",
+      "head": "9c22c70290bfb55b7380ffaf62ee1cbb4636a4c4",
+      "valid": true,
+      "dirty": false,
+      "statusLines": 0,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "9c22c70 was semantically reconciled as main commit 5a26172 with guarded janitor behavior."
+    }
+  ],
+  "jobs": [
+    {
+      "id": "a8102299",
+      "title": "Correct Done and stale job classification",
+      "status": "running",
+      "branch": "neocode/correct-done-and-stale-job-class-a8102299",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/correct-done-and-stale-job-class-a8102299",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "actionable unique work",
+      "evidence": "Coordinator-owned backlog-disposition migration is running; preserved dirty and reserved. It explicitly consumes this manifest when available."
+    },
+    {
+      "id": "f91c790b",
+      "title": "Add coordinator CI remediation loops",
+      "status": "running",
+      "branch": "neocode/add-coordinator-ci-remediation-l-f91c790b",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/add-coordinator-ci-remediation-l-f91c790b",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "actionable unique work",
+      "evidence": "Coordinator-owned CI-remediation worker is running; preserved dirty and reserved."
+    },
+    {
+      "id": "4856566e",
+      "title": "Salvage and reconcile every worktree",
+      "status": "running",
+      "branch": "neocode/salvage-and-reconcile-every-work-4856566e",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/salvage-and-reconcile-every-work-4856566e",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "actionable unique work",
+      "evidence": "Current inventory/salvage worker; output is this manifest commit."
+    },
+    {
+      "id": "62c4e517",
+      "title": "Reconcile coordinator lifecycle onto main",
+      "status": "completed",
+      "branch": "neocode/reconcile-coordinator-lifecycle--62c4e517",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/reconcile-coordinator-lifecycle--62c4e517",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": "684f2ada1193b62370fb9f172b7c872cbb863eae",
+      "disposition": "actionable unique work",
+      "evidence": "Produced candidate 684f2ad on current main; independent review is coordinator-owned."
+    },
+    {
+      "id": "e32120ea",
+      "title": "Verify image paste on current main",
+      "status": "completed",
+      "branch": "neocode/verify-image-paste-on-current-ma-e32120ea",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/verify-image-paste-on-current-ma-e32120ea",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": "75352e21fdda78c89964b9c600665ff9b7cf9d7b",
+      "disposition": "actionable unique work",
+      "evidence": "Produced candidate 75352e2. Automated judge rejected solely because pipeline evidence omitted the E2E command; independent E2E rerun passed."
+    },
+    {
+      "id": "ae65aed6",
+      "title": "Restore root after audit violation",
+      "status": "completed",
+      "branch": "neocode/restore-root-after-audit-violati-ae65aed6",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/restore-root-after-audit-violati-ae65aed6",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": "71f7cc5be8c9bdb9eabeb07efb55bdb65c1a5fb1",
+      "disposition": "already merged/content-equivalent",
+      "evidence": "No-op clean branch equals main; audit/root restoration already complete."
+    },
+    {
+      "id": "1a1855a0",
+      "title": "Resume coordinator-owned lifecycle work",
+      "status": "completed",
+      "branch": "neocode/resume-coordinator-owned-lifecyc-1a1855a0",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-coordinator-owned-lifecyc-1a1855a0",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": "83d2a97b5ed9227583f34df12b9df06fb23949d3",
+      "disposition": "superseded duplicate",
+      "evidence": "Superseded by lifecycle reconciliation job 62c4e517."
+    },
+    {
+      "id": "6044712e",
+      "title": "Audit all registered worktrees",
+      "status": "needs_attention",
+      "branch": "main",
+      "path": "/Users/mattiafiumara/repos/neocode",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "superseded duplicate",
+      "evidence": "Audit job needs_attention but its scope is superseded by 4856566e; prior root-recovery archive remains preserved."
+    },
+    {
+      "id": "870fa4f3",
+      "title": "Make coordinator own review and merging",
+      "status": "interrupted",
+      "branch": "neocode/make-coordinator-own-review-and--870fa4f3",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/make-coordinator-own-review-and--870fa4f3",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "superseded duplicate",
+      "evidence": "Interrupted predecessor to 1a1855a0/62c4e517."
+    },
+    {
+      "id": "6e225474",
+      "title": "Make reconciliation a durable harness responsibility",
+      "status": "interrupted",
+      "branch": "neocode/make-reconciliation-a-durable-ha-6e225474",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/make-reconciliation-a-durable-ha-6e225474",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "superseded duplicate",
+      "evidence": "Autonomous supervisor architecture explicitly superseded by coordinator-owned lifecycle."
+    },
+    {
+      "id": "e883120c",
+      "title": "Resume blocked batch reconciliation",
+      "status": "interrupted",
+      "branch": "neocode/resume-blocked-batch-reconciliat-e883120c",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-blocked-batch-reconciliat-e883120c",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Recovery integration outcome 1832651 is in main."
+    },
+    {
+      "id": "e50094b9",
+      "title": "Review, reconcile, and land completed batch",
+      "status": "interrupted",
+      "branch": "neocode/review-reconcile-and-land-comple-e50094b9",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/review-reconcile-and-land-comple-e50094b9",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Its 1832651 output is an ancestor of main."
+    },
+    {
+      "id": "be3dbf65",
+      "title": "Automatically resume interrupted workers",
+      "status": "completed",
+      "branch": "neocode/automatically-resume-interrupted-be3dbf65",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/automatically-resume-interrupted-be3dbf65",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Recovery feature semantically landed as 83840ab."
+    },
+    {
+      "id": "59dc2307",
+      "title": "Investigate and fix image paste",
+      "status": "completed",
+      "branch": "neocode/investigate-and-fix-image-paste-59dc2307",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/investigate-and-fix-image-paste-59dc2307",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Image handling fix semantically landed as 47b416d."
+    },
+    {
+      "id": "39ba9695",
+      "title": "Simplify composer and polish palette",
+      "status": "completed",
+      "branch": "neocode/simplify-composer-and-polish-pal-39ba9695",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/simplify-composer-and-polish-pal-39ba9695",
+      "reviewStatus": "ci_failed",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "UI polish semantically landed as 5322a17."
+    },
+    {
+      "id": "a2547df6",
+      "title": "Worker done section and safe janitor",
+      "status": "completed",
+      "branch": "neocode/worker-done-section-and-safe-jan-a2547df6",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/worker-done-section-and-safe-jan-a2547df6",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Done/janitor behavior semantically landed as 5a26172."
+    },
+    {
+      "id": "011964e9",
+      "title": "Add per-step activity timers",
+      "status": "completed",
+      "branch": "neocode/add-per-step-activity-timers-011964e9",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/add-per-step-activity-timers-011964e9",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Timing behavior semantically landed as c1a6d09."
+    },
+    {
+      "id": "770d3f76",
+      "title": "Resume web completion pipeline",
+      "status": "completed",
+      "branch": "neocode/resume-web-completion-pipeline-770d3f76",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-web-completion-pipeline-770d3f76",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Pipeline patch-equivalently landed as 80952ea."
+    },
+    {
+      "id": "00779657",
+      "title": "Resume interrupted shadcn migration",
+      "status": "completed",
+      "branch": "neocode/resume-interrupted-shadcn-migrat-00779657",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-interrupted-shadcn-migrat-00779657",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Shadcn work semantically landed as ab72094."
+    },
+    {
+      "id": "ee87c4d3",
+      "title": "Adopt shadcn UI components",
+      "status": "interrupted",
+      "branch": "neocode/adopt-shadcn-ui-components-ee87c4d3",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/adopt-shadcn-ui-components-ee87c4d3",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "superseded duplicate",
+      "evidence": "Interrupted source resumed by 00779657."
+    },
+    {
+      "id": "8c8c3865",
+      "title": "Remove legacy Lua implementation",
+      "status": "completed",
+      "branch": "neocode/remove-legacy-lua-implementation-8c8c3865",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/remove-legacy-lua-implementation-8c8c3865",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Legacy removal semantically landed as 409b1f0."
+    },
+    {
+      "id": "3ca0d2c3",
+      "title": "Port completion hooks pipeline to web backend",
+      "status": "interrupted",
+      "branch": "neocode/port-completion-hooks-pipeline-t-3ca0d2c3",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/port-completion-hooks-pipeline-t-3ca0d2c3",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "superseded duplicate",
+      "evidence": "Interrupted source resumed by 770d3f76."
+    },
+    {
+      "id": "ba959014",
+      "title": "Safely land reconciled UI on main",
+      "status": "interrupted",
+      "branch": "neocode/safely-land-reconciled-ui-on-mai-ba959014",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/safely-land-reconciled-ui-on-mai-ba959014",
+      "reviewStatus": null,
+      "integrationStatus": null,
+      "completionHead": null,
+      "disposition": "superseded duplicate",
+      "evidence": "Stale landing helper superseded by completed root recovery/integration."
+    },
+    {
+      "id": "6a2c4ad2",
+      "title": "Reconcile and integrate completed feature batch",
+      "status": "completed",
+      "branch": "neocode/reconcile-and-integrate-complete-6a2c4ad2",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/reconcile-and-integrate-complete-6a2c4ad2",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "d913671 and its reconciled feature batch are ancestors/content in main."
+    },
+    {
+      "id": "e8b1a035",
+      "title": "Automated review and merge pipeline",
+      "status": "completed",
+      "branch": "neocode/automated-review-and-merge-pipel-e8b1a035",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/automated-review-and-merge-pipel-e8b1a035",
+      "reviewStatus": "ci_failed",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "intentionally cancelled",
+      "evidence": "Wrong-target legacy Lua implementation; superseded by TypeScript pipeline."
+    },
+    {
+      "id": "c616e48c",
+      "title": "Fix transcript bottom scrolling",
+      "status": "completed",
+      "branch": "neocode/fix-transcript-bottom-scrolling-c616e48c",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/fix-transcript-bottom-scrolling-c616e48c",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Scrolling fix semantically landed as c676606."
+    },
+    {
+      "id": "50a773d3",
+      "title": "Restore cursor per thread",
+      "status": "completed",
+      "branch": "neocode/restore-cursor-per-thread-50a773d3",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/restore-cursor-per-thread-50a773d3",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Cursor restoration integrated by d913671."
+    },
+    {
+      "id": "d4d5f95c",
+      "title": "Persist and restore Neocode state",
+      "status": "completed",
+      "branch": "neocode/persist-and-restore-neocode-stat-d4d5f95c",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/persist-and-restore-neocode-stat-d4d5f95c",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Persistence patch-equivalently landed as 7dd4bc2."
+    },
+    {
+      "id": "541a551d",
+      "title": "Backtick command palette navigation",
+      "status": "completed",
+      "branch": "neocode/backtick-command-palette-navigat-541a551d",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/backtick-command-palette-navigat-541a551d",
+      "reviewStatus": "ci_failed",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "intentionally cancelled",
+      "evidence": "Wrong-target Lua implementation; intent ported to web."
+    },
+    {
+      "id": "0476be99",
+      "title": "Visual model picker",
+      "status": "completed",
+      "branch": "neocode/visual-model-picker-0476be99",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/visual-model-picker-0476be99",
+      "reviewStatus": "ci_failed",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "intentionally cancelled",
+      "evidence": "Wrong-target Lua implementation; intent ported to web."
+    },
+    {
+      "id": "ac316d50",
+      "title": "Render transcript markdown",
+      "status": "completed",
+      "branch": "neocode/render-transcript-markdown-ac316d50",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/render-transcript-markdown-ac316d50",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Markdown feature integrated by d913671."
+    },
+    {
+      "id": "5e425212",
+      "title": "Model variant and effort controls",
+      "status": "completed",
+      "branch": "neocode/model-variant-and-effort-control-5e425212",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/model-variant-and-effort-control-5e425212",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Variant/effort feature integrated by d913671."
+    },
+    {
+      "id": "a38c2084",
+      "title": "Live agent activity visibility",
+      "status": "completed",
+      "branch": "neocode/live-agent-activity-visibility-a38c2084",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/live-agent-activity-visibility-a38c2084",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Activity feature integrated by d913671."
+    },
+    {
+      "id": "f7324f9f",
+      "title": "Clipboard image attachments",
+      "status": "completed",
+      "branch": "neocode/clipboard-image-attachments-f7324f9f",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/clipboard-image-attachments-f7324f9f",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Clipboard attachments integrated by d913671 and later hardened."
+    },
+    {
+      "id": "6e7402c3",
+      "title": "Flexible worker isolation policy",
+      "status": "completed",
+      "branch": "neocode/flexible-worker-isolation-policy-6e7402c3",
+      "path": "/Users/mattiafiumara/repos/neocode/.worktrees/flexible-worker-isolation-policy-6e7402c3",
+      "reviewStatus": "rejected",
+      "integrationStatus": "conflicted",
+      "completionHead": null,
+      "disposition": "already merged/content-equivalent",
+      "evidence": "Isolation patch-equivalently landed as 531db9a."
+    }
+  ],
+  "legacySessions": [
+    {
+      "id": "6a8a0557b2e7",
+      "worktree": "session-6a8a0557cb51",
+      "disposition": "unknown",
+      "evidence": "Metadata active; empty transcript; branch at initial commit."
+    },
+    {
+      "id": "6a8ac231c0d3",
+      "worktree": "session-6a8ac2319711",
+      "disposition": "unknown",
+      "evidence": "Metadata active; empty transcript; branch at initial commit."
+    },
+    {
+      "id": "6a8ac1ddb2e7",
+      "worktree": "session-6a8ac1ddcb51",
+      "disposition": "broken registration",
+      "evidence": "Metadata archived; registered worktree/path absent; branch pointers diverge (orch branch initial, legacy session branch 578c7eb)."
+    }
+  ],
+  "backfillPlan": [
+    "Under the serialized coordinator lifecycle, atomically mark jobs mapped to ancestor/patch-id/semantic main commits as merged with targetRef main, targetHead 71f7cc5, source/completion head, evidence kind, evidence commit/patch-id, and verifiedAt.",
+    "Mark resumed originals as supersededBy their successor job; mark wrong-target Lua jobs cancelled with explicit reason and replacement commit(s).",
+    "Do not backfill e32120ea, 62c4e517, f91c790b, or this manifest job as merged until independent judge approval and guarded serialized integration complete.",
+    "Leave unknown legacy sessions unresolved until a human explicitly archives them."
+  ],
+  "guardedCleanupPlan": [
+    "No deletion is performed by this task.",
+    "Never delete a dirty worktree; verify status including untracked files immediately before cleanup.",
+    "Require durable branch/path/completion-head identity, no active worker/review/integration, explicit disposition, main ancestry or recorded semantic/patch-id evidence, grace expiry, and the shared integration lock.",
+    "Re-read git worktree list and root/main head after taking the lock; refuse if main moved or root is dirty.",
+    "Retain branches and both salvage snapshots; prune only stale registration metadata after verifying it cannot reference a live repository."
+  ],
+  "tests": [
+    {
+      "command": "shasum -a 256 -c SHA256SUMS.ALL",
+      "where": "/Users/mattiafiumara/repos/neocode/.neocode/runtime/worktree-salvage/20260823T150623Z",
+      "result": "pass"
+    },
+    {
+      "command": "shasum -a 256 -c SHA256SUMS.ALL",
+      "where": "/Users/mattiafiumara/repos/neocode/.neocode/runtime/worktree-salvage/20260823T150859Z",
+      "result": "pass"
+    },
+    {
+      "command": "shasum -a 256 -c SHA256SUMS.ALL",
+      "where": "/Users/mattiafiumara/repos/neocode/.neocode/runtime/worktree-salvage/20260823T151256Z",
+      "result": "pass"
+    },
+    {
+      "command": "PW_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npm run test:e2e -w @neocode/web",
+      "where": "/Users/mattiafiumara/repos/neocode/.worktrees/verify-image-paste-on-current-ma-e32120ea",
+      "result": "pass: 1 Chromium test"
+    },
+    {
+      "command": "npm test; npm run check; npm run build; git diff --check",
+      "where": "candidate 684f2ad (worker evidence)",
+      "result": "pass: 54 server tests, 25 web tests; check/build/diff-check pass"
+    }
+  ]
+}

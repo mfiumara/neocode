@@ -14,8 +14,8 @@ The React client communicates with the server over WebSocket. There is no editor
 
 ## Features
 
-- persistent main coordinator that owns handoff reconciliation, independent judging, feedback rounds, and guarded merges
-- background Pi workers with configurable worktree/root isolation; implementation workers never merge root/main
+- persistent main coordinator that owns handoff reconciliation, independent judging, feedback rounds, and guarded rebased fast-forward integration
+- background Pi workers with configurable worktree/root isolation; implementation workers never integrate root/main
 - durable coordinator/job transcripts, structured handoffs, visible lifecycle transitions, and workspace-scoped browser state
 - live coordinator/worker activity, cancellation, and diff inspection
 - per-thread cursor and viewport restoration
