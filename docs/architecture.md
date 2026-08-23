@@ -8,20 +8,21 @@ Pi owns model/provider integration, the tool loop, context compaction, and agent
 
 ## Runtime model
 
-The coordinator receives read/search tools plus three orchestration tools:
+The main coordinator's primary job is reconciliation and integration. Alongside read/search it receives explicit orchestration tools: `delegate_task`, `list_jobs`, `inspect_job`, `start_judge`, `request_worker_changes`, `retry_infrastructure`, and `guarded_merge`.
 
-- `delegate_task`
-- `list_jobs`
-- `inspect_job`
+It cannot edit the checkout directly and is always anchored at the repository root. Implementation workers run asynchronously in worktrees and never mutate or merge root/main. Completion emits a durable structured handoff (report, requirements, exact diff hash, branch/worktree, tests, and risks), appends it to the main transcript, and schedules one coordinator wake. User prompts retain priority while lifecycle events wait durably.
 
-It cannot edit the checkout directly and is always anchored at the repository root. `delegate_task` starts a separate Pi session and returns immediately. Each request carries an `auto`, `worktree`, or `root` isolation choice. Auto uses a worktree unless a task is clearly non-mutating; explicit choices win. Worktree jobs create a branch and checkout under `.worktrees`, while root jobs use the existing checkout without worktree creation or cleanup. The worker gets Pi's normal coding tools and runs asynchronously. Completion updates application state but does not automatically inject the worker transcript or diff into the coordinator context.
+Review is coordinator-owned: the coordinator explicitly starts a fresh independent judge, which reports but cannot merge. Worker CI, isolated candidate CI, judge-requested changes, conflicts, and post-merge verification failures create durable `action_required` records containing exact command/output evidence and wake the coordinator once. The coordinator sends specific feedback to the same worker worktree; every feedback → resume → handoff → CI → fresh-judge transition is persisted and shown in the main thread and review UI. Transient infrastructure failures use an explicitly authorized exponential-backoff retry instead of source feedback.
+
+Repair accounting is persisted per failure class and material diff/commit fingerprint (default three rounds). Nondeterministic diagnostic text cannot reset the budget; only a materially changed diff or commit can. Exhaustion marks the job `needs_attention` while retaining every diagnostic. A post-merge failure therefore never becomes Done. Only `guarded_merge` records coordinator authorization. The server serializes the authorized root operation and first validates the exact candidate merge tree in an isolated checkout; workers and judges have no merge capability. Startup may resume an already claimed worker repair or safe infrastructure retry, but never invents a fix, verdict, merge authorization, or duplicate attempt.
 
 ## Application state
 
 The WebSocket protocol carries snapshots and incremental updates for:
 
 - coordinator status and transcript
-- worker metadata, transcript, report and diff
+- worker metadata, transcript, structured handoff, report and diff
+- every concise lifecycle transition and its owner in the main transcript
 - errors
 
 UI-local context basket entries are materialized into the next coordinator prompt.

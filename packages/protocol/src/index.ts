@@ -13,7 +13,40 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 export type ReviewStatus =
   | "queued" | "ci_running" | "ci_failed" | "judging" | "rejected"
   | "approved" | "merge_queued" | "merging" | "post_merge_ci"
-  | "merged" | "post_ci_failed" | "blocked" | "conflict" | "failed";
+  | "merged" | "post_ci_failed" | "blocked" | "conflict" | "failed"
+  | "feedback_sent" | "worker_resumed" | "handoff_received" | "needs_attention";
+
+export type RemediationFailureClass =
+  | "worker_ci" | "candidate_ci" | "judge_changes" | "conflict" | "post_merge_ci" | "infrastructure";
+
+export interface RemediationRound {
+  failureClass: RemediationFailureClass;
+  fingerprint: string;
+  attempts: number;
+  maxAttempts: number;
+  nextRetryAt?: number;
+  updatedAt: number;
+}
+
+export interface ActionRequiredEvidence {
+  detail: string;
+  checks?: CheckEvidence[];
+  judge?: JudgeEvidence;
+  mergeCommit?: string;
+}
+
+export interface ActionRequired {
+  id: string;
+  failureClass: RemediationFailureClass;
+  fingerprint: string;
+  state: "pending" | "repairing" | "resolved" | "exhausted";
+  attempt: number;
+  maxAttempts: number;
+  createdAt: number;
+  updatedAt: number;
+  evidence: ActionRequiredEvidence;
+  feedback?: string;
+}
 
 export interface CheckEvidence {
   command: string;
@@ -45,10 +78,24 @@ export interface ReviewTransition {
   status: ReviewStatus;
   at: number;
   detail?: string;
+  /** Product decisions are attributable to the main coordinator, never the supervisor. */
+  owner?: "worker" | "coordinator" | "judge" | "server";
+}
+
+export interface WorkerHandoff {
+  report: string;
+  requirements: string[];
+  diffSha256: string;
+  branch: string;
+  worktree: string;
+  tests: string[];
+  risks: string[];
+  round: number;
+  createdAt: number;
 }
 
 export interface JobReview {
-  /** Stable completion-hook token. Its presence prevents duplicate automatic runs. */
+  /** Stable completion-hook token. Its presence prevents duplicate coordinator wakes. */
   hookToken: string;
   status: ReviewStatus;
   attempt: number;
@@ -59,6 +106,18 @@ export interface JobReview {
   postMergeCi?: CheckEvidence[];
   judge?: JudgeEvidence;
   mergeCommit?: string;
+  /** Set only by the coordinator's guarded_merge tool call. */
+  coordinatorAuthorizedAt?: number;
+  /** Handoff round durably claimed by the most recent explicit judge start. */
+  judgeHandoffRound?: number;
+  feedback?: string[];
+  /** Durable coordinator-owned repair accounting and complete failure evidence. */
+  remediation?: {
+    maxAttempts: number;
+    rounds: Partial<Record<RemediationFailureClass, RemediationRound>>;
+    actions: ActionRequired[];
+    currentActionId?: string;
+  };
   error?: string;
 }
 
@@ -204,8 +263,10 @@ export interface AgentJob {
   recovery?: WorkerRecovery;
   /** Every process launch is a distinct, visible attempt. */
   attempts?: WorkerAttempt[];
-  /** Durable automated CI, independent review, and reconciliation state. */
+  /** Durable coordinator-owned review and reconciliation state. */
   review?: JobReview;
+  /** Structured worker-to-main-thread completion evidence. */
+  handoff?: WorkerHandoff;
   /** Immutable creation identity used to reject stale or repurposed paths. */
   worktreeIdentity?: WorktreeIdentity;
   completion?: JobCompletion;
@@ -246,8 +307,6 @@ export type ClientMessage =
   | { type: "delegate"; text: string; isolation?: RequestedIsolationMode; attachments?: ImageAttachment[] }
   | { type: "cancel_job"; jobId: string }
   | { type: "resume_job"; jobId: string }
-  | { type: "retry_review"; jobId: string }
-  | { type: "merge_review"; jobId: string }
   | { type: "cycle_variant" }
   | { type: "cycle_thinking" }
   | { type: "set_model"; model: ModelRef }

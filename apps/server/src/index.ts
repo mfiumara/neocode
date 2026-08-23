@@ -103,8 +103,6 @@ websocket.on("connection", (client) => {
           await orchestrator.delegate(message.text, undefined, message.isolation ?? "auto", validateImageAttachments(message.attachments));
         } else if (message.type === "cancel_job") await orchestrator.cancelJob(message.jobId);
         else if (message.type === "resume_job") await orchestrator.resumeJob(message.jobId);
-        else if (message.type === "retry_review") orchestrator.retryReview(message.jobId);
-        else if (message.type === "merge_review") orchestrator.mergeReview(message.jobId);
         else if (message.type === "cycle_variant") orchestrator.cycleVariant();
         else if (message.type === "cycle_thinking") orchestrator.cycleThinking();
         else if (message.type === "set_model") await orchestrator.setModel(message.model);

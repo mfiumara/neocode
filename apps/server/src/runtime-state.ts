@@ -12,8 +12,7 @@ export interface DurableJob {
 }
 
 export type CoordinatorWorkerEventKind =
-  | "completed" | "merged" | "review_rejected" | "review_blocked"
-  | "review_conflict" | "review_failed" | "failed" | "needs_attention";
+  | "handoff" | "lifecycle_transition" | "action_required" | "failed" | "needs_attention";
 
 export interface CoordinatorWorkerEvent {
   id: string;
@@ -23,6 +22,9 @@ export interface CoordinatorWorkerEvent {
   createdAt: number;
   messageId: string;
   wakeRequested: boolean;
+  /** Durable at-least-once delivery state; claimed events are redelivered after restart. */
+  wakeState?: "pending" | "claimed" | "delivered";
+  wakeClaimedAt?: number;
   wakeDeliveredAt?: number;
 }
 
