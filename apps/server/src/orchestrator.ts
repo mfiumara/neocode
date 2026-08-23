@@ -477,6 +477,14 @@ export class Orchestrator {
       isIdle: () => this.coordinatorStatus === "idle" && this.coordinator.isIdle,
       wake: async (event) => {
         if (this.coordinatorTurnInFlight) throw new Error("Coordinator turn is already reserved");
+        const activeLanes = this.activeReviewLaneIds();
+        if (!activeLanes.has(event.jobId) && activeLanes.size >= this.maintenanceConfig.reviewConcurrency) {
+          throw new Error("Review and remediation lanes are at capacity");
+        }
+        // Direct handoff/action wakes and backlog sweeps use the same bounded
+        // lane accounting. Otherwise quick coordinator turns can launch an
+        // unbounded number of asynchronous judges and repair workers.
+        this.sweepJobIds.add(event.jobId);
         this.coordinatorTurnInFlight = true;
         try {
           await this.coordinator.prompt(
@@ -1522,6 +1530,21 @@ export class Orchestrator {
     }
   }
 
+  private activeReviewLaneIds(): Set<string> {
+    const active = new Set<string>();
+    const activeReview = new Set(["ci_running", "judging", "merge_queued", "merging", "post_merge_ci", "worker_resumed"]);
+    for (const job of this.jobs.values()) {
+      const action = job.review?.remediation?.actions.find((entry) => entry.id === job.review?.remediation?.currentActionId);
+      const reservedRepairWorker = this.sweepJobIds.has(job.id) && this.workers.has(job.id);
+      if ((job.review && activeReview.has(job.review.status)) || action?.state === "repairing" || reservedRepairWorker) active.add(job.id);
+    }
+    // Reservations whose coordinator turn produced no asynchronous work must
+    // not consume capacity forever, especially while a later durable wake is
+    // waiting at the head of the FIFO queue.
+    for (const jobId of [...this.sweepJobIds]) if (!active.has(jobId)) this.sweepJobIds.delete(jobId);
+    return active;
+  }
+
   private async runBacklogSweep(): Promise<void> {
     const queue = this.coordinatorNotifications;
     if (!queue || this.coordinatorStatus !== "idle" || !this.coordinator.isIdle || queue.hasPendingWake()) return;
@@ -1553,7 +1576,7 @@ export class Orchestrator {
       this.sweepJobIds.delete(jobId);
     }
 
-    if (this.sweepJobIds.size >= this.maintenanceConfig.reviewConcurrency) return;
+    if (this.activeReviewLaneIds().size >= this.maintenanceConfig.reviewConcurrency) return;
     const candidates = this.listJobs()
       .filter(eligible)
       .filter((job) => !this.sweepJobIds.has(job.id) && !this.workers.has(job.id))
@@ -1562,7 +1585,7 @@ export class Orchestrator {
     scored.sort((left, right) => left.score - right.score || left.job.createdAt - right.job.createdAt);
     this.persist();
     for (const { job } of scored) {
-      if (this.sweepJobIds.size >= this.maintenanceConfig.reviewConcurrency) break;
+      if (this.activeReviewLaneIds().size >= this.maintenanceConfig.reviewConcurrency) break;
       if (!queue.requestBacklogSweep(job)) continue;
       this.sweepJobIds.add(job.id);
       return; // The single coordinator handles one durable decision at a time.
