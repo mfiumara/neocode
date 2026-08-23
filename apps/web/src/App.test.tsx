@@ -144,6 +144,24 @@ test("compact review panel has timeline semantics, check counts, and collapsed t
   assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
 });
 
+test("compact panel preserves remediation judge audit evidence after the current verdict is cleared", () => {
+  const value = sidebarJob("blocked");
+  value.review!.remediation = { maxAttempts: 2, rounds: {}, actions: [{
+    id: "opaque-action", failureClass: "judge_changes", fingerprint: "fingerprint", state: "pending",
+    attempt: 1, maxAttempts: 2, createdAt: 10, updatedAt: 20,
+    evidence: { detail: "Fresh approval required", checks: [{ command: "npm test -- exact", ok: false, exitCode: 1, durationMs: 22, output: "nested diagnostic" }], judge: {
+      approved: false, summary: "Durable remediation verdict", requirements: [], model: { provider: "pi", id: "judge" }, diffSha256: "nested-hash", raw: "{\"approved\":false}",
+    } },
+  }] };
+  const markup = renderToStaticMarkup(<ReviewStatusPanel job={value} />);
+  assert.match(markup, /Rejected: Durable remediation verdict/);
+  assert.match(markup, /opaque-action/);
+  assert.match(markup, /npm test -- exact/);
+  assert.match(markup, /nested diagnostic/);
+  assert.match(markup, /nested-hash/);
+  assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
+});
+
 test("compact panel does not show an active marker for stale review metadata", () => {
   const markup = renderToStaticMarkup(<ReviewStatusPanel job={sidebarJob("judging")} activityReady={false} />);
   assert.match(markup, /Review status recorded/);
