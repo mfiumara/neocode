@@ -104,10 +104,12 @@ test("integrated app pastes, opens, sends, validates, and restores image attachm
   // shadcn's forwarded textarea remains focusable, while Cmd-K is still a
   // global command rather than being inserted into the composer.
   await page.locator("textarea").focus();
+  await expect(page.locator("textarea")).toBeFocused();
   await page.keyboard.press(process.platform === "darwin" ? "Meta+K" : "Control+K");
   await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
   await page.keyboard.press("Escape");
   await page.locator("textarea").focus();
+  await expect(page.locator("textarea")).toBeFocused();
 
   expect(await controlledPaste(page, "blank-item")).toBe(true);
   await expect(page.locator(".attachment-preview")).toHaveCount(1);
