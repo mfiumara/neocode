@@ -685,12 +685,7 @@ export function App() {
                     <TabsTrigger value="review">Review{activeJob.review ? ` · ${activeJob.review.status}` : ""}</TabsTrigger>
                   </TabsList>
                 </Tabs>
-                {activeJob.review && !["queued", "ci_running", "judging", "merge_queued", "merging", "post_merge_ci", "merged"].includes(activeJob.review.status) && (
-                  <Button variant="outline" size="sm" className="review-button" onClick={() => send({ type: "retry_review", jobId: activeJob.id })}>Retry review</Button>
-                )}
-                {activeJob.review?.judge?.approved && ["approved", "blocked", "conflict", "post_ci_failed"].includes(activeJob.review.status) && (
-                  <Button variant="outline" size="sm" className="review-button" onClick={() => send({ type: "merge_review", jobId: activeJob.id })}>Reconcile</Button>
-                )}
+                {activeJob.review && <Badge variant="secondary">Coordinator-owned review</Badge>}
                 {(activeJob.status === "interrupted" || activeJob.status === "needs_attention") && activeJob.recoverable && (
                   <Button variant="outline" size="sm" className="resume-button" onClick={() => send({ type: "resume_job", jobId: activeJob.id })}>Resume</Button>
                 )}
@@ -912,9 +907,10 @@ function WorkingIndicator({ activity: current, agentLabel }: { activity?: AgentA
 
 function ReviewView({ job }: { job: AgentJob }) {
   const review = job.review;
-  if (!review) return <div className="review-view"><h2>Awaiting successful completion</h2><p>The completion hook starts automatically when the worker succeeds.</p></div>;
+  if (!review) return <div className="review-view"><h2>Awaiting successful completion</h2><p>Completion will hand evidence to the main coordinator; it will not auto-judge or auto-merge.</p></div>;
   return <div className="review-view">
-    <header><span className={`review-status ${review.status}`}>{review.status.replaceAll("_", " ")}</span><span>attempt {review.attempt} · target {review.targetBranch}</span></header>
+    <header><span className={`review-status ${review.status}`}>{review.status.replaceAll("_", " ")}</span><span>coordinator-owned · attempt {review.attempt} · target {review.targetBranch}</span></header>
+    {job.handoff && <><h2>Worker handoff · round {job.handoff.round}</h2><p>{job.handoff.report}</p><code>diff sha256 {job.handoff.diffSha256}</code></>}
     {review.error && <pre className="review-error">{review.error}</pre>}
     <h2>Local CI</h2>
     <CheckList checks={review.ci} />
@@ -929,7 +925,7 @@ function ReviewView({ job }: { job: AgentJob }) {
     <p>{review.mergeCommit ? `commit ${review.mergeCommit}` : "Not reconciled."}</p>
     <CheckList checks={review.postMergeCi} empty="Post-merge checks have not run." />
     <h2>Transition log</h2>
-    <ol className="transition-log">{review.transitions.map((entry, index) => <li key={index}><time>{new Date(entry.at).toLocaleTimeString()}</time><b>{entry.status}</b><span>{entry.detail}</span></li>)}</ol>
+    <ol className="transition-log">{review.transitions.map((entry, index) => <li key={index}><time>{new Date(entry.at).toLocaleTimeString()}</time><b>{entry.owner || "server"} · {entry.status}</b><span>{entry.detail}</span></li>)}</ol>
   </div>;
 }
 

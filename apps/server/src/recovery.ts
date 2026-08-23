@@ -76,7 +76,8 @@ export function durableProgressSummary(job: AgentJob, limit = 6_000): string {
 }
 
 export function continuationPrompt(job: AgentJob, reopened: boolean): string {
-  const common = "Inspect the existing checkout, git status, diff, and prior work before acting. Preserve useful local changes; never reset, overwrite, or repeat work blindly. Continue toward the original task and run relevant checks.";
+  const feedback = job.review?.feedback?.at(-1);
+  const common = `${feedback ? `COORDINATOR REVIEW FEEDBACK:\n${feedback}\n\n` : ""}Inspect the existing checkout, git status, diff, and prior work before acting. Preserve useful local changes; never reset, overwrite, or repeat work blindly. Continue toward the original task and run relevant checks.`;
   if (reopened) return `The Neocode backend restarted and this is a new worker attempt. The prior Pi session was reopened for context. ${common}`;
   return `The Neocode backend restarted and the prior Pi session could not be safely reopened, so this is a fresh worker session.\n\nORIGINAL TASK:\n${job.prompt}\n\nDURABLE PROGRESS SUMMARY:\n${durableProgressSummary(job)}\n\n${common}`;
 }

@@ -14,18 +14,14 @@ export interface CoordinatorNotificationHooks {
 }
 
 function signalFor(job: AgentJob): { kind: CoordinatorWorkerEventKind; detail?: string; wake: boolean } | undefined {
-  const review = job.review;
-  if (review?.status === "merged") return { kind: "merged", detail: review.mergeCommit, wake: true };
-  if (review?.status === "rejected") return { kind: "review_rejected", detail: review.error || review.judge?.summary, wake: false };
-  if (review?.status === "blocked") return { kind: "review_blocked", detail: review.error, wake: false };
-  if (review?.status === "conflict") return { kind: "review_conflict", detail: review.error, wake: false };
-  if (["failed", "ci_failed", "post_ci_failed"].includes(review?.status || "")) {
-    return { kind: "review_failed", detail: review?.error, wake: false };
+  const transition = job.review?.transitions.at(-1);
+  if (transition) {
+    const handoff = transition.owner === "worker" && transition.status === "queued";
+    const evidence = handoff && job.handoff
+      ? `round=${job.handoff.round} branch=${job.handoff.branch} diff=${job.handoff.diffSha256} tests=${job.handoff.tests.join("; ") || "not reported"} risks=${job.handoff.risks.join("; ") || "none reported"} report=${job.handoff.report}`
+      : `${transition.owner || "server"}:${transition.status} ${transition.detail || ""}`;
+    return { kind: handoff ? "handoff" : "lifecycle_transition", detail: evidence, wake: handoff };
   }
-  // Once review exists, its low-level progress must not repeatedly look like a
-  // fresh completion transition.
-  if (review) return undefined;
-  if (job.status === "completed") return { kind: "completed", detail: job.summary, wake: true };
   if (job.status === "failed") return { kind: "failed", detail: job.error, wake: false };
   if (job.status === "needs_attention") return { kind: "needs_attention", detail: job.recoveryIssue || job.error, wake: false };
   return undefined;
@@ -48,7 +44,10 @@ export class CoordinatorNotificationQueue {
   observe(job: AgentJob): boolean {
     const signal = signalFor(job);
     if (!signal) return false;
-    const signature = `${signal.kind}:${job.review?.updatedAt || job.updatedAt}`;
+    const lastTransition = job.review?.transitions.at(-1);
+    const signature = lastTransition
+      ? `${signal.kind}:${lastTransition.status}:${lastTransition.at}:${lastTransition.owner || "server"}`
+      : `${signal.kind}:${job.updatedAt}`;
     if (this.state.lastSignals[job.id] === signature) return false;
     this.state.lastSignals[job.id] = signature;
     const eventId = randomUUID();
