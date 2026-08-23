@@ -21,13 +21,24 @@ export function queuedCoordinatorPrompt(input: {
   };
 }
 
-/** Processing never survives a process, so only durable queue membership restores a badge. */
+/**
+ * Recover only turns without a durable completed-response checkpoint. A
+ * responded entry is atomically persisted with its assistant turn, so replaying
+ * it would duplicate already completed model/tool work.
+ */
 export function reconcileRestoredPromptStates(messages: TranscriptMessage[], pending: DurableCoordinatorPrompt[]): void {
+  const respondedIds = new Set(pending.filter((entry) => entry.state === "responded").map((entry) => entry.messageId));
+  for (let index = pending.length - 1; index >= 0; index -= 1) {
+    if (pending[index]!.state === "responded") pending.splice(index, 1);
+    else pending[index]!.state = "queued";
+  }
   const pendingIds = new Set(pending.map((entry) => entry.messageId));
-  for (const entry of pending) entry.state = "queued";
   for (const message of messages) {
     if (pendingIds.has(message.id)) message.promptState = "queued";
-    else if (message.promptState === "queued" || message.promptState === "processing") delete message.promptState;
+    else if (respondedIds.has(message.id) || message.promptState === "queued" || message.promptState === "processing") {
+      delete message.promptState;
+      delete message.promptError;
+    }
   }
 }
 
@@ -35,6 +46,12 @@ export function setPromptProcessing(message: TranscriptMessage, pending: Durable
   pending.state = "processing";
   message.promptState = "processing";
   delete message.promptError;
+}
+
+export function checkpointPromptResponse(pending: DurableCoordinatorPrompt, responseMessageId?: string, completedAt = Date.now()): void {
+  pending.state = "responded";
+  pending.responseMessageId = responseMessageId;
+  pending.responseCompletedAt = completedAt;
 }
 
 export function settlePrompt(message: TranscriptMessage, error?: string): void {

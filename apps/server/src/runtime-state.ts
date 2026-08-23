@@ -41,7 +41,10 @@ export interface DurableCoordinatorPrompt {
   context: string[];
   mode: "build" | "plan";
   createdAt: number;
-  state: "queued" | "processing";
+  state: "queued" | "processing" | "responded";
+  /** Durable correlation checkpoint written with the completed assistant turn. */
+  responseMessageId?: string;
+  responseCompletedAt?: number;
 }
 
 export interface DurableRuntimeState {
@@ -83,7 +86,10 @@ function isRuntimeState(value: unknown, workspaceRoot: string): value is Durable
         && typeof prompt.messageId === "string"
         && Array.isArray(prompt.context) && prompt.context.every((entry) => typeof entry === "string")
         && (prompt.mode === "build" || prompt.mode === "plan")
-        && (prompt.state === "queued" || prompt.state === "processing"))))
+        && (prompt.state === "queued" || prompt.state === "processing" || prompt.state === "responded")
+        && (prompt.responseMessageId === undefined || typeof prompt.responseMessageId === "string")
+        && (prompt.responseCompletedAt === undefined || typeof prompt.responseCompletedAt === "number")
+        && (prompt.state !== "responded" || typeof prompt.responseCompletedAt === "number"))))
     && Array.isArray(candidate.jobs)
     && candidate.jobs.every((entry) => {
       if (!entry || typeof entry !== "object" || !entry.job || typeof entry.job !== "object") return false;

@@ -34,7 +34,7 @@ import {
 import { activity, ActivityTimeline, toolActivity } from "./activity.js";
 import { CompletionPipeline, LocalReviewAdapter, readWorktreeDiff } from "./completion-pipeline.js";
 import { CoordinatorNotificationQueue } from "./coordinator-notifications.js";
-import { queuedCoordinatorPrompt, reconcileRestoredPromptStates, setPromptProcessing, settlePrompt } from "./coordinator-prompt-state.js";
+import { checkpointPromptResponse, queuedCoordinatorPrompt, reconcileRestoredPromptStates, setPromptProcessing, settlePrompt } from "./coordinator-prompt-state.js";
 import { imagesForPi } from "./image-attachments.js";
 
 
@@ -181,6 +181,8 @@ export class Orchestrator {
   private readonly coordinatorMessages: TranscriptMessage[] = [];
   private readonly pendingCoordinatorPrompts: DurableCoordinatorPrompt[] = [];
   private promptDrain?: Promise<void>;
+  private activeCoordinatorPromptId?: string;
+  private promptResponseCheckpoint?: { messageId: string; flushed: Promise<void> };
   private readonly coordinatorActivityHistory: AgentActivity[] = [];
   private readonly coordinatorTimeline = new ActivityTimeline(undefined, this.coordinatorActivityHistory);
   private readonly piSessionFiles = new Map<string, string>();
@@ -247,9 +249,6 @@ export class Orchestrator {
       this.pendingCoordinatorPrompts.push(...(restored.coordinator.pendingPrompts || []).map((entry) => ({
         ...entry,
         context: [...entry.context],
-        // A process cannot still be processing after restart. Redeliver the
-        // durable item and expose that truth in the transcript.
-        state: "queued" as const,
       })));
       reconcileRestoredPromptStates(this.coordinatorMessages, this.pendingCoordinatorPrompts);
       this.coordinatorActivityHistory.push(...(restored.coordinator.activityHistory || []).map(normalizeActivityTiming));
@@ -567,6 +566,8 @@ export class Orchestrator {
         continue;
       }
       setPromptProcessing(message, pending);
+      this.activeCoordinatorPromptId = pending.messageId;
+      this.promptResponseCheckpoint = undefined;
       this.persist();
       this.emit({ type: "coordinator_message_updated", message: { ...message } });
 
@@ -578,12 +579,25 @@ export class Orchestrator {
         : ""}\n\n${modeInstruction}`;
       try {
         await this.coordinator.prompt(content, message.attachments?.length ? { images: imagesForPi(message.attachments) } : undefined);
+        // Persist a completed-response checkpoint before removing the queue
+        // entry. If the backend dies in this window, startup settles without
+        // replaying a turn whose assistant response was already durable.
+        if (pending.state !== "responded") {
+          checkpointPromptResponse(pending);
+          this.persist();
+          this.promptResponseCheckpoint = { messageId: pending.messageId, flushed: this.stateStore.flush() };
+        }
+        if (this.promptResponseCheckpoint?.messageId === pending.messageId) await this.promptResponseCheckpoint.flushed;
         this.pendingCoordinatorPrompts.shift();
         settlePrompt(message);
+        this.activeCoordinatorPromptId = undefined;
+        this.promptResponseCheckpoint = undefined;
         this.persist();
         this.emit({ type: "coordinator_message_updated", message: { ...message } });
       } catch (error) {
         this.pendingCoordinatorPrompts.shift();
+        this.activeCoordinatorPromptId = undefined;
+        this.promptResponseCheckpoint = undefined;
         const promptError = error instanceof Error ? error.message : String(error);
         settlePrompt(message, promptError);
         this.persist();
@@ -881,7 +895,12 @@ export class Orchestrator {
             this.emit({ type: "coordinator_message", message: { ...streaming } });
           } else this.emit({ type: "coordinator_message_updated", message: { ...streaming } });
         }
-        this.persist();
+        const pending = this.pendingCoordinatorPrompts[0];
+        if (pending?.messageId === this.activeCoordinatorPromptId && pending.state === "processing") {
+          checkpointPromptResponse(pending, streaming.id);
+          this.persist();
+          this.promptResponseCheckpoint = { messageId: pending.messageId, flushed: this.stateStore.flush() };
+        } else this.persist();
         streaming = undefined;
         emitted = false;
       } else if (event.type === "agent_settled") {

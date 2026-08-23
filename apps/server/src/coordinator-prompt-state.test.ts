@@ -3,6 +3,7 @@ import test from "node:test";
 import type { TranscriptMessage } from "@neocode/protocol";
 import type { DurableCoordinatorPrompt } from "./runtime-state.js";
 import {
+  checkpointPromptResponse,
   queuedCoordinatorPrompt,
   reconcileRestoredPromptStates,
   setPromptProcessing,
@@ -33,14 +34,23 @@ test("acknowledgement replaces queued state and settled or failed prompts are ne
   assert.equal(failed.message.promptError, "backend rejected prompt");
 });
 
-test("restart requeues only durable prompts and clears stale lifecycle badges", () => {
-  const messages: TranscriptMessage[] = [
-    { id: "durable", role: "user", text: "again", timestamp: 1, promptState: "processing" },
-    { id: "settled", role: "user", text: "done", timestamp: 2, promptState: "queued" },
-  ];
-  const pending: DurableCoordinatorPrompt[] = [{ messageId: "durable", context: [], mode: "build", createdAt: 1, state: "processing" }];
+test("restart recovery distinguishes every crash checkpoint without replaying completed responses", () => {
+  const before = queuedCoordinatorPrompt({ id: "before", text: "before", context: [], attachments: [], mode: "build", now: 1 });
+  const during = queuedCoordinatorPrompt({ id: "during", text: "during", context: [], attachments: [], mode: "build", now: 2 });
+  setPromptProcessing(during.message, during.pending);
+  const responded = queuedCoordinatorPrompt({ id: "responded", text: "responded", context: [], attachments: [], mode: "build", now: 3 });
+  setPromptProcessing(responded.message, responded.pending);
+  checkpointPromptResponse(responded.pending, "assistant-1", 4);
+  const settled = queuedCoordinatorPrompt({ id: "settled", text: "settled", context: [], attachments: [], mode: "build", now: 5 });
+  settlePrompt(settled.message);
+
+  const messages = [before.message, during.message, responded.message, settled.message];
+  const pending: DurableCoordinatorPrompt[] = [before.pending, during.pending, responded.pending];
   reconcileRestoredPromptStates(messages, pending);
-  assert.equal(pending[0]?.state, "queued");
-  assert.equal(messages[0]?.promptState, "queued");
-  assert.equal(messages[1]?.promptState, undefined);
+
+  assert.deepEqual(pending.map((entry) => [entry.messageId, entry.state]), [["before", "queued"], ["during", "queued"]]);
+  assert.equal(messages[0]?.promptState, "queued", "crash before processing remains queued");
+  assert.equal(messages[1]?.promptState, "queued", "incomplete processing is retried");
+  assert.equal(messages[2]?.promptState, undefined, "durably responded work is settled, not replayed");
+  assert.equal(messages[3]?.promptState, undefined, "already settled work remains settled");
 });
