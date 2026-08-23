@@ -14,9 +14,9 @@ The React client communicates with the server over WebSocket. There is no editor
 
 ## Features
 
-- persistent Pi coordinator with read/search and orchestration tools
-- background Pi workers with configurable worktree/root isolation
-- durable coordinator/job transcripts and workspace-scoped browser state
+- persistent main coordinator that owns handoff reconciliation, independent judging, feedback rounds, and guarded merges
+- background Pi workers with configurable worktree/root isolation; implementation workers never merge root/main
+- durable coordinator/job transcripts, structured handoffs, visible lifecycle transitions, and workspace-scoped browser state
 - live coordinator/worker activity, cancellation, and diff inspection
 - per-thread cursor and viewport restoration
 - safe GFM Markdown and bounded clipboard image attachments (4 × 8 MiB)
@@ -97,7 +97,7 @@ See [`docs/architecture.md`](docs/architecture.md) for runtime and persistence d
 
 ## Next milestones
 
-1. Add worker review, merge, discard, and conflict-resolution actions.
+1. Expand coordinator-owned conflict-resolution and discard workflows.
 2. Add file, git-log, search-result, and terminal views.
 3. Generalize the picker across files, symbols, commits, messages, and diff hunks.
 4. Make context entries structured references instead of copied text.

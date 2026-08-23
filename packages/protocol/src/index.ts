@@ -45,10 +45,24 @@ export interface ReviewTransition {
   status: ReviewStatus;
   at: number;
   detail?: string;
+  /** Product decisions are attributable to the main coordinator, never the supervisor. */
+  owner?: "worker" | "coordinator" | "judge" | "server";
+}
+
+export interface WorkerHandoff {
+  report: string;
+  requirements: string[];
+  diffSha256: string;
+  branch: string;
+  worktree: string;
+  tests: string[];
+  risks: string[];
+  round: number;
+  createdAt: number;
 }
 
 export interface JobReview {
-  /** Stable completion-hook token. Its presence prevents duplicate automatic runs. */
+  /** Stable completion-hook token. Its presence prevents duplicate coordinator wakes. */
   hookToken: string;
   status: ReviewStatus;
   attempt: number;
@@ -59,6 +73,9 @@ export interface JobReview {
   postMergeCi?: CheckEvidence[];
   judge?: JudgeEvidence;
   mergeCommit?: string;
+  /** Set only by the coordinator's guarded_merge tool call. */
+  coordinatorAuthorizedAt?: number;
+  feedback?: string[];
   error?: string;
 }
 
@@ -204,8 +221,10 @@ export interface AgentJob {
   recovery?: WorkerRecovery;
   /** Every process launch is a distinct, visible attempt. */
   attempts?: WorkerAttempt[];
-  /** Durable automated CI, independent review, and reconciliation state. */
+  /** Durable coordinator-owned review and reconciliation state. */
   review?: JobReview;
+  /** Structured worker-to-main-thread completion evidence. */
+  handoff?: WorkerHandoff;
   /** Immutable creation identity used to reject stale or repurposed paths. */
   worktreeIdentity?: WorktreeIdentity;
   completion?: JobCompletion;
@@ -246,8 +265,6 @@ export type ClientMessage =
   | { type: "delegate"; text: string; isolation?: RequestedIsolationMode; attachments?: ImageAttachment[] }
   | { type: "cancel_job"; jobId: string }
   | { type: "resume_job"; jobId: string }
-  | { type: "retry_review"; jobId: string }
-  | { type: "merge_review"; jobId: string }
   | { type: "cycle_variant" }
   | { type: "cycle_thinking" }
   | { type: "set_model"; model: ModelRef }
