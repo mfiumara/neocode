@@ -32,6 +32,8 @@ export interface ReconcileResult {
   candidateCi?: CheckEvidence[];
 }
 export interface ReviewAdapter {
+  /** Rebase the worker onto the current target before CI and exact-diff judgment. */
+  prepareForReview?(job: AgentJob): Promise<void>;
   runCi(cwd: string): Promise<CheckEvidence[]>;
   readDiff(job: AgentJob): Promise<string>;
   judge(job: AgentJob, diff: string, diffSha256: string): Promise<JudgeEvidence>;
@@ -206,7 +208,7 @@ export class CompletionPipeline {
       throw new Error(`Guarded merge is unavailable from ${job.review.status}; conflicts and failures require a new worker handoff and fresh judge.`);
     }
     job.review.coordinatorAuthorizedAt = Date.now();
-    this.transition(job, "merge_queued", "Coordinator approved the exact reviewed diff and authorized guarded merge", "coordinator");
+    this.transition(job, "merge_queued", "Coordinator approved the exact reviewed rebased diff and authorized guarded fast-forward integration", "coordinator");
     this.launch(job, "merge");
   }
 
@@ -260,7 +262,9 @@ export class CompletionPipeline {
         return;
       }
       if (mode === "judge") {
-        this.transition(job, "ci_running", "Coordinator started CI for independent review", "coordinator");
+        this.transition(job, "ci_running", "Coordinator started guarded rebase and CI for independent review", "coordinator");
+        await this.adapter.prepareForReview?.(job);
+        this.publish(job);
         const ci = await this.adapter.runCi(job.isolation.path);
         job.review!.ci = ci; this.publish(job);
         if (!ci.length || ci.some((check) => !check.ok)) {
@@ -288,7 +292,7 @@ export class CompletionPipeline {
 
       if (!job.review!.coordinatorAuthorizedAt) throw new PipelineError("blocked", "Only a coordinator tool call can authorize merge.");
       await this.operationLock.run(async () => {
-        this.transition(job, "merging", `Coordinator-owned guarded merge into ${job.review!.targetBranch}`, "coordinator");
+        this.transition(job, "merging", `Coordinator-owned guarded fast-forward into ${job.review!.targetBranch}`, "coordinator");
         const current = await this.adapter.readDiff(job);
         const hash = createHash("sha256").update(current).digest("hex");
         if (hash !== job.review!.judge!.diffSha256) throw new PipelineError("blocked", "Worker diff changed after judge approval; return it to the same worker and start a fresh judge.", "judge_changes");
@@ -299,7 +303,7 @@ export class CompletionPipeline {
           job.review!.postMergeCi = result.candidateCi;
           this.publish(job);
           this.resolveInfrastructureRetry(job);
-          this.transition(job, "merged", `Guarded merge verified as ${result.commit}; exact candidate checks passed before main changed`, "server");
+          this.transition(job, "merged", `Guarded rebased fast-forward verified as ${result.commit}; exact candidate checks passed before main changed`, "server");
           return;
         }
         this.transition(job, "post_merge_ci", "Merge completed; running serialized post-merge checks", "server");
@@ -467,6 +471,29 @@ export class LocalReviewAdapter implements ReviewAdapter {
     this.targetBranch = options.targetBranch || process.env.NEOCODE_MERGE_BRANCH || "main";
   }
 
+  async prepareForReview(job: AgentJob): Promise<void> {
+    if (job.isolation.mode !== "worktree") throw new PipelineError("blocked", "Root-isolated jobs cannot be rebased for guarded integration.");
+    const workerBranch = (await git(job.isolation.path, ["branch", "--show-current"])).trim();
+    if (workerBranch !== job.branch) throw new PipelineError("blocked", `Worker checkout is on ${workerBranch || "detached HEAD"}, expected ${job.branch}.`);
+    if ((await git(job.isolation.path, ["status", "--porcelain"])).trim()) {
+      await git(job.isolation.path, ["add", "-A"]);
+      await git(job.isolation.path, ["commit", "-m", `neocode: ${job.title}`]);
+    }
+    const targetHead = (await git(this.root, ["rev-parse", this.targetBranch])).trim();
+    if (!await gitSucceeds(this.root, ["merge-base", "--is-ancestor", targetHead, job.branch])) {
+      try {
+        await git(job.isolation.path, ["rebase", targetHead]);
+      } catch (error) {
+        throw new PipelineError("conflict", `Worker rebase onto ${this.targetBranch} conflicts; main was not changed and the same worktree must resolve it: ${error instanceof Error ? error.message : String(error)}`, "conflict");
+      }
+    }
+    const completionHead = (await git(job.isolation.path, ["rev-parse", "HEAD"])).trim();
+    job.baseRef = targetHead;
+    if (job.worktreeIdentity) job.worktreeIdentity.baseRef = targetHead;
+    job.completion = { head: completionHead, finishedAt: job.completion?.finishedAt || Date.now() };
+    job.updatedAt = Date.now();
+  }
+
   async runCi(cwd: string): Promise<CheckEvidence[]> {
     const commands = this.options.command || process.env.NEOCODE_CI_COMMAND
       ? [this.options.command || process.env.NEOCODE_CI_COMMAND!]
@@ -498,23 +525,16 @@ export class LocalReviewAdapter implements ReviewAdapter {
     const workerBranch = (await git(job.isolation.path, ["branch", "--show-current"])).trim();
     if (workerBranch !== job.branch) throw new PipelineError("blocked", `Worker checkout is on ${workerBranch || "detached HEAD"}, expected ${job.branch}.`);
 
-    if (!await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.baseRef, job.branch])) {
-      throw new PipelineError("blocked", "Worker branch no longer descends from its recorded base.");
-    }
-    // Commit before checking whether the branch is already integrated. A new
-    // worker branch initially points at its base while all useful work is still
-    // uncommitted, so doing the ancestry check first would silently skip it.
     if ((await git(job.isolation.path, ["status", "--porcelain"])).trim()) {
-      await git(job.isolation.path, ["add", "-A"]);
-      await git(job.isolation.path, ["commit", "-m", `neocode: ${job.title}`]);
+      throw new PipelineError("blocked", "Worker changed after exact-diff approval; a fresh rebase, CI, and judge are required.");
     }
-    if (!await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.baseRef, job.branch])) {
-      throw new PipelineError("blocked", "Worker branch no longer descends from its recorded base.");
-    }
-
     const completionCommit = (await git(job.isolation.path, ["rev-parse", "HEAD"])).trim();
     const targetHead = (await git(this.root, ["rev-parse", this.targetBranch])).trim();
     const alreadyMerged = await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.branch, this.targetBranch]);
+    if (!alreadyMerged && (job.baseRef !== targetHead
+      || !await gitSucceeds(this.root, ["merge-base", "--is-ancestor", targetHead, job.branch]))) {
+      throw new PipelineError("blocked", "Main advanced after review or the worker is not rebased onto it; a fresh rebase, CI, and judge are required.", "judge_changes");
+    }
     const temporaryRoot = await mkdtemp(join(tmpdir(), "neocode-integration-"));
     const candidate = join(temporaryRoot, "candidate");
     let candidateAdded = false;
@@ -522,15 +542,11 @@ export class LocalReviewAdapter implements ReviewAdapter {
     try {
       // Main must not change until the exact prospective merge tree has passed
       // CI in a clean checkout with its own dependency installation.
-      await git(this.root, ["worktree", "add", "--detach", candidate, targetHead]);
+      // The judge reviewed this exact rebased head. Validate that commit in an
+      // isolated checkout, then advance main only with --ff-only: no merge
+      // commits and no integration-time content changes are possible.
+      await git(this.root, ["worktree", "add", "--detach", candidate, alreadyMerged ? targetHead : completionCommit]);
       candidateAdded = true;
-      if (!alreadyMerged) {
-        try {
-          await git(candidate, ["merge", "--no-ff", "--no-edit", job.branch]);
-        } catch (error) {
-          throw new PipelineError("conflict", `Candidate merge conflicts; main was not changed: ${error instanceof Error ? error.message : String(error)}`, "conflict");
-        }
-      }
 
       const candidateCi = await this.runCi(candidate);
       if (!candidateCi.length || candidateCi.some((check) => !check.ok)) {
@@ -553,10 +569,9 @@ export class LocalReviewAdapter implements ReviewAdapter {
 
       if (!alreadyMerged) {
         try {
-          await git(this.root, ["merge", "--no-ff", "--no-edit", job.branch]);
+          await git(this.root, ["merge", "--ff-only", job.branch]);
         } catch (error) {
-          await git(this.root, ["merge", "--abort"]).catch(() => undefined);
-          throw new PipelineError("conflict", `Merge conflict; root was restored without forcing: ${error instanceof Error ? error.message : String(error)}`, "conflict");
+          throw new PipelineError("blocked", `Fast-forward integration refused; main was not changed: ${error instanceof Error ? error.message : String(error)}`, "judge_changes");
         }
       }
       const commit = (await git(this.root, ["rev-parse", "HEAD"])).trim();

@@ -360,7 +360,7 @@ test("changed diff after approval blocks guarded integration", async () => {
   assert.equal(value.review?.status, "blocked"); assert.equal(adapter.reconcileCalls, 0);
 });
 
-test("local reconciliation includes untracked work before checking already-merged ancestry", async () => {
+test("local integration rebases untracked work and fast-forwards main without a merge commit", async () => {
   const directory = await mkdtemp(join(tmpdir(), "neocode-pipeline-"));
   const root = join(directory, "root");
   const worker = join(directory, "worker");
@@ -374,6 +374,9 @@ test("local reconciliation includes untracked work before checking already-merge
     const base = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
     await execFileAsync("git", ["worktree", "add", "-b", "neocode/test", worker, base], { cwd: root });
     await writeFile(join(worker, "new-file.txt"), "new content\n");
+    await writeFile(join(root, "main-only.txt"), "main advanced\n");
+    await execFileAsync("git", ["add", "."], { cwd: root });
+    await execFileAsync("git", ["commit", "-m", "advance main"], { cwd: root });
 
     const adapter = new LocalReviewAdapter(root, {
       targetBranch: "main",
@@ -385,12 +388,19 @@ test("local reconciliation includes untracked work before checking already-merge
     value.baseRef = base;
     value.isolation.path = worker;
     value.worktree = worker;
+    await adapter.prepareForReview(value);
+    const reviewedHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: worker })).stdout.trim();
+    const targetBefore = value.baseRef;
+    assert.equal((await execFileAsync("git", ["merge-base", "--is-ancestor", targetBefore, reviewedHead], { cwd: root })).stderr, "");
     const diff = await adapter.readDiff(value);
     assert.match(diff, /new-file\.txt/);
     assert.match(diff, /new content/);
 
     const result = await adapter.reconcile(value);
     assert.equal(result.alreadyMerged, undefined);
+    assert.equal(result.commit, reviewedHead, "main must fast-forward to the exact reviewed rebased commit");
+    assert.equal((await execFileAsync("git", ["rev-list", "--parents", "-n", "1", "HEAD"], { cwd: root })).stdout.trim().split(/\s+/).length, 2,
+      "integrated commit has exactly one parent, not a merge commit");
     assert.equal(await readFile(join(root, "new-file.txt"), "utf8"), "new content\n");
   } finally {
     await rm(directory, { recursive: true, force: true });
