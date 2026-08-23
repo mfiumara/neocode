@@ -982,7 +982,8 @@ export class Orchestrator {
 
     for (const job of this.jobs.values()) {
       if (job.status !== "completed" || job.isolation.mode !== "worktree"
-        || job.integration?.status === "merged" || this.workers.has(job.id)) continue;
+        || (job.integration?.status === "merged" && job.worktreeIdentity)
+        || this.workers.has(job.id)) continue;
       try {
         const porcelain = await this.gitAt(["status", "--porcelain=v1", "--untracked-files=all"], job.isolation.path);
         if (porcelain) { result.pending += 1; continue; }
@@ -1008,6 +1009,15 @@ export class Orchestrator {
 
         const now = Date.now();
         job.completion = { head: actualHead, finishedAt: job.completion?.finishedAt || now };
+        // Older durable records predate worktreeIdentity. Reconstruct it only
+        // after verifying the registered path, expected branch, clean checkout,
+        // immutable base and fully integrated commit set above.
+        job.worktreeIdentity ??= {
+          path: job.isolation.path,
+          branch: job.branch,
+          baseRef: job.baseRef,
+          createdAt: job.createdAt,
+        };
         job.integration = {
           status: "merged", targetRef, verifiedAt: now,
           targetHead, completionHead: actualHead,
