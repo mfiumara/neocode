@@ -892,9 +892,9 @@ export function App() {
                   {active.kind === "coordinator" ? "Type a prompt to start." : "Worker is starting."}
                 </div>
               )}
-              <div className="transcript-older" role="status" aria-live="polite">
-                {activePage?.hasOlder ? "Scroll up to load older history" : "\u00a0"}
-              </div>
+              {activePage?.hasOlder
+                ? <div className="transcript-older" role="status" aria-live="polite">Scroll up to load older history</div>
+                : <div className="transcript-older" aria-hidden="true">{"\u00a0"}</div>}
               <div className="transcript-window" style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
               {virtualRows.map((virtualRow) => {
                 const index = virtualRow.index;
