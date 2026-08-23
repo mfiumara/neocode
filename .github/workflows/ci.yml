@@ -19,6 +19,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Install Chromium and Linux browser dependencies
+        run: npx playwright install --with-deps chromium
       - run: npm test
       - run: npm run check
       - run: npm run build

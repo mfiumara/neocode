@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const repo = resolve(import.meta.dirname, "../../..");
+const appRoot = resolve(process.env.NEOCODE_E2E_APP_ROOT || repo);
+const viteConfig = process.env.NEOCODE_E2E_VITE_CONFIG;
+const verifyCurrentBundle = process.env.NEOCODE_E2E_VERIFY_CURRENT_BUNDLE !== "false";
 const webPort = Number(process.env.NEOCODE_E2E_WEB_PORT || 14317);
 const serverPort = Number(process.env.NEOCODE_E2E_SERVER_PORT || 14318);
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -14,7 +17,7 @@ let web: ChildProcess;
 
 function start(command: string, env: NodeJS.ProcessEnv, ready: RegExp): Promise<ChildProcess> {
   return new Promise((resolveStart, reject) => {
-    const child = spawn(command, { cwd: repo, env: { ...process.env, ...env }, shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, { cwd: appRoot, env: { ...process.env, ...env }, shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const onData = (chunk: Buffer) => {
       output += chunk.toString();
@@ -73,7 +76,8 @@ test.beforeAll(async () => {
     git.once("exit", (code) => code === 0 ? resolveGit() : reject(new Error(`git fixture failed: ${code}`)));
   });
   server = await startServer();
-  web = await start("npm run dev -w @neocode/web -- --host 127.0.0.1", {
+  const configArgument = viteConfig ? ` --config ${JSON.stringify(resolve(viteConfig))}` : "";
+  web = await start(`npm run dev -w @neocode/web -- --host 127.0.0.1${configArgument}`, {
     NEOCODE_WEB_PORT: String(webPort),
     NEOCODE_SERVER_PORT: String(serverPort),
   }, new RegExp(String(webPort)));
@@ -92,8 +96,10 @@ test("integrated app pastes, opens, sends, validates, and restores image attachm
   await expect(page.getByRole("status")).toHaveText(/local/);
 
   const servedSource = await page.evaluate(() => fetch("/src/App.tsx").then((response) => response.text()));
-  expect(servedSource).toContain("Attach images");
-  expect(servedSource).toContain("mountedRef.current = true");
+  if (verifyCurrentBundle) {
+    expect(servedSource).toContain("Attach images");
+    expect(servedSource).toContain("mountedRef.current = true");
+  }
 
   // shadcn's forwarded textarea remains focusable, while Cmd-K is still a
   // global command rather than being inserted into the composer.
@@ -133,6 +139,9 @@ test("integrated app pastes, opens, sends, validates, and restores image attachm
     await page.locator("textarea").focus();
     await page.keyboard.press(process.platform === "darwin" ? "Meta+V" : "Control+V");
     await expect(page.locator(".attachment-preview")).toHaveCount(before + 1);
+    console.log("E2E_NATIVE_CLIPBOARD=passed");
+  } else {
+    console.log(`E2E_NATIVE_CLIPBOARD=unavailable (${clipboardWrite.error})`);
   }
 
   const chooserPromise = page.waitForEvent("filechooser");
