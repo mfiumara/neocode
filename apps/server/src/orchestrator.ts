@@ -30,9 +30,10 @@ import {
   type ServerMessage,
   type TranscriptMessage,
 } from "@neocode/protocol";
-import { activity, toolActivity } from "./activity.js";
+import { activity, ActivityTimeline, toolActivity } from "./activity.js";
 import { CompletionPipeline, LocalReviewAdapter, readWorktreeDiff } from "./completion-pipeline.js";
 import { imagesForPi } from "./image-attachments.js";
+
 
 import { resolveIsolationMode } from "./isolation.js";
 import {
@@ -79,6 +80,11 @@ const VARIANTS: AgentVariant[] = ["build", "plan"];
 
 function id(): string {
   return randomUUID();
+}
+
+function normalizeActivityTiming(value: AgentActivity): AgentActivity {
+  const startedAt = Number.isFinite(value.startedAt) ? value.startedAt : value.updatedAt;
+  return { ...value, startedAt, updatedAt: Number.isFinite(value.updatedAt) ? value.updatedAt : startedAt };
 }
 
 function transcriptText(value: string): string {
@@ -142,7 +148,10 @@ export class Orchestrator {
   private readonly jobs = new Map<string, AgentJob>();
   private readonly workers = new Map<string, RunningWorker>();
   private readonly workerConfigs = new Map<string, WorkerConfig>();
+  private readonly workerTimelines = new Map<string, ActivityTimeline>();
   private readonly coordinatorMessages: TranscriptMessage[] = [];
+  private readonly coordinatorActivityHistory: AgentActivity[] = [];
+  private readonly coordinatorTimeline = new ActivityTimeline(undefined, this.coordinatorActivityHistory);
   private readonly piSessionFiles = new Map<string, string>();
   private readonly stateStore: RuntimeStateStore;
   private readonly recoveryTimers = new Map<string, NodeJS.Timeout>();
@@ -195,6 +204,19 @@ export class Orchestrator {
     const restored = await this.stateStore.load();
     if (restored) {
       this.coordinatorMessages.push(...restored.coordinator.messages);
+      this.coordinatorActivityHistory.push(...(restored.coordinator.activityHistory || []).map(normalizeActivityTiming));
+      if (restored.coordinator.activity) {
+        const completedAt = Date.now();
+        const interrupted = normalizeActivityTiming(restored.coordinator.activity);
+        this.coordinatorActivityHistory.unshift({
+          ...interrupted,
+          completedAt,
+          durationMs: Math.max(0, completedAt - interrupted.startedAt),
+          outcome: "interrupted",
+          updatedAt: completedAt,
+        });
+      }
+      this.coordinatorActivityHistory.length = Math.min(this.coordinatorActivityHistory.length, 12);
       this.coordinatorSessionFile = restored.coordinator.piSessionFile;
       for (const entry of restored.jobs) {
         this.jobs.set(entry.job.id, entry.job);
@@ -321,6 +343,7 @@ export class Orchestrator {
       coordinator: {
         status: this.coordinatorStatus,
         activity: this.coordinatorActivity,
+        activityHistory: [...this.coordinatorActivityHistory],
         messages: [...this.coordinatorMessages],
         settings: this.settings(),
         model: this.currentModel(),
@@ -361,7 +384,7 @@ export class Orchestrator {
     } finally {
       this.coordinatorStatus = "idle";
       this.emit({ type: "coordinator_status", status: "idle" });
-      this.setCoordinatorActivity(undefined);
+      this.setCoordinatorActivity(undefined, "aborted");
       this.coordinatorAborting = false;
       this.persist();
     }
@@ -405,6 +428,8 @@ export class Orchestrator {
     if (this.janitorTimer) clearInterval(this.janitorTimer);
     await this.janitorRun;
 
+    this.setCoordinatorActivity(undefined, "interrupted");
+
     await this.coordinator.abort().catch(() => undefined);
     for (const [jobId, worker] of this.workers) {
       worker.cancelled = true;
@@ -414,7 +439,7 @@ export class Orchestrator {
       if (job && this.isCurrentAttempt(job, worker.generation, worker.token)
         && (job.status === "running" || job.status === "queued")) {
         job.status = "interrupted";
-        job.activity = undefined;
+        this.finishWorker(job);
         job.recoverable = true;
         job.recovery ??= { retryCount: 0, maxRetries: this.recoveryConfig.maxRetries, generation: worker.generation };
         job.recovery.nextRetryAt = Date.now() + retryDelay(this.recoveryConfig, job.recovery.retryCount + 1);
@@ -461,12 +486,16 @@ export class Orchestrator {
       updatedAt: Date.now(),
       messages: [{ id: id(), role: "user", text: task, timestamp: Date.now(), attachments: attachments.length ? attachments : undefined }],
       worktreeIdentity: isolationMode === "worktree" ? { path: worktree, branch, baseRef, createdAt: Date.now() } : undefined,
+      activityHistory: [],
+      startedAt: Date.now(),
+
       activity: activity("starting", "Waiting to start"),
       settings: { variant: "build", thinkingLevel: this.coordinator.thinkingLevel },
       recovery: { retryCount: 0, maxRetries: this.recoveryConfig.maxRetries, generation: 1 },
       attempts: [],
     };
     this.jobs.set(job.id, job);
+    this.workerTimelines.set(job.id, new ActivityTimeline(job.activity, job.activityHistory));
     this.workerConfigs.set(job.id, { model: this.coordinator.model, thinkingLevel: this.coordinator.thinkingLevel });
     this.publishJob(job);
 
@@ -478,7 +507,7 @@ export class Orchestrator {
     } catch (error) {
       this.workerConfigs.delete(job.id);
       job.status = "failed";
-      job.activity = undefined;
+      this.finishWorker(job);
       job.error = error instanceof Error ? error.message : String(error);
       job.updatedAt = Date.now();
       this.publishJob(job);
@@ -486,7 +515,8 @@ export class Orchestrator {
     }
 
     job.status = "running";
-    job.activity = activity("starting", "Starting worker · attempt 1");
+    this.setWorkerActivity(job, activity("starting", "Starting worker · attempt 1"), false);
+
     job.updatedAt = Date.now();
     const token = id();
     job.recovery!.leaseToken = token;
@@ -547,6 +577,8 @@ export class Orchestrator {
     job.recoveryIssue = "Cancelled intentionally; automatic recovery is disabled.";
     delete job.recovery?.leaseToken;
     delete job.recovery?.nextRetryAt;
+    this.finishWorker(job);
+
     job.updatedAt = Date.now();
     this.finishAttempt(job, "Cancelled intentionally.");
     this.publishJob(job);
@@ -612,7 +644,7 @@ export class Orchestrator {
           this.coordinatorStatus = "idle";
           this.emit({ type: "coordinator_status", status: "idle" });
         }
-        this.setCoordinatorActivity(undefined);
+        this.setCoordinatorActivity(undefined, this.coordinatorAborting ? "aborted" : "completed");
         this.persist();
       }
     });
@@ -676,14 +708,16 @@ export class Orchestrator {
 
       const activeWorker = this.workers.get(job.id);
       if (activeWorker?.cancelled || !this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;
-      job.status = "completed";
-      job.activity = undefined;
+      this.setWorkerActivity(job, activity("starting", "Finalizing results"));
       if (job.isolation.mode === "worktree") {
         job.completion = { head: await this.gitAt(["rev-parse", "HEAD"], job.isolation.path), finishedAt: Date.now() };
         job.integration = { status: "unmerged" };
       }
+
       job.summary = [...job.messages].reverse().find((message) => message.role === "assistant")?.text;
       await this.refreshDiff(job);
+      job.status = "completed";
+      this.finishWorker(job);
       job.updatedAt = Date.now();
       job.recoverable = false;
       delete job.recoveryIssue;
@@ -696,7 +730,7 @@ export class Orchestrator {
       if (this.workers.get(job.id)?.cancelled || job.status === "cancelled"
         || !this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;
       job.status = "failed";
-      job.activity = undefined;
+      this.finishWorker(job);
       job.error = error instanceof Error ? error.message : String(error);
       job.updatedAt = Date.now();
       this.finishAttempt(job, job.error);
@@ -706,7 +740,9 @@ export class Orchestrator {
       if (worker?.generation === attempt.generation && worker.token === attempt.token) {
         this.workers.delete(job.id);
         this.workerConfigs.delete(job.id);
+        this.workerTimelines.delete(job.id);
       }
+
       session?.dispose();
     }
   }
@@ -716,11 +752,9 @@ export class Orchestrator {
     let emitted = false;
     const setActivity = (next: AgentActivity | undefined) => {
       if (!this.isCurrentAttempt(job, generation, token)) return;
-      if (job.activity?.phase === next?.phase && job.activity?.description === next?.description) return;
-      job.activity = next;
-      job.updatedAt = Date.now();
-      this.publishJob(job);
+      this.setWorkerActivity(job, next);
     };
+
     session.subscribe((event) => {
       if (!this.isCurrentAttempt(job, generation, token)) return;
       if (event.type === "agent_start") setActivity(activity("starting", `Starting · attempt ${job.attempts?.length || 1}`));
@@ -930,11 +964,42 @@ export class Orchestrator {
       .sort((a, b) => a.provider.localeCompare(b.provider) || a.label.localeCompare(b.label));
   }
 
-  private setCoordinatorActivity(next: AgentActivity | undefined): void {
-    if (this.coordinatorActivity?.phase === next?.phase
-      && this.coordinatorActivity?.description === next?.description) return;
-    this.coordinatorActivity = next;
-    this.emit({ type: "coordinator_activity", activity: next });
+  private setCoordinatorActivity(next: AgentActivity | undefined, outcome: NonNullable<AgentActivity["outcome"]> = "completed"): void {
+    const changed = next ? this.coordinatorTimeline.set(next) : this.coordinatorTimeline.finish(outcome);
+    if (!changed) return;
+    this.coordinatorActivity = this.coordinatorTimeline.current;
+    this.persist();
+    this.emit({ type: "coordinator_activity", activity: this.coordinatorActivity, activityHistory: [...this.coordinatorActivityHistory] });
+  }
+
+  private setWorkerActivity(job: AgentJob, next: AgentActivity | undefined, publish = true): void {
+    let timeline = this.workerTimelines.get(job.id);
+    if (!timeline) {
+      job.activityHistory ||= [];
+      timeline = new ActivityTimeline(job.activity, job.activityHistory);
+      this.workerTimelines.set(job.id, timeline);
+    }
+    if (!timeline.set(next)) return;
+    job.activity = timeline.current;
+    job.updatedAt = Date.now();
+    if (publish) this.publishJob(job);
+  }
+
+  private finishWorker(job: AgentJob): void {
+    let timeline = this.workerTimelines.get(job.id);
+    if (!timeline) {
+      job.activityHistory ||= [];
+      timeline = new ActivityTimeline(job.activity, job.activityHistory);
+      this.workerTimelines.set(job.id, timeline);
+    }
+    const outcome = job.status === "cancelled" ? "cancelled"
+      : job.status === "interrupted" ? "interrupted"
+        : job.status === "failed" ? "error" : "completed";
+    timeline.finish(outcome);
+    job.activity = undefined;
+    const completedAt = Date.now();
+    job.completedAt = completedAt;
+    job.durationMs = Math.max(0, completedAt - (job.startedAt ?? job.createdAt));
   }
 
   private publishJob(job: AgentJob): void {
@@ -949,6 +1014,8 @@ export class Orchestrator {
       updatedAt: Date.now(),
       coordinator: {
         messages: [...this.coordinatorMessages],
+        activity: this.coordinatorActivity,
+        activityHistory: [...this.coordinatorActivityHistory],
         piSessionFile: this.coordinatorSessionFile,
       },
       maintenance: { ...this.maintenance },
@@ -966,10 +1033,19 @@ export class Orchestrator {
 
   private async reconcileRestoredJobs(): Promise<void> {
     for (const job of this.jobs.values()) {
+      job.activityHistory = (job.activityHistory || []).map(normalizeActivityTiming);
+      if (job.activity) job.activity = normalizeActivityTiming(job.activity);
       const wasActive = job.status === "running" || job.status === "queued";
       const wasScheduledRecovery = job.status === "interrupted" && job.recovery?.nextRetryAt !== undefined;
-      // Activity describes live in-process work and must never be fabricated on restore.
-      job.activity = undefined;
+      // No process survives restart; close a persisted live step as interrupted.
+      if (job.activity) {
+        const completedAt = Date.now();
+        job.activityHistory.unshift({ ...job.activity, completedAt, durationMs: Math.max(0, completedAt - job.activity.startedAt), outcome: "interrupted", updatedAt: completedAt });
+        job.activityHistory.length = Math.min(job.activityHistory.length, 12);
+        job.activity = undefined;
+        job.completedAt ||= completedAt;
+        job.durationMs ||= Math.max(0, completedAt - (job.startedAt ?? job.createdAt));
+      }
       if (!wasActive && !wasScheduledRecovery) continue; // Terminal/review states are never made resumable by startup.
 
       job.status = "interrupted";
@@ -1051,6 +1127,7 @@ export class Orchestrator {
         delete recovery.nextRetryAt;
         this.publishJob(job);
         continue;
+
       }
 
       const nextRetry = recovery.retryCount + 1;
@@ -1085,6 +1162,7 @@ export class Orchestrator {
     }
     await this.startRecoveryAttempt(job, "backend_restart");
   }
+
 
   private async startRecoveryAttempt(job: AgentJob, reason: "backend_restart" | "manual_resume"): Promise<void> {
     if (this.workers.has(job.id)) throw new Error(`Job ${job.id} already has an active worker.`);
@@ -1152,7 +1230,7 @@ export class Orchestrator {
     this.coordinatorStatus = "error";
     this.persist();
     this.emit({ type: "coordinator_status", status: "error" });
-    this.setCoordinatorActivity(undefined);
+    this.setCoordinatorActivity(undefined, "error");
     this.emit({ type: "error", message: error instanceof Error ? error.message : String(error) });
   }
 }

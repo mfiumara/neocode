@@ -16,6 +16,8 @@ import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
 
+import { formatDuration, useActivityDuration } from "./activityTiming";
+
 import {
   MAX_IMAGE_ATTACHMENTS,
   type AgentActivity,
@@ -195,7 +197,7 @@ export function App() {
           },
         } : current);
       } else if (message.type === "coordinator_activity") {
-        setSnapshot((current) => current ? { ...current, coordinator: { ...current.coordinator, activity: message.activity } } : current);
+        setSnapshot((current) => current ? { ...current, coordinator: { ...current.coordinator, activity: message.activity, activityHistory: message.activityHistory } } : current);
       } else if (message.type === "coordinator_settings") {
         setSnapshot((current) => current ? { ...current, coordinator: { ...current.coordinator, settings: message.settings } } : current);
       } else if (message.type === "coordinator_model_updated") {
@@ -297,6 +299,7 @@ export function App() {
     ? snapshot?.coordinator.messages || []
     : activeJob?.messages || [];
   const activeActivity = active.kind === "coordinator" ? snapshot?.coordinator.activity : activeJob?.activity;
+  const activeActivityHistory = active.kind === "coordinator" ? snapshot?.coordinator.activityHistory : activeJob?.activityHistory;
   const activityReady = connected && activitySynced;
   const activeWorking = activityReady && (active.kind === "coordinator"
     ? snapshot?.coordinator.status === "running"
@@ -603,7 +606,8 @@ export function App() {
           <div className="section-label">Threads</div>
           <Button variant="ghost" className={`thread-row ${active.kind === "coordinator" ? "active" : ""}`} onClick={openCoordinator} aria-current={active.kind === "coordinator" ? "page" : undefined}>
             <span className={`agent-orb ${activityReady ? snapshot?.coordinator.status || "idle" : "idle"}`} aria-hidden="true" />
-            <span><strong>Coordinator</strong><small>{activityReady && snapshot?.coordinator.status === "running" ? snapshot.coordinator.activity?.description || "Working" : "Main thread"}</small></span>
+            <span><strong>Coordinator</strong><small>{activityReady && snapshot?.coordinator.status === "running" ? <>{snapshot.coordinator.activity?.description || "Working"} {snapshot.coordinator.activity && <ActivityDuration activity={snapshot.coordinator.activity} />}</> : "Main thread"}</small></span>
+
             <span className="binding">q</span>
           </Button>
 
@@ -611,6 +615,7 @@ export function App() {
           <div className="jobs-list actionable-jobs">
             {actionableJobs.map((job) => (
               <JobSidebarRow key={job.id} job={job} active={active.kind === "job" && active.id === job.id} activityReady={activityReady} onOpen={() => openJob(job)} />
+
 
             ))}
             {!actionableJobs.length && <p className="empty-copy">No active or actionable workers.</p>}
@@ -746,10 +751,12 @@ export function App() {
                   <span className="worker-status">{jobLifecycleLabel(row.job)}{row.job.attempts?.length ? ` · attempt ${row.job.attempts.length}` : ""}</span>
 
                   <span className="worker-title">{row.job.title}</span>
+                  {row.job.durationMs !== undefined && <span className="worker-duration">{formatDuration(row.job.durationMs)} total</span>}
                   <code>{row.job.id}</code>
                   <span className="worker-open">l</span>
                 </Button>
               ))}
+              {!!activeActivityHistory?.length && <ActivityHistory activities={activeActivityHistory} />}
               {activeWorking && (
                 <WorkingIndicator activity={activeActivity} agentLabel={active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"} />
               )}
@@ -877,11 +884,29 @@ function AttachmentGallery({ attachments }: { attachments: ImageAttachment[] }) 
   })}</div>;
 }
 
+function ActivityDuration({ activity }: { activity: AgentActivity }) {
+  const duration = useActivityDuration(activity);
+  return <span className="activity-duration" aria-hidden="true">{duration}</span>;
+}
+
+function ActivityHistory({ activities }: { activities: AgentActivity[] }) {
+  return <div className="activity-history" aria-label="Recent activity durations">
+    {activities.slice(0, 5).map((entry, index) => (
+      <div key={`${entry.startedAt}-${entry.phase}-${index}`} className={`activity-entry ${entry.phase}`}>
+        <span>{entry.description}{entry.outcome && entry.outcome !== "completed" ? ` · ${entry.outcome}` : ""}</span>
+        <time>{formatDuration(entry.durationMs ?? Math.max(0, (entry.completedAt ?? entry.startedAt) - entry.startedAt))}</time>
+      </div>
+    ))}
+  </div>;
+}
+
 function WorkingIndicator({ activity: current, agentLabel }: { activity?: AgentActivity; agentLabel: string }) {
-  return <div className={`working-row ${current?.phase || "starting"}`} role="status" aria-live="polite" aria-atomic="true">
+  return <div className={`working-row ${current?.phase || "starting"}`}>
     <span className="working-spinner" aria-hidden="true" />
-    <span className="sr-only">{agentLabel} is working: </span>
-    <span className="working-description">{current?.description || "Working"}</span>
+    <span className="working-description" role="status" aria-live="polite" aria-atomic="true">
+      <span className="sr-only">{agentLabel} is working: </span>{current?.description || "Working"}
+    </span>
+    {current && <ActivityDuration activity={current} />}
   </div>;
 }
 

@@ -66,6 +66,12 @@ export interface AgentActivity {
   phase: "starting" | "thinking" | "responding" | "tool_pending" | "tool_running" | "tool_complete" | "tool_error";
   description: string;
   toolName?: string;
+  /** Wall-clock timestamps, suitable for transport and durable restoration. */
+  startedAt: number;
+  completedAt?: number;
+  durationMs?: number;
+  outcome?: "completed" | "aborted" | "error" | "cancelled" | "interrupted";
+  /** Kept for compatibility; changes only when the activity itself changes. */
   updatedAt: number;
 }
 
@@ -181,6 +187,11 @@ export interface AgentJob {
   updatedAt: number;
   messages: TranscriptMessage[];
   activity?: AgentActivity;
+  activityHistory?: AgentActivity[];
+  /** Total worker lifetime, including startup and queued time. */
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
   settings?: Pick<AgentSettings, "variant" | "thinkingLevel">;
   summary?: string;
   diff?: string;
@@ -219,6 +230,7 @@ export interface AppSnapshot {
   coordinator: {
     status: AgentStatus;
     activity?: AgentActivity;
+    activityHistory: AgentActivity[];
     messages: TranscriptMessage[];
     settings: AgentSettings;
     model: ModelRef | null;
@@ -245,7 +257,7 @@ export type ClientMessage =
 export type ServerMessage =
   | { type: "snapshot"; snapshot: AppSnapshot }
   | { type: "coordinator_status"; status: AgentStatus }
-  | { type: "coordinator_activity"; activity?: AgentActivity }
+  | { type: "coordinator_activity"; activity?: AgentActivity; activityHistory: AgentActivity[] }
   | { type: "coordinator_settings"; settings: AgentSettings }
   | { type: "coordinator_model_updated"; model: ModelRef }
   | { type: "coordinator_message"; message: TranscriptMessage }
