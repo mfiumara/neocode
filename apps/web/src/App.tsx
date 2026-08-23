@@ -138,7 +138,10 @@ export function disposeWebSocket(
   const clear = () => window.clearTimeout(timeout);
   socket.onopen = () => {
     clear();
-    socket.close();
+    // Let the browser finish dispatching `open` before initiating the close
+    // handshake. Closing from inside the open callback is inconsistently
+    // forwarded by browser/proxy combinations during a delayed upgrade.
+    window.setTimeout(() => socket.close(), 0);
   };
   socket.onerror = () => {
     // A failed handshake will be followed by close. In particular, do not turn

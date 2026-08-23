@@ -116,6 +116,7 @@ test("real browser lifecycle closes Vite-proxied sockets cleanly", async ({ page
     await page.goto(url);
     await waitFor(() => upgrades === 1, "delayed backend upgrade");
     await page.evaluate(() => (window as unknown as { __unmountNeocode(): void }).__unmountNeocode());
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
     await waitFor(() => connections === 1 && closes === 1, "clean post-timer CONNECTING disposal");
     expect(errors).toEqual([]);
 

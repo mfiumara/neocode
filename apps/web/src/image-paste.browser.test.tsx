@@ -101,6 +101,7 @@ test("the React composer preserves image prompts and deduplicates durable lifecy
     assert.equal(disposedDuringUpgrade.closedWhileConnecting, false,
       "cleanup must wait for a post-timer CONNECTING upgrade instead of aborting it");
     disposedDuringUpgrade.open();
+    await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(disposedDuringUpgrade.closedWhileConnecting, false,
       "a disposed in-flight upgrade closes normally as soon as it opens");
     assert.equal(disposedDuringUpgrade.readyState, 3);
