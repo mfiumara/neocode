@@ -100,6 +100,8 @@ export interface JobReview {
   status: ReviewStatus;
   attempt: number;
   targetBranch: string;
+  /** Exact target commit onto which the candidate was most recently rebased for review. */
+  reviewBaseRef?: string;
   updatedAt: number;
   transitions: ReviewTransition[];
   ci?: CheckEvidence[];

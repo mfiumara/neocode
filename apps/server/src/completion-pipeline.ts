@@ -488,8 +488,9 @@ export class LocalReviewAdapter implements ReviewAdapter {
       }
     }
     const completionHead = (await git(job.isolation.path, ["rev-parse", "HEAD"])).trim();
-    job.baseRef = targetHead;
-    if (job.worktreeIdentity) job.worktreeIdentity.baseRef = targetHead;
+    // Keep job.baseRef/worktreeIdentity.baseRef as immutable creation
+    // provenance. The mutable target used for exact review is separate.
+    job.review!.reviewBaseRef = targetHead;
     job.completion = { head: completionHead, finishedAt: job.completion?.finishedAt || Date.now() };
     job.updatedAt = Date.now();
   }
@@ -508,7 +509,7 @@ export class LocalReviewAdapter implements ReviewAdapter {
   }
 
   readDiff(job: AgentJob): Promise<string> {
-    return readWorktreeDiff(job.isolation.path, job.baseRef);
+    return readWorktreeDiff(job.isolation.path, job.review?.reviewBaseRef || job.baseRef);
   }
 
   judge(job: AgentJob, diff: string, diffSha256: string): Promise<JudgeEvidence> {
@@ -531,7 +532,7 @@ export class LocalReviewAdapter implements ReviewAdapter {
     const completionCommit = (await git(job.isolation.path, ["rev-parse", "HEAD"])).trim();
     const targetHead = (await git(this.root, ["rev-parse", this.targetBranch])).trim();
     const alreadyMerged = await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.branch, this.targetBranch]);
-    if (!alreadyMerged && (job.baseRef !== targetHead
+    if (!alreadyMerged && (job.review?.reviewBaseRef !== targetHead
       || !await gitSucceeds(this.root, ["merge-base", "--is-ancestor", targetHead, job.branch]))) {
       throw new PipelineError("blocked", "Main advanced after review or the worker is not rebased onto it; a fresh rebase, CI, and judge are required.", "judge_changes");
     }

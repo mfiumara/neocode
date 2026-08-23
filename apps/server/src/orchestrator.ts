@@ -982,7 +982,7 @@ export class Orchestrator {
   }
 
   private async refreshDiff(job: AgentJob): Promise<void> {
-    job.diff = await readWorktreeDiff(job.isolation.path, job.baseRef);
+    job.diff = await readWorktreeDiff(job.isolation.path, job.review?.reviewBaseRef || job.baseRef);
   }
 
   private async git(args: string[]): Promise<string> {

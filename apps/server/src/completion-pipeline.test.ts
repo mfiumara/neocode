@@ -388,10 +388,14 @@ test("local integration rebases untracked work and fast-forwards main without a 
     value.baseRef = base;
     value.isolation.path = worker;
     value.worktree = worker;
+    new CompletionPipeline(adapter, () => undefined, "main", root).enqueue(value);
+    const creationBase = value.baseRef;
+    const currentMain = (await execFileAsync("git", ["rev-parse", "main"], { cwd: root })).stdout.trim();
     await adapter.prepareForReview(value);
     const reviewedHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: worker })).stdout.trim();
-    const targetBefore = value.baseRef;
-    assert.equal((await execFileAsync("git", ["merge-base", "--is-ancestor", targetBefore, reviewedHead], { cwd: root })).stderr, "");
+    assert.equal(value.baseRef, creationBase, "creation provenance stays immutable");
+    assert.equal(value.review?.reviewBaseRef, currentMain, "review base records the exact rebase target separately");
+    assert.equal((await execFileAsync("git", ["merge-base", "--is-ancestor", currentMain, reviewedHead], { cwd: root })).stderr, "");
     const diff = await adapter.readDiff(value);
     assert.match(diff, /new-file\.txt/);
     assert.match(diff, /new content/);
