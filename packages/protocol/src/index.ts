@@ -1,5 +1,5 @@
 export type AgentStatus = "idle" | "running" | "error";
-export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type JobStatus = "queued" | "running" | "interrupted" | "completed" | "failed" | "cancelled";
 export type RequestedIsolationMode = "auto" | "worktree" | "root";
 export type IsolationMode = Exclude<RequestedIsolationMode, "auto">;
 
@@ -35,6 +35,10 @@ export interface AgentJob {
   summary?: string;
   diff?: string;
   error?: string;
+  /** A stopped job whose checkout/session artifacts remain available for review or manual continuation. */
+  recoverable?: boolean;
+  /** Set when durable metadata no longer agrees with the git checkout. */
+  recoveryIssue?: string;
 }
 
 export interface AppSnapshot {
