@@ -1532,11 +1532,14 @@ export class Orchestrator {
 
   private activeReviewLaneIds(): Set<string> {
     const active = new Set<string>();
-    const activeReview = new Set(["ci_running", "judging", "merge_queued", "merging", "post_merge_ci", "worker_resumed"]);
+    const activeReview = new Set(["ci_running", "judging", "merge_queued", "merging", "post_merge_ci"]);
     for (const job of this.jobs.values()) {
       const action = job.review?.remediation?.actions.find((entry) => entry.id === job.review?.remediation?.currentActionId);
-      const reservedRepairWorker = this.sweepJobIds.has(job.id) && this.workers.has(job.id);
-      if ((job.review && activeReview.has(job.review.status)) || action?.state === "repairing" || reservedRepairWorker) active.add(job.id);
+      const hasLiveWorker = this.workers.has(job.id);
+      const activeRepairWorker = hasLiveWorker && (job.review?.status === "worker_resumed" || action?.state === "repairing" || this.sweepJobIds.has(job.id));
+      // Durable worker_resumed/repairing metadata can outlive a crashed or
+      // exhausted worker. Only an actual RunningWorker consumes a lane.
+      if ((job.review && activeReview.has(job.review.status)) || activeRepairWorker) active.add(job.id);
     }
     // Reservations whose coordinator turn produced no asynchronous work must
     // not consume capacity forever, especially while a later durable wake is
