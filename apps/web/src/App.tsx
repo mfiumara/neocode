@@ -11,7 +11,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
-import { isDoneJob, jobLifecycleLabel } from "./jobLifecycle";
+import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
 import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
@@ -1073,19 +1073,20 @@ export function App() {
   );
 }
 
-function JobSidebarRow({ job, active, activityReady, onOpen }: {
+export function JobSidebarRow({ job, active, activityReady, onOpen }: {
   job: AgentJob; active: boolean; activityReady: boolean; onOpen: () => void;
 }) {
-  const live = activityReady && (job.status === "queued" || job.status === "running");
+  const activeState = jobActiveState(job, activityReady);
   const semanticClass = job.integration?.status || job.status;
-  return <Button variant="ghost" className={`job-row ${active ? "active" : ""}`} onClick={onOpen} title={jobLifecycleLabel(job)} aria-current={active ? "page" : undefined}>
-    <span className={`job-glyph ${activityReady || !live ? semanticClass : "disconnected"}`} aria-hidden="true">
+  const statusLabel = activeState?.label || jobLifecycleLabel(job);
+  return <Button variant="ghost" className={`job-row ${active ? "active" : ""}`} onClick={onOpen} title={statusLabel} aria-current={active ? "page" : undefined}>
+    <span className={`job-glyph ${activeState ? "in-progress" : semanticClass}`} aria-hidden="true">
       {job.integration?.status === "merged" ? "✓" : statusGlyph(job.status)}
     </span>
-    <span><strong>{job.title}</strong><small>{live
-      ? <>{job.activity?.description || "Working"} {job.activity && <ActivityDuration activity={job.activity} />}</>
+    <span><strong>{job.title}</strong><small>{activeState
+      ? <>{activeState.label}{activeState.kind === "worker" && job.activity && <> <ActivityDuration activity={job.activity} /></>}</>
       : <>{jobLifecycleLabel(job)} · {isolationLabel(job)}{job.durationMs !== undefined ? ` · ${formatDuration(job.durationMs)} total` : ""}</>}</small></span>
-    <span className="sr-only">Status: {jobLifecycleLabel(job)}</span>
+    <span className="sr-only">Status: {statusLabel}</span>
   </Button>;
 }
 
