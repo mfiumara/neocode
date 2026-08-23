@@ -12,7 +12,7 @@ export interface DurableJob {
 }
 
 export type CoordinatorWorkerEventKind =
-  | "handoff" | "lifecycle_transition" | "failed" | "needs_attention";
+  | "handoff" | "lifecycle_transition" | "action_required" | "failed" | "needs_attention";
 
 export interface CoordinatorWorkerEvent {
   id: string;

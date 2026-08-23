@@ -113,9 +113,15 @@ test("guarded integration remains serialized", async () => {
 
 test("feedback preserves worktree and creates a fresh handoff round", async () => {
   const adapter = new FakeAdapter(); const value = job();
+  adapter.judge = async (_job, _diff, hash) => {
+    adapter.judgeCalls += 1;
+    return adapter.judgeCalls === 1
+      ? { ...verdict(hash), approved: false, summary: "missing edge-case test" }
+      : verdict(hash);
+  };
   const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
   pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle();
-  pipeline.requestChanges(value, "Add the missing edge-case test");
+  pipeline.requestChanges(value, "Judge reported missing edge-case test; add test and implementation");
   pipeline.workerResumed(value);
   value.diff = "diff-round-two"; value.summary = "Tests: edge case passes";
   pipeline.nextHandoff(value);
@@ -124,6 +130,66 @@ test("feedback preserves worktree and creates a fresh handoff round", async () =
   assert.equal(value.review?.judge, undefined);
   pipeline.startJudge(value); await pipeline.idle();
   assert.equal(adapter.judgeCalls, 2);
+});
+
+test("a failing branch is resumed, corrected, rechecked, and freshly judged on the next round", async () => {
+  const adapter = new FakeAdapter();
+  const value = job("repair");
+  const failed: CheckEvidence = { command: "npm test", ok: false, exitCode: 1, durationMs: 2, output: "AssertionError: expected 2" };
+  adapter.runCi = async () => adapter.ciCalls++ === 0 ? [failed] : [pass];
+  const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+  pipeline.enqueue(value);
+  pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(value.review?.status, "ci_failed");
+  assert.equal(value.review?.remediation?.actions[0]?.evidence.checks?.[0]?.output, failed.output);
+
+  pipeline.requestChanges(value, "npm test failed with 'expected 2'; correct the assertion source and rerun that exact command");
+  pipeline.workerResumed(value);
+  assert.equal(value.review?.transitions.at(-1)?.status, "worker_resumed");
+  assert.equal(value.review?.transitions.at(-1)?.detail?.includes(value.isolation.path), true);
+  value.diff = "materially corrected diff";
+  value.summary = "Tests: npm test passes";
+  pipeline.nextHandoff(value);
+  pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(value.review?.status, "approved");
+  assert.equal(adapter.judgeCalls, 1, "the failed round never judges; corrected handoff gets a fresh judge");
+  assert.deepEqual(value.review?.transitions.slice(-5).map((entry) => entry.status),
+    ["handoff_received", "ci_running", "ci_running", "judging", "approved"]);
+});
+
+test("unchanged failures are bounded per class and preserve complete evidence", async () => {
+  const adapter = new FakeAdapter();
+  const value = job("bounded");
+  const failed: CheckEvidence = { command: "npm test", ok: false, exitCode: 1, durationMs: 1, output: "same deterministic source failure" };
+  adapter.runCi = async () => [failed];
+  const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+  pipeline.enqueue(value);
+  for (let repair = 0; repair < 3; repair += 1) {
+    pipeline.startJudge(value); await pipeline.idle();
+    pipeline.requestChanges(value, `Round ${repair + 1}: fix npm test output: ${failed.output}`);
+    pipeline.workerResumed(value);
+    pipeline.nextHandoff(value); // deliberately unchanged diff
+  }
+  pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(value.status, "needs_attention");
+  assert.equal(value.review?.status, "needs_attention");
+  assert.equal(value.review?.remediation?.rounds.worker_ci?.attempts, 3);
+  assert.equal(value.review?.remediation?.actions.at(-1)?.state, "exhausted");
+  assert.equal(value.review?.remediation?.actions.at(-1)?.evidence.checks?.[0]?.output, failed.output);
+});
+
+test("restart recovery does not duplicate a claimed source repair attempt", async () => {
+  const adapter = new FakeAdapter(); const value = job("restart-repair");
+  adapter.runCi = async () => [{ command: "test", ok: false, exitCode: 1, durationMs: 1, output: "broken" }];
+  const first = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+  first.enqueue(value); first.startJudge(value); await first.idle();
+  first.requestChanges(value, "Fix exact failure: broken");
+  const restored = structuredClone(value);
+  const restarted = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+  restarted.recover([restored]); await restarted.idle();
+  assert.equal(restored.review?.remediation?.rounds.worker_ci?.attempts, 1);
+  assert.equal(restored.review?.remediation?.actions.length, 1);
+  assert.equal(adapter.judgeCalls, 0);
 });
 
 test("conflict returns to worker handoff and fresh judge before retry", async () => {
@@ -154,6 +220,32 @@ test("restart recovery never replays a transient product decision", async () => 
   assert.equal(value.review.status, "blocked");
   assert.equal(value.review.coordinatorAuthorizedAt, undefined);
   assert.equal(adapter.reconcileCalls, 0);
+});
+
+test("candidate and post-merge verification failures become evidence-complete action-required states", async () => {
+  const candidateAdapter = new FakeAdapter();
+  const candidateCheck: CheckEvidence = { command: "npm run build", ok: false, exitCode: 2, durationMs: 4, output: "TS2345 candidate failure" };
+  candidateAdapter.reconcile = async () => { throw new PipelineError("failed", "Candidate CI failed before main changed", "candidate_ci", [candidateCheck]); };
+  const candidate = job("candidate-fail");
+  const candidatePipeline = new CompletionPipeline(candidateAdapter, () => undefined, "main", "/root");
+  candidatePipeline.enqueue(candidate); candidatePipeline.startJudge(candidate); await candidatePipeline.idle();
+  candidatePipeline.requestMerge(candidate); await candidatePipeline.idle();
+  assert.equal(candidate.review?.remediation?.actions.at(-1)?.failureClass, "candidate_ci");
+  assert.equal(candidate.review?.remediation?.actions.at(-1)?.evidence.checks?.[0]?.output, candidateCheck.output);
+  assert.notEqual(candidate.integration?.status, "merged");
+
+  const postAdapter = new FakeAdapter();
+  postAdapter.runCi = async (cwd) => cwd === "/root"
+    ? [{ command: "npm test", ok: false, exitCode: 1, durationMs: 3, output: "post merge regression" }]
+    : [pass];
+  const post = job("post-fail");
+  const postPipeline = new CompletionPipeline(postAdapter, () => undefined, "main", "/root");
+  postPipeline.enqueue(post); postPipeline.startJudge(post); await postPipeline.idle();
+  postPipeline.requestMerge(post); await postPipeline.idle();
+  assert.equal(post.review?.status, "post_ci_failed");
+  assert.equal(post.review?.remediation?.actions.at(-1)?.failureClass, "post_merge_ci");
+  assert.equal(post.review?.remediation?.actions.at(-1)?.evidence.mergeCommit, "commit-post-fail");
+  assert.notEqual(post.integration?.status, "merged", "post-merge failure must never appear Done");
 });
 
 test("changed diff after approval blocks guarded integration", async () => {

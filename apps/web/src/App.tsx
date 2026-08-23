@@ -912,6 +912,15 @@ function ReviewView({ job }: { job: AgentJob }) {
     <header><span className={`review-status ${review.status}`}>{review.status.replaceAll("_", " ")}</span><span>coordinator-owned · attempt {review.attempt} · target {review.targetBranch}</span></header>
     {job.handoff && <><h2>Worker handoff · round {job.handoff.round}</h2><p>{job.handoff.report}</p><code>diff sha256 {job.handoff.diffSha256}</code></>}
     {review.error && <pre className="review-error">{review.error}</pre>}
+    {review.remediation?.actions.length ? <>
+      <h2>Action-required remediation</h2>
+      <div className="check-list">{review.remediation.actions.map((action) => <details key={action.id} open={action.id === review.remediation?.currentActionId} className={action.state === "resolved" ? "pass" : "fail"}>
+        <summary>{action.failureClass.replaceAll("_", " ")} · {action.state} · repair {action.attempt}/{action.maxAttempts}</summary>
+        <pre>{action.evidence.detail}</pre>
+        {action.feedback && <p><strong>Coordinator feedback:</strong> {action.feedback}</p>}
+        <CheckList checks={action.evidence.checks} />
+      </details>)}</div>
+    </> : null}
     <h2>Local CI</h2>
     <CheckList checks={review.ci} />
     <h2>Independent Pi judge</h2>

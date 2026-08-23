@@ -8,11 +8,13 @@ Pi owns model/provider integration, the tool loop, context compaction, and agent
 
 ## Runtime model
 
-The main coordinator's primary job is reconciliation and integration. Alongside read/search it receives explicit orchestration tools: `delegate_task`, `list_jobs`, `inspect_job`, `start_judge`, `request_worker_changes`, and `guarded_merge`.
+The main coordinator's primary job is reconciliation and integration. Alongside read/search it receives explicit orchestration tools: `delegate_task`, `list_jobs`, `inspect_job`, `start_judge`, `request_worker_changes`, `retry_infrastructure`, and `guarded_merge`.
 
 It cannot edit the checkout directly and is always anchored at the repository root. Implementation workers run asynchronously in worktrees and never mutate or merge root/main. Completion emits a durable structured handoff (report, requirements, exact diff hash, branch/worktree, tests, and risks), appends it to the main transcript, and schedules one coordinator wake. User prompts retain priority while lifecycle events wait durably.
 
-Review is coordinator-owned: the coordinator explicitly starts a fresh independent judge, which reports but cannot merge. It can send specific feedback back to the same worker for bounded rounds; each new handoff invalidates the prior verdict and requires a fresh exact-diff judge. Only `guarded_merge` records coordinator authorization. The server then serializes root operations and verifies a clean expected target, reviewed diff hash, CI, conflicts, and post-merge CI. A conflict is restored safely and shown in the main thread; the coordinator delegates resolution to a worker, re-judges, and explicitly retries. Startup recovery never replays judge or merge decisions.
+Review is coordinator-owned: the coordinator explicitly starts a fresh independent judge, which reports but cannot merge. Worker CI, isolated candidate CI, judge-requested changes, conflicts, and post-merge verification failures create durable `action_required` records containing exact command/output evidence and wake the coordinator once. The coordinator sends specific feedback to the same worker worktree; every feedback → resume → handoff → CI → fresh-judge transition is persisted and shown in the main thread and review UI. Transient infrastructure failures use an explicitly authorized exponential-backoff retry instead of source feedback.
+
+Repair accounting is persisted per failure class and material diff/commit fingerprint (default three rounds). Nondeterministic diagnostic text cannot reset the budget; only a materially changed diff or commit can. Exhaustion marks the job `needs_attention` while retaining every diagnostic. A post-merge failure therefore never becomes Done. Only `guarded_merge` records coordinator authorization. The server serializes the authorized root operation and first validates the exact candidate merge tree in an isolated checkout; workers and judges have no merge capability. Startup may resume an already claimed worker repair or safe infrastructure retry, but never invents a fix, verdict, merge authorization, or duplicate attempt.
 
 ## Application state
 

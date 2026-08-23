@@ -13,7 +13,40 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 export type ReviewStatus =
   | "queued" | "ci_running" | "ci_failed" | "judging" | "rejected"
   | "approved" | "merge_queued" | "merging" | "post_merge_ci"
-  | "merged" | "post_ci_failed" | "blocked" | "conflict" | "failed";
+  | "merged" | "post_ci_failed" | "blocked" | "conflict" | "failed"
+  | "feedback_sent" | "worker_resumed" | "handoff_received" | "needs_attention";
+
+export type RemediationFailureClass =
+  | "worker_ci" | "candidate_ci" | "judge_changes" | "conflict" | "post_merge_ci" | "infrastructure";
+
+export interface RemediationRound {
+  failureClass: RemediationFailureClass;
+  fingerprint: string;
+  attempts: number;
+  maxAttempts: number;
+  nextRetryAt?: number;
+  updatedAt: number;
+}
+
+export interface ActionRequiredEvidence {
+  detail: string;
+  checks?: CheckEvidence[];
+  judge?: JudgeEvidence;
+  mergeCommit?: string;
+}
+
+export interface ActionRequired {
+  id: string;
+  failureClass: RemediationFailureClass;
+  fingerprint: string;
+  state: "pending" | "repairing" | "resolved" | "exhausted";
+  attempt: number;
+  maxAttempts: number;
+  createdAt: number;
+  updatedAt: number;
+  evidence: ActionRequiredEvidence;
+  feedback?: string;
+}
 
 export interface CheckEvidence {
   command: string;
@@ -76,6 +109,13 @@ export interface JobReview {
   /** Set only by the coordinator's guarded_merge tool call. */
   coordinatorAuthorizedAt?: number;
   feedback?: string[];
+  /** Durable coordinator-owned repair accounting and complete failure evidence. */
+  remediation?: {
+    maxAttempts: number;
+    rounds: Partial<Record<RemediationFailureClass, RemediationRound>>;
+    actions: ActionRequired[];
+    currentActionId?: string;
+  };
   error?: string;
 }
 

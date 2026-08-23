@@ -77,7 +77,7 @@ export interface MaintenanceConfig {
   startup?: boolean;
 }
 
-const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "start_judge", "request_worker_changes", "guarded_merge"];
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge"];
 const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
 const VARIANTS: AgentVariant[] = ["build", "plan"];
 
@@ -244,7 +244,7 @@ export class Orchestrator {
     const loader = new DefaultResourceLoader({
       cwd: this.cwd,
       agentDir: getAgentDir(),
-      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, send specific feedback back to the same worker when needed, and only after final approval call guarded_merge. Judges report to you and never merge. Conflicts must be delegated back to a worker, handed off, and re-judged. Never ask a worker to mutate root/main. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
+      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, and only after final approval call guarded_merge. Every action_required event must be inspected for the exact command/output. For source, test, judge, conflict, or post-merge failures, quote specific diagnostics with request_worker_changes so the SAME worktree is resumed; await its new handoff, rerun CI, and launch a fresh judge. For a genuinely transient failure use retry_infrastructure. Never bypass bounded repair rounds; needs_attention requires reporting all evidence. Judges report to you and never merge. Conflicts must return to the same worker, be handed off, and be re-judged. Never ask a worker to mutate root/main. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
 
     });
     await loader.reload();
@@ -309,6 +309,14 @@ export class Orchestrator {
         execute: async (_callId: string, params: { jobId: string; feedback: string }) => { await this.requestWorkerChanges(params.jobId, params.feedback); return { content: [{ type: "text" as const, text: `Feedback sent and worker ${params.jobId} resumed.` }], details: { jobId: params.jobId } }; },
       },
       {
+        name: "retry_infrastructure", label: "Retry infrastructure", description: "Coordinator-owned bounded retry for a diagnosed transient CI/infrastructure failure.",
+        parameters: Type.Object({ jobId: Type.String(), reason: Type.String() }),
+        execute: async (_callId: string, params: { jobId: string; reason: string }) => {
+          this.completionPipeline.retryInfrastructure(this.requireJob(params.jobId), params.reason);
+          return { content: [{ type: "text" as const, text: `Bounded infrastructure retry scheduled for ${params.jobId}.` }], details: { jobId: params.jobId } };
+        },
+      },
+      {
         name: "guarded_merge", label: "Guarded merge", description: "Authorize serialized exact-diff merge after fresh judge approval.",
         parameters: Type.Object({ jobId: Type.String() }),
         execute: async (_callId: string, params: { jobId: string }) => { this.completionPipeline.requestMerge(this.requireJob(params.jobId)); return { content: [{ type: "text" as const, text: `Coordinator authorized guarded merge for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
@@ -355,6 +363,7 @@ export class Orchestrator {
       ),
     });
     this.completionPipeline.recover(this.listJobs());
+    await this.resumeClaimedRemediations();
     // Observe current durable states after queue construction so startup
     // recovery is visible without replaying side effects.
     for (const job of this.listJobs()) this.coordinatorNotifications.observe(job);
@@ -565,13 +574,26 @@ export class Orchestrator {
     return job;
   }
 
+  private async resumeClaimedRemediations(): Promise<void> {
+    for (const job of this.jobs.values()) {
+      const remediation = job.review?.remediation;
+      const action = remediation?.actions.find((entry) => entry.id === remediation.currentActionId);
+      if (job.status !== "completed" || action?.state !== "repairing" || action.failureClass === "infrastructure" || this.workers.has(job.id)) continue;
+      // The coordinator's durable repair claim happened before the previous
+      // process died. Resume that exact same worktree without consuming another
+      // round or inventing new feedback.
+      this.completionPipeline.workerResumed(job);
+      job.recoverable = true;
+      await this.startRecoveryAttempt(job, "manual_resume");
+    }
+  }
+
   async requestWorkerChanges(jobId: string, feedback: string): Promise<void> {
     const job = this.requireJob(jobId);
     if (job.status !== "completed") throw new Error(`Worker ${jobId} is not awaiting review.`);
     if (job.isolation.mode !== "worktree") throw new Error("Review iterations require an isolated worktree worker.");
-    if ((job.handoff?.round || 1) >= 4) throw new Error("Maximum review rounds reached; coordinator attention is required.");
     this.completionPipeline.requestChanges(job, feedback);
-    job.messages.push({ id: id(), role: "system", text: `Coordinator review feedback: ${feedback}`, timestamp: Date.now() });
+    job.messages.push({ id: id(), role: "user", text: `Coordinator repair feedback (inspect the exact diagnostics and correct this checkout):\n${feedback}`, timestamp: Date.now() });
     job.recoverable = true;
     this.completionPipeline.workerResumed(job);
     await this.startRecoveryAttempt(job, "manual_resume");

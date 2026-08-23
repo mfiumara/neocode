@@ -1,23 +1,36 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type {
+  ActionRequired,
   AgentJob,
   CheckEvidence,
   JudgeEvidence,
+  RemediationFailureClass,
   ReviewStatus,
 } from "@neocode/protocol";
 
 export class PipelineError extends Error {
-  constructor(readonly code: "blocked" | "conflict" | "failed", message: string) {
-    super(message);
-  }
+  constructor(
+    readonly code: "blocked" | "conflict" | "failed",
+    message: string,
+    readonly failureClass?: RemediationFailureClass,
+    readonly checks?: CheckEvidence[],
+  ) { super(message); }
 }
 
 const execFileAsync = promisify(execFile);
 
-export interface ReconcileResult { commit: string; completionCommit?: string; alreadyMerged?: boolean }
+export interface ReconcileResult {
+  commit: string;
+  completionCommit?: string;
+  alreadyMerged?: boolean;
+  /** CI evidence for the exact prospective merge tree, before main changes. */
+  candidateCi?: CheckEvidence[];
+}
 export interface ReviewAdapter {
   runCi(cwd: string): Promise<CheckEvidence[]>;
   readDiff(job: AgentJob): Promise<string>;
@@ -46,6 +59,7 @@ class SerialOperationLock implements OperationLock {
  */
 export class CompletionPipeline {
   private readonly active = new Set<string>();
+  private readonly scheduled = new Set<string>();
   private readonly operationLock: OperationLock;
 
   constructor(
@@ -73,6 +87,7 @@ export class CompletionPipeline {
       hookToken: randomUUID(), status: "queued", attempt: 1,
       targetBranch: this.targetBranch, updatedAt: now,
       transitions: [{ status: "queued", at: now, owner: "worker", detail: "Structured handoff delivered; awaiting coordinator review" }],
+      remediation: { maxAttempts: remediationLimit(), rounds: {}, actions: [] },
     };
     job.integration = { status: "reviewing", targetRef: this.targetBranch };
     this.publish(job);
@@ -93,19 +108,33 @@ export class CompletionPipeline {
   /** Compatibility for the UI: retry means the coordinator explicitly starts a fresh judge. */
   retry(job: AgentJob): void { this.startJudge(job); }
 
+  retryInfrastructure(job: AgentJob, reason: string): void {
+    const action = this.currentAction(job);
+    const transientChecks = action?.evidence.checks?.some((check) => check.timedOut || check.exitCode === null);
+    if (!action || action.state !== "pending" || (action.failureClass !== "infrastructure" && !transientChecks)) {
+      throw new Error("The current action is not diagnosed as a transient infrastructure failure.");
+    }
+    this.claimRepair(job, action, reason, true);
+    this.transition(job, "feedback_sent", `Coordinator authorized safe infrastructure retry: ${reason}`, "coordinator");
+    this.scheduleInfrastructureRetry(job);
+  }
+
   requestChanges(job: AgentJob, feedback: string): void {
     if (!job.review) throw new Error("No handoff exists for this job.");
-    if (!feedback.trim()) throw new Error("Specific review feedback is required.");
+    if (!feedback.trim()) throw new Error("Specific feedback quoting the failing command/output is required.");
+    const action = this.currentAction(job);
+    if (!action || action.state !== "pending") throw new Error("No pending action-required failure exists.");
+    const round = this.claimRepair(job, action, feedback.trim());
     job.review.feedback ??= [];
     job.review.feedback.push(feedback.trim());
     delete job.review.judge;
     delete job.review.coordinatorAuthorizedAt;
-    this.transition(job, "rejected", `Coordinator feedback sent: ${feedback.trim()}`, "coordinator");
+    this.transition(job, "feedback_sent", `Repair ${round.attempts}/${round.maxAttempts} feedback: ${feedback.trim()}`, "coordinator");
   }
 
   workerResumed(job: AgentJob): void {
     if (!job.review) throw new Error("No review exists for this job.");
-    this.transition(job, "queued", "Worker resumed in the same worktree for the next review round", "coordinator");
+    this.transition(job, "worker_resumed", `Same implementation worktree resumed: ${job.isolation.path}`, "coordinator");
   }
 
   nextHandoff(job: AgentJob): void {
@@ -122,14 +151,20 @@ export class CompletionPipeline {
     };
     delete job.review.judge;
     delete job.review.coordinatorAuthorizedAt;
-    this.transition(job, "queued", `Updated handoff delivered for review round ${job.handoff.round}`, "worker");
+    const action = this.currentAction(job);
+    if (action?.state === "repairing") {
+      action.state = "resolved";
+      action.updatedAt = now;
+      delete job.review.remediation!.currentActionId;
+    }
+    this.transition(job, "handoff_received", `New handoff ${job.handoff.diffSha256} delivered from the same worktree for review round ${job.handoff.round}`, "worker");
   }
 
   requestMerge(job: AgentJob): void {
     if (!job.review?.judge?.approved) throw new Error("A fresh independent judge approval is required before guarded merge.");
     if (this.active.has(job.id)) throw new Error("A lifecycle action is already running.");
-    if (job.review.status !== "approved" && job.review.status !== "blocked" && job.review.status !== "conflict") {
-      throw new Error(`Guarded merge is unavailable from ${job.review.status}.`);
+    if (job.review.status !== "approved") {
+      throw new Error(`Guarded merge is unavailable from ${job.review.status}; conflicts and failures require a new worker handoff and fresh judge.`);
     }
     job.review.coordinatorAuthorizedAt = Date.now();
     this.transition(job, "merge_queued", "Coordinator approved the exact reviewed diff and authorized guarded merge", "coordinator");
@@ -148,7 +183,10 @@ export class CompletionPipeline {
         this.transition(job, "queued", "Legacy server-owned verdict invalidated; coordinator must start a fresh judge", "server");
         continue;
       }
-      if (["ci_running", "judging"].includes(job.review.status)) {
+      const action = this.currentAction(job);
+      if (action?.state === "repairing" && action.failureClass === "infrastructure") {
+        this.scheduleInfrastructureRetry(job);
+      } else if (["ci_running", "judging"].includes(job.review.status)) {
         this.transition(job, "queued", "Interrupted judge action recovered; awaiting coordinator restart", "server");
       } else if (["merge_queued", "merging", "post_merge_ci"].includes(job.review.status)) {
         delete job.review.coordinatorAuthorizedAt;
@@ -159,19 +197,33 @@ export class CompletionPipeline {
 
   async idle(): Promise<void> { while (this.active.size) await new Promise((resolve) => setTimeout(resolve, 5)); }
 
-  private launch(job: AgentJob, mode: "judge" | "merge"): void {
+  private launch(job: AgentJob, mode: "judge" | "merge" | "post"): void {
     this.active.add(job.id);
     void this.process(job, mode).finally(() => this.active.delete(job.id));
   }
 
-  private async process(job: AgentJob, mode: "judge" | "merge"): Promise<void> {
+  private async process(job: AgentJob, mode: "judge" | "merge" | "post"): Promise<void> {
     try {
+      if (mode === "post") {
+        const checks = await this.adapter.runCi(this.rootCwd || job.isolation.path);
+        job.review!.postMergeCi = checks; this.publish(job);
+        if (!checks.length || checks.some((check) => !check.ok)) {
+          this.requireAction(job, "post_merge_ci", "post_ci_failed",
+            !checks.length ? "No post-merge CI checks detected" : "Post-merge CI failed", checks);
+          return;
+        }
+        this.transition(job, "merged", `Post-merge verification passed for ${job.review!.mergeCommit}: ${checks.map((check) => check.command).join(", ")}`, "server");
+        return;
+      }
       if (mode === "judge") {
         this.transition(job, "ci_running", "Coordinator started CI for independent review", "coordinator");
         const ci = await this.adapter.runCi(job.isolation.path);
         job.review!.ci = ci; this.publish(job);
         if (!ci.length || ci.some((check) => !check.ok)) {
-          this.transition(job, "ci_failed", !ci.length ? "No CI checks configured" : "Worker CI failed", "server"); return;
+          const transient = !ci.length || ci.some((check) => check.timedOut || check.exitCode === null);
+          this.requireAction(job, transient ? "infrastructure" : "worker_ci", "ci_failed",
+            !ci.length ? "No CI checks configured" : "Worker CI failed", ci);
+          return;
         }
         this.transition(job, "ci_running", `CI passed: ${ci.map((check) => check.command).join(", ")}`, "server");
         const diff = await this.adapter.readDiff(job);
@@ -182,7 +234,8 @@ export class CompletionPipeline {
         if (verdict.diffSha256 !== hash) throw new PipelineError("failed", "Judge verdict was not tied to the reviewed diff.");
         job.review!.judge = verdict; this.publish(job);
         if (!verdict.approved || !verdict.requirements.length || verdict.requirements.some((item) => !item.satisfied)) {
-          this.transition(job, "rejected", verdict.summary || "Judge requested changes", "judge"); return;
+          this.requireAction(job, "judge_changes", "rejected", verdict.summary || "Judge requested changes", undefined, verdict);
+          return;
         }
         this.transition(job, "approved", verdict.summary, "judge");
         return;
@@ -193,33 +246,133 @@ export class CompletionPipeline {
         this.transition(job, "merging", `Coordinator-owned guarded merge into ${job.review!.targetBranch}`, "coordinator");
         const current = await this.adapter.readDiff(job);
         const hash = createHash("sha256").update(current).digest("hex");
-        if (hash !== job.review!.judge!.diffSha256) throw new PipelineError("blocked", "Worker diff changed after judge approval; start a fresh judge.");
+        if (hash !== job.review!.judge!.diffSha256) throw new PipelineError("blocked", "Worker diff changed after judge approval; return it to the same worker and start a fresh judge.", "judge_changes");
         const result = await this.adapter.reconcile(job);
         job.review!.mergeCommit = result.commit;
         if (result.completionCommit && job.completion) job.completion.head = result.completionCommit;
+        if (result.candidateCi) {
+          job.review!.postMergeCi = result.candidateCi;
+          this.publish(job);
+          this.transition(job, "merged", `Guarded merge verified as ${result.commit}; exact candidate checks passed before main changed`, "server");
+          return;
+        }
         this.transition(job, "post_merge_ci", "Merge completed; running serialized post-merge checks", "server");
         const checks = await this.adapter.runCi(this.rootCwd || job.isolation.path);
         job.review!.postMergeCi = checks; this.publish(job);
         if (!checks.length || checks.some((check) => !check.ok)) {
-          this.transition(job, "post_ci_failed", !checks.length ? "No post-merge CI checks detected" : "Post-merge CI failed", "server"); return;
+          this.requireAction(job, "post_merge_ci", "post_ci_failed",
+            !checks.length ? "No post-merge CI checks detected" : "Post-merge CI failed", checks);
+          return;
         }
         this.transition(job, "merged", `Guarded merge verified as ${result.commit}; post-merge checks passed: ${checks.map((check) => check.command).join(", ")}`, "server");
       });
     } catch (error) {
       const code = error instanceof PipelineError ? error.code : "failed";
-      this.transition(job, code, error instanceof Error ? error.message : String(error), "server");
+      const failureClass = error instanceof PipelineError && error.failureClass
+        ? error.failureClass : code === "conflict" ? "conflict" : "infrastructure";
+      this.requireAction(job, failureClass, code, error instanceof Error ? error.message : String(error),
+        error instanceof PipelineError ? error.checks : undefined);
     }
+  }
+
+  private currentAction(job: AgentJob): ActionRequired | undefined {
+    const remediation = job.review?.remediation;
+    return remediation?.actions.find((action) => action.id === remediation.currentActionId);
+  }
+
+  private requireAction(
+    job: AgentJob,
+    failureClass: RemediationFailureClass,
+    status: ReviewStatus,
+    detail: string,
+    checks?: CheckEvidence[],
+    judge?: JudgeEvidence,
+  ): void {
+    const review = job.review!;
+    review.remediation ??= { maxAttempts: remediationLimit(), rounds: {}, actions: [] };
+    const diffHash = createHash("sha256").update(job.diff || "").digest("hex");
+    // Attempts reset only for a materially different implementation or target
+    // commit, never because timestamps or nondeterministic command output vary.
+    const fingerprint = `${failureClass}:${diffHash}:${job.completion?.head || "uncommitted"}:${review.mergeCommit || "unmerged"}`;
+    let round = review.remediation.rounds[failureClass];
+    if (!round || round.fingerprint !== fingerprint) {
+      round = { failureClass, fingerprint, attempts: 0, maxAttempts: review.remediation.maxAttempts, updatedAt: Date.now() };
+      review.remediation.rounds[failureClass] = round;
+    }
+    const previous = this.currentAction(job);
+    if (previous && previous.state !== "exhausted") { previous.state = "resolved"; previous.updatedAt = Date.now(); }
+    const action = {
+      id: randomUUID(), failureClass, fingerprint,
+      state: "pending" as const, attempt: round.attempts, maxAttempts: round.maxAttempts,
+      createdAt: Date.now(), updatedAt: Date.now(),
+      evidence: { detail, checks, judge, mergeCommit: review.mergeCommit },
+    };
+    review.remediation.actions.push(action);
+    review.remediation.currentActionId = action.id;
+    this.transition(job, status, detail, failureClass === "judge_changes" ? "judge" : "server");
+    if (round.attempts >= round.maxAttempts) this.exhaust(job, action, round.attempts);
+  }
+
+  private claimRepair(job: AgentJob, action: ActionRequired, feedback: string, withBackoff = false) {
+    const round = job.review!.remediation!.rounds[action.failureClass]!;
+    if (round.attempts >= round.maxAttempts) {
+      this.exhaust(job, action, round.attempts);
+      throw new Error(`Repair limit reached for ${action.failureClass}; complete evidence is preserved.`);
+    }
+    round.attempts += 1;
+    round.updatedAt = Date.now();
+    if (withBackoff) round.nextRetryAt = Date.now() + remediationBackoff(round.attempts);
+    else delete round.nextRetryAt;
+    action.attempt = round.attempts;
+    action.feedback = feedback;
+    action.state = "repairing";
+    action.updatedAt = Date.now();
+    this.publish(job); // persist the claim before worker/CI side effects
+    return round;
+  }
+
+  private scheduleInfrastructureRetry(job: AgentJob): void {
+    const action = this.currentAction(job);
+    const round = action && job.review?.remediation?.rounds[action.failureClass];
+    if (!action || !round || this.scheduled.has(action.id)) return;
+    this.scheduled.add(action.id);
+    const delay = Math.max(0, (round.nextRetryAt || Date.now()) - Date.now());
+    const timer = setTimeout(() => {
+      this.scheduled.delete(action.id);
+      if (this.currentAction(job)?.id !== action.id || action.state !== "repairing") return;
+      this.transition(job, "ci_running", `Infrastructure retry ${round.attempts}/${round.maxAttempts} after ${delay}ms backoff`, "coordinator");
+      this.launch(job, action.evidence.mergeCommit ? "post" : "judge");
+    }, delay);
+    timer.unref?.();
+  }
+
+  private exhaust(job: AgentJob, action: ActionRequired, attempts: number): void {
+    action.state = "exhausted";
+    action.updatedAt = Date.now();
+    job.status = "needs_attention";
+    job.recoverable = true;
+    job.recoveryIssue = `Repair limit reached for ${action.failureClass} after ${attempts} unchanged rounds. Exact diagnostics remain in review.remediation.actions.`;
+    this.transition(job, "needs_attention", job.recoveryIssue, "server");
   }
 
   private transition(job: AgentJob, status: ReviewStatus, detail?: string, owner: "worker" | "coordinator" | "judge" | "server" = "server"): void {
     const review = job.review!; review.status = status; review.updatedAt = Date.now();
-    if (["queued", "ci_running", "judging", "approved"].includes(status)) job.integration = { ...job.integration, status: "reviewing", targetRef: review.targetBranch };
+    if (["queued", "ci_running", "judging", "approved", "feedback_sent", "worker_resumed", "handoff_received"].includes(status)) job.integration = { ...job.integration, status: "reviewing", targetRef: review.targetBranch };
     else if (["merge_queued", "merging", "post_merge_ci"].includes(status)) job.integration = { ...job.integration, status: "integrating", targetRef: review.targetBranch };
     else if (["rejected", "blocked", "conflict", "ci_failed", "post_ci_failed", "failed"].includes(status)) job.integration = { ...job.integration, status: "conflicted", targetRef: review.targetBranch };
     else if (status === "merged") job.integration = { status: "merged", targetRef: review.targetBranch, verifiedAt: Date.now(), targetHead: review.mergeCommit, completionHead: job.completion?.head };
     if (["blocked", "conflict", "failed", "ci_failed", "post_ci_failed"].includes(status)) review.error = detail; else delete review.error;
     review.transitions.push({ status, at: review.updatedAt, detail, owner }); this.publish(job);
   }
+}
+
+function remediationLimit(): number {
+  const value = Number(process.env.NEOCODE_REMEDIATION_MAX_ROUNDS);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 3;
+}
+function remediationBackoff(attempt: number): number {
+  const base = Number(process.env.NEOCODE_REMEDIATION_BACKOFF_MS);
+  return (Number.isFinite(base) && base >= 0 ? base : 1_000) * 2 ** Math.max(0, attempt - 1);
 }
 
 function requirementsFrom(prompt: string): string[] {
@@ -290,17 +443,67 @@ export class LocalReviewAdapter implements ReviewAdapter {
     if (!await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.baseRef, job.branch])) {
       throw new PipelineError("blocked", "Worker branch no longer descends from its recorded base.");
     }
+
     const completionCommit = (await git(job.isolation.path, ["rev-parse", "HEAD"])).trim();
-    if (await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.branch, this.targetBranch])) {
-      return { commit: (await git(this.root, ["rev-parse", this.targetBranch])).trim(), completionCommit, alreadyMerged: true };
-    }
+    const targetHead = (await git(this.root, ["rev-parse", this.targetBranch])).trim();
+    const alreadyMerged = await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.branch, this.targetBranch]);
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "neocode-integration-"));
+    const candidate = join(temporaryRoot, "candidate");
+    let candidateAdded = false;
+
     try {
-      await git(this.root, ["merge", "--no-ff", "--no-edit", job.branch]);
-    } catch (error) {
-      await git(this.root, ["merge", "--abort"]).catch(() => undefined);
-      throw new PipelineError("conflict", `Merge conflict; root was restored without forcing: ${error instanceof Error ? error.message : String(error)}`);
+      // Main must not change until the exact prospective merge tree has passed
+      // CI in a clean checkout with its own dependency installation.
+      await git(this.root, ["worktree", "add", "--detach", candidate, targetHead]);
+      candidateAdded = true;
+      if (!alreadyMerged) {
+        try {
+          await git(candidate, ["merge", "--no-ff", "--no-edit", job.branch]);
+        } catch (error) {
+          throw new PipelineError("conflict", `Candidate merge conflicts; main was not changed: ${error instanceof Error ? error.message : String(error)}`, "conflict");
+        }
+      }
+
+      const candidateCi = await this.runCi(candidate);
+      if (!candidateCi.length || candidateCi.some((check) => !check.ok)) {
+        const failed = candidateCi.find((check) => !check.ok);
+        throw new PipelineError("failed", failed
+          ? `Candidate CI failed before main changed: ${failed.command}`
+          : "No candidate CI checks were configured; refusing to change main.",
+          candidateCi.some((check) => check.timedOut || check.exitCode === null) ? "infrastructure" : "candidate_ci", candidateCi);
+      }
+      const candidateTree = (await git(candidate, ["rev-parse", "HEAD^{tree}"])).trim();
+
+      // Refuse races with humans or other processes after candidate validation.
+      const currentHead = (await git(this.root, ["rev-parse", "HEAD"])).trim();
+      if (currentHead !== targetHead || (await git(this.root, ["branch", "--show-current"])).trim() !== this.targetBranch) {
+        throw new PipelineError("blocked", "Main changed while candidate CI was running; review must be retried.");
+      }
+      if ((await git(this.root, ["status", "--porcelain", "--untracked-files=normal"])).trim()) {
+        throw new PipelineError("blocked", "Root became dirty while candidate CI was running; main was not changed.");
+      }
+
+      if (!alreadyMerged) {
+        try {
+          await git(this.root, ["merge", "--no-ff", "--no-edit", job.branch]);
+        } catch (error) {
+          await git(this.root, ["merge", "--abort"]).catch(() => undefined);
+          throw new PipelineError("conflict", `Merge conflict; root was restored without forcing: ${error instanceof Error ? error.message : String(error)}`, "conflict");
+        }
+      }
+      const commit = (await git(this.root, ["rev-parse", "HEAD"])).trim();
+      const integratedTree = (await git(this.root, ["rev-parse", "HEAD^{tree}"])).trim();
+      if (integratedTree !== candidateTree) {
+        // Root was proven clean and targetHead was captured immediately above,
+        // so this rollback cannot discard user work.
+        await git(this.root, ["reset", "--hard", targetHead]);
+        throw new PipelineError("failed", "Integrated tree differed from the CI-validated candidate; main was rolled back.");
+      }
+      return { commit, completionCommit, alreadyMerged: alreadyMerged || undefined, candidateCi };
+    } finally {
+      if (candidateAdded) await git(this.root, ["worktree", "remove", "--force", candidate]).catch(() => undefined);
+      await rm(temporaryRoot, { recursive: true, force: true });
     }
-    return { commit: (await git(this.root, ["rev-parse", "HEAD"])).trim(), completionCommit };
   }
 }
 
@@ -331,8 +534,18 @@ export async function readWorktreeDiff(cwd: string, baseRef: string): Promise<st
 
 async function detectedCommands(cwd: string): Promise<string[]> {
   try {
-    const value = JSON.parse(await readFile(`${cwd}/package.json`, "utf8")) as { scripts?: Record<string, string> };
-    return ["test", "check", "build"].filter((name) => value.scripts?.[name]).map((name) => `npm run ${name}`);
+    const value = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+    const commands: string[] = [];
+    try {
+      await readFile(join(cwd, "package-lock.json"));
+      commands.push("npm ci");
+    } catch {
+      // Without a lockfile we cannot prove a reproducible dependency graph.
+    }
+    commands.push(...["test", "check", "build"]
+      .filter((name) => value.scripts?.[name])
+      .map((name) => `npm run ${name}`));
+    return commands;
   } catch { return []; }
 }
 

@@ -61,6 +61,37 @@ test("busy coordinator queues durably and restart delivers the pending id exactl
   assert.deepEqual(wakes, [durable.events[0]!.id]);
 });
 
+test("action-required diagnostics stay exact while a user prompt is busy and wake once afterward", async () => {
+  const durable = state();
+  const wakes: string[] = [];
+  let userPromptRunning = true;
+  const value = job();
+  const output = "FAIL src/example.test.ts:42\nexpected 2, received 1\n  exact stack line";
+  value.review!.status = "ci_failed";
+  value.review!.updatedAt = 3;
+  value.review!.transitions.push({ status: "ci_failed", at: 3, owner: "server", detail: "Worker CI failed" });
+  value.review!.remediation = {
+    maxAttempts: 3,
+    rounds: { worker_ci: { failureClass: "worker_ci", fingerprint: "same", attempts: 0, maxAttempts: 3, updatedAt: 3 } },
+    actions: [{ id: "action-1", failureClass: "worker_ci", fingerprint: "same", state: "pending", attempt: 0, maxAttempts: 3, createdAt: 3, updatedAt: 3,
+      evidence: { detail: "Worker CI failed", checks: [{ command: "npm test", ok: false, exitCode: 1, durationMs: 2, output }] } }],
+    currentActionId: "action-1",
+  };
+  const hooks = {
+    append: () => undefined, persist: () => undefined, isIdle: () => !userPromptRunning,
+    wake: async (event: CoordinatorWorkerEvent) => { wakes.push(event.id); },
+  };
+  const queue = new CoordinatorNotificationQueue(durable, hooks);
+  assert.equal(queue.observe(value), true);
+  await tick();
+  assert.equal(wakes.length, 0, "normal user prompt remains serviceable and is not interrupted");
+  assert.match(durable.events[0]?.text || "", /exact stack line/);
+  assert.equal(queue.observe(value), false, "duplicate broadcasts do not duplicate the repair attempt wake");
+  userPromptRunning = false;
+  queue.settled(); await tick(); queue.settled(); await tick();
+  assert.equal(wakes.length, 1);
+});
+
 test("every lifecycle transition is appended without extra model chatter", async () => {
   const durable = state();
   let wakes = 0;
