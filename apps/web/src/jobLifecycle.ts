@@ -12,9 +12,10 @@ export interface JobActiveState {
  */
 export function jobActiveState(job: AgentJob, activityReady = true): JobActiveState | undefined {
   if (!activityReady) return undefined;
-  if (["interrupted", "needs_attention", "failed", "cancelled"].includes(job.status)) {
-    // Terminal worker dispositions override stale review data. Completed is
-    // deliberately excluded because review/integration work follows it.
+  if (["queued", "interrupted", "needs_attention", "failed", "cancelled"].includes(job.status)) {
+    // Queued and terminal worker dispositions override stale review data.
+    // Completed is deliberately excluded because review/integration work
+    // follows it.
     return undefined;
   }
 
@@ -31,7 +32,7 @@ export function jobActiveState(job: AgentJob, activityReady = true): JobActiveSt
   if (review === "worker_resumed") return { kind: "worker", label: "Worker repairing" };
   if (review === "ci_running" || review === "post_merge_ci") return { kind: "checks", label: "Running checks" };
   if (review === "judging") return { kind: "review", label: "Under review" };
-  if (review === "merge_queued" || review === "merging") return { kind: "integration", label: "Integrating" };
+  if (review === "merging") return { kind: "integration", label: "Integrating" };
 
   // Other current review statuses are settled or awaiting a decision. An
   // integration flag alone is likewise not evidence of a live process.
@@ -47,12 +48,22 @@ export function isDoneJob(job: AgentJob): boolean {
 export function jobLifecycleLabel(job: AgentJob): string {
   const integration = job.integration?.status;
   const review = job.review?.status;
+  // Current worker disposition is authoritative over review/integration
+  // metadata retained from an earlier attempt.
+  if (job.status === "queued") return "Queued";
+  if (job.status === "interrupted") return job.recoverable === false ? "Interrupted" : "Interrupted · recoverable";
+  if (job.status === "needs_attention") return "Needs attention";
+  if (job.status === "failed") return "Failed";
+  if (job.status === "cancelled") return "Cancelled";
+  if (job.status === "completed" && job.isolation.mode === "root") return "Completed";
+
   if (integration === "merged") {
     const prefix = job.integration?.disposition === "already_integrated" ? "Already integrated" : "Integrated";
     return job.cleanup?.status === "removed" ? `${prefix} · cleaned` : `${prefix} · verified`;
   }
   if (integration === "superseded") return job.cleanup?.status === "removed" ? "Not required · cleaned" : "Not required · superseded";
   if (review === "approved") return "Approved · awaiting merge";
+  if (review === "merge_queued") return "Approved · awaiting integration";
   if (review === "blocked") return "Blocked · needs attention";
   if (review === "failed") return "Review failed";
   if (review === "rejected") return "Changes requested";
@@ -62,6 +73,5 @@ export function jobLifecycleLabel(job: AgentJob): string {
   if (integration === "integrating") return "Integrating";
   if (integration === "conflicted") return "Conflict · needs attention";
   if (job.status === "completed" && job.isolation.mode === "worktree") return "Completed · unmerged";
-  if (job.status === "interrupted") return "Interrupted · recoverable";
   return job.status.charAt(0).toUpperCase() + job.status.slice(1);
 }

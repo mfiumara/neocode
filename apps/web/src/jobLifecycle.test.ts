@@ -61,14 +61,29 @@ test("a recovered running worker wins over preserved conflicted integration evid
 
 test("settled and disconnected lifecycle state never appears active", () => {
   for (const value of [
-    reviewed("blocked"), reviewed("failed"), reviewed("approved"), reviewed("rejected"),
+    reviewed("blocked"), reviewed("failed"), reviewed("approved"), reviewed("rejected"), reviewed("merge_queued"),
+    reviewed("judging", "queued"), reviewed("worker_resumed", "queued"),
     reviewed("needs_attention", "needs_attention"), job("queued"), job("interrupted"), job("failed"),
   ]) assert.equal(jobActiveState(value), undefined);
 
   assert.equal(jobLifecycleLabel(reviewed("approved")), "Approved · awaiting merge");
+  assert.equal(jobLifecycleLabel(reviewed("merge_queued")), "Approved · awaiting integration");
   assert.equal(jobActiveState(reviewed("judging"), false), undefined, "a stale snapshot is inactive during reconnect");
   assert.equal(jobActiveState(job("completed", { status: "integrating" })), undefined, "an orphaned transient integration flag is not live");
   const historical = reviewed("approved");
   historical.review!.transitions.unshift({ status: "judging", at: 1 });
   assert.equal(jobActiveState(historical), undefined, "historical transient transitions are ignored");
+});
+
+test("top-level queued and terminal labels override stale transient lifecycle metadata", () => {
+  for (const [value, label] of [
+    [reviewed("judging", "queued"), "Queued"],
+    [reviewed("worker_resumed", "queued"), "Queued"],
+    [reviewed("worker_resumed", "interrupted"), "Interrupted · recoverable"],
+    [reviewed("worker_resumed", "failed"), "Failed"],
+    [reviewed("judging", "needs_attention"), "Needs attention"],
+  ] as const) {
+    assert.equal(jobActiveState(value), undefined);
+    assert.equal(jobLifecycleLabel(value), label);
+  }
 });

@@ -23,11 +23,15 @@ test("the workspace command-palette label uses Command/Ctrl-K", () => {
   assert.match(markup, /⌘\/Ctrl K/);
 });
 
-function sidebarJob(reviewStatus: NonNullable<AgentJob["review"]>["status"]): AgentJob {
+function sidebarJob(
+  reviewStatus: NonNullable<AgentJob["review"]>["status"],
+  status: AgentJob["status"] = "completed",
+  integrationStatus: NonNullable<AgentJob["integration"]>["status"] = "reviewing",
+): AgentJob {
   return {
-    id: reviewStatus, title: "Lifecycle worker", prompt: "", status: "completed", branch: "worker",
+    id: reviewStatus, title: "Lifecycle worker", prompt: "", status, branch: "worker",
     worktree: "/worktree", isolation: { requested: "worktree", mode: "worktree", path: "/worktree" },
-    baseRef: "base", createdAt: 1, updatedAt: 2, messages: [], integration: { status: "reviewing" },
+    baseRef: "base", createdAt: 1, updatedAt: 2, messages: [], integration: { status: integrationStatus },
     review: { hookToken: "hook", status: reviewStatus, attempt: 1, targetBranch: "main", updatedAt: 2, transitions: [] },
   };
 }
@@ -43,4 +47,21 @@ test("sidebar renders current lifecycle execution as a labelled spinner only whi
   }
   const reconnecting = renderToStaticMarkup(<JobSidebarRow job={sidebarJob("merging")} active={false} activityReady={false} onOpen={() => {}} />);
   assert.doesNotMatch(reconnecting, /job-glyph in-progress/);
+});
+
+test("sidebar keeps queued and terminal worker labels authoritative over stale lifecycle state", () => {
+  const cases: Array<[AgentJob, string]> = [
+    [sidebarJob("judging", "queued"), "Queued"],
+    [sidebarJob("worker_resumed", "queued"), "Queued"],
+    [sidebarJob("merge_queued", "completed", "integrating"), "Approved · awaiting integration"],
+    [sidebarJob("worker_resumed", "interrupted"), "Interrupted · recoverable"],
+    [sidebarJob("worker_resumed", "failed"), "Failed"],
+    [sidebarJob("judging", "needs_attention"), "Needs attention"],
+  ];
+
+  for (const [job, label] of cases) {
+    const freshSnapshot = renderToStaticMarkup(<JobSidebarRow job={job} active={false} activityReady onOpen={() => {}} />);
+    assert.doesNotMatch(freshSnapshot, /job-glyph in-progress/);
+    assert.ok(freshSnapshot.includes(label), `${job.status}/${job.review?.status} should render ${label}`);
+  }
 });
