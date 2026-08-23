@@ -110,6 +110,36 @@ test("durable transcripts preserve image data used by restored clickable threads
   }
 });
 
+test("all flush waiters covered by one failed write reject and a distinct save can recover", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-state-generation-"));
+  try {
+    const store = new RuntimeStateStore(root);
+    const harness = store as unknown as { writeAtomic(state: DurableRuntimeState): Promise<void> };
+    const writeAtomic = harness.writeAtomic.bind(harness);
+    const injected = new Error("injected atomic write failure");
+    let fail = true;
+    harness.writeAtomic = async (state) => {
+      if (fail) { fail = false; throw injected; }
+      await writeAtomic(state);
+    };
+
+    store.save(fixture(root, "first concurrent acceptance"));
+    const first = store.flush();
+    store.save(fixture(root, "second concurrent acceptance"));
+    const second = store.flush();
+    const outcomes = await Promise.allSettled([first, second]);
+    assert.deepEqual(outcomes.map((outcome) => outcome.status), ["rejected", "rejected"]);
+    for (const outcome of outcomes) if (outcome.status === "rejected") assert.equal(outcome.reason, injected);
+    assert.equal(await store.load(), undefined, "the failed coalesced generation was never durable");
+
+    store.save(fixture(root, "successful distinct retry"));
+    await store.flush();
+    assert.equal((await store.load())?.jobs[0]?.job.title, "successful distinct retry");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("streaming saves coalesce to the latest complete snapshot", async () => {
   const root = await mkdtemp(join(tmpdir(), "neocode-state-"));
   try {

@@ -181,6 +181,7 @@ export class Orchestrator {
   private readonly workerTimelines = new Map<string, ActivityTimeline>();
   private readonly coordinatorMessages: TranscriptMessage[] = [];
   private readonly pendingCoordinatorPrompts: DurableCoordinatorPrompt[] = [];
+  private readonly acceptingCoordinatorPromptIds = new Set<string>();
   private promptDrain?: Promise<void>;
   private activeCoordinatorPromptId?: string;
   private promptResponseCheckpoint?: { messageId: string; flushed: Promise<void> };
@@ -556,28 +557,38 @@ export class Orchestrator {
     });
     this.coordinatorMessages.push(userMessage);
     this.pendingCoordinatorPrompts.push(pending);
+    this.acceptingCoordinatorPromptIds.add(messageId);
     this.persist();
     try {
       // Queue acknowledgement is acceptance truth, so it must never race the
       // atomic durable write that makes this prompt recoverable.
       await this.stateStore.flush();
     } catch (error) {
+      this.acceptingCoordinatorPromptIds.delete(messageId);
       this.pendingCoordinatorPrompts.splice(this.pendingCoordinatorPrompts.indexOf(pending), 1);
       this.coordinatorMessages.splice(this.coordinatorMessages.indexOf(userMessage), 1);
       this.persist();
       throw error;
     }
+    this.acceptingCoordinatorPromptIds.delete(messageId);
     this.emit({ type: "coordinator_message", message: { ...userMessage } });
     this.schedulePromptDrain();
   }
 
   private schedulePromptDrain(): void {
     if (this.promptDrain || !this.coordinator) return;
-    this.promptDrain = this.drainCoordinatorPrompts().finally(() => { this.promptDrain = undefined; });
+    this.promptDrain = this.drainCoordinatorPrompts().finally(() => {
+      this.promptDrain = undefined;
+      const head = this.pendingCoordinatorPrompts[0];
+      if (head && !this.acceptingCoordinatorPromptIds.has(head.messageId)
+        && this.coordinatorStatus !== "running" && this.coordinator.isIdle) this.schedulePromptDrain();
+    });
   }
 
   private async drainCoordinatorPrompts(): Promise<void> {
-    while (this.pendingCoordinatorPrompts.length && this.coordinatorStatus !== "running" && this.coordinator.isIdle) {
+    while (this.pendingCoordinatorPrompts.length
+      && !this.acceptingCoordinatorPromptIds.has(this.pendingCoordinatorPrompts[0]!.messageId)
+      && this.coordinatorStatus !== "running" && this.coordinator.isIdle) {
       const pending = this.pendingCoordinatorPrompts[0]!;
       const message = this.coordinatorMessages.find((entry) => entry.id === pending.messageId);
       if (!message) {
@@ -623,11 +634,20 @@ export class Orchestrator {
         settlePrompt(message, promptError);
         this.recordPromptSettlement(message, promptError);
         this.persist();
+        try {
+          // Terminal backend failure is authoritative only after the failed row,
+          // settlement watermark, and queue removal share one durable write.
+          await this.stateStore.flush();
+        } catch (persistenceError) {
+          // Fail closed: expose neither terminal prompt events nor later FIFO
+          // progress when the claimed durable failure did not commit.
+          if (!this.coordinatorAborting) this.fail(persistenceError);
+          break;
+        }
         this.emit({ type: "coordinator_message_updated", message: { ...message } });
         this.emit({ type: "coordinator_prompt_failed", messageId: message.id, error: promptError });
         if (!this.coordinatorAborting) this.fail(error);
-        // This item is terminal, but later accepted prompts remain independent
-        // queue entries and must not be silently stranded behind it.
+        // This item is durably terminal; later independent FIFO entries may run.
         continue;
       }
     }

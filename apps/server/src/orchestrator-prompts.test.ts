@@ -41,6 +41,148 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for coordinator queue state");
 }
 
+test("concurrent prompt acceptances share failed durability and acknowledge none before a later retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-orchestrator-acceptance-failure-"));
+  const events: ServerMessage[] = [];
+  const coordinator = { isIdle: false, async prompt() { throw new Error("must remain busy"); } };
+  type Harness = {
+    coordinator: typeof coordinator;
+    stateStore: RuntimeStateStore;
+    pendingCoordinatorPrompts: DurableCoordinatorPrompt[];
+  };
+  try {
+    const orchestrator = new Orchestrator(root, (event) => events.push(event), { startup: false, intervalMs: 0, sweepIntervalMs: 0 });
+    const harness = orchestrator as unknown as Harness;
+    harness.coordinator = coordinator;
+    const stateStore = harness.stateStore as unknown as {
+      writeAtomic(state: import("./runtime-state.js").DurableRuntimeState): Promise<void>;
+    };
+    const writeAtomic = stateStore.writeAtomic.bind(stateStore);
+    const injected = new Error("coalesced acceptance write failed");
+    let fail = true;
+    stateStore.writeAtomic = async (state) => {
+      if (fail) { fail = false; throw injected; }
+      await writeAtomic(state);
+    };
+
+    const outcomes = await Promise.allSettled([
+      orchestrator.prompt("first", [], [], "accept-1"),
+      orchestrator.prompt("second", [], [], "accept-2"),
+    ]);
+    assert.deepEqual(outcomes.map((outcome) => outcome.status), ["rejected", "rejected"]);
+    for (const outcome of outcomes) if (outcome.status === "rejected") assert.equal(outcome.reason, injected);
+    assert.equal(events.some((event) => event.type === "coordinator_message"), false);
+    assert.deepEqual(harness.pendingCoordinatorPrompts, []);
+    await harness.stateStore.flush();
+
+    await orchestrator.prompt("retry", [], [], "accept-retry");
+    assert.equal(events.filter((event) => event.type === "coordinator_message").length, 1);
+    assert.equal(harness.pendingCoordinatorPrompts[0]?.messageId, "accept-retry");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("backend failure is durably terminal before broadcast and later FIFO work continues", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-orchestrator-failure-"));
+  const events: ServerMessage[] = [];
+  const calls: string[] = [];
+  let releaseTerminal!: () => void;
+  const terminalGate = new Promise<void>((resolve) => { releaseTerminal = resolve; });
+  let terminalWriteStarted!: () => void;
+  const terminalStarted = new Promise<void>((resolve) => { terminalWriteStarted = resolve; });
+  let paused = false;
+  const coordinator = {
+    isIdle: true,
+    async prompt(content: string): Promise<void> {
+      const text = content.split("\n", 1)[0]!;
+      calls.push(text);
+      if (text === "fails") throw new Error("backend execution failed");
+    },
+  };
+  type Harness = {
+    coordinator: typeof coordinator;
+    stateStore: RuntimeStateStore;
+    pendingCoordinatorPrompts: DurableCoordinatorPrompt[];
+  };
+
+  try {
+    const orchestrator = new Orchestrator(root, (event) => events.push(event), { startup: false, intervalMs: 0, sweepIntervalMs: 0 });
+    const harness = orchestrator as unknown as Harness;
+    harness.coordinator = coordinator;
+    const stateStore = harness.stateStore as unknown as {
+      writeAtomic(state: import("./runtime-state.js").DurableRuntimeState): Promise<void>;
+    };
+    const writeAtomic = stateStore.writeAtomic.bind(stateStore);
+    stateStore.writeAtomic = async (state) => {
+      const terminal = state.coordinator.messages.some((message) => message.id === "failure-1" && message.promptState === "failed");
+      if (terminal && !paused) {
+        paused = true;
+        terminalWriteStarted();
+        await terminalGate;
+      }
+      await writeAtomic(state);
+    };
+
+    await orchestrator.prompt("fails", [], [], "failure-1");
+    await terminalStarted;
+    assert.equal(events.some((event) => event.type === "coordinator_prompt_failed"), false, "failure is not broadcast before commit");
+    const beforeCommit = await new RuntimeStateStore(root).load();
+    assert.equal(beforeCommit?.coordinator.messages.find((message) => message.id === "failure-1")?.promptState, "queued");
+    assert.equal(beforeCommit?.coordinator.pendingPrompts?.[0]?.messageId, "failure-1", "a crash before failure commit requeues instead of fabricating failure");
+
+    const laterAcceptance = orchestrator.prompt("later", [], [], "failure-2");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(calls, ["fails"], "an accepting FIFO item cannot run before its own durable acknowledgement");
+    releaseTerminal();
+    await laterAcceptance;
+    await waitFor(() => harness.pendingCoordinatorPrompts.length === 0);
+    await harness.stateStore.flush();
+
+    const failureEvents = events.filter((event) => event.type === "coordinator_prompt_failed");
+    assert.equal(failureEvents.length, 1);
+    assert.deepEqual(calls, ["fails", "later"], "durably failed head does not strand the next FIFO item");
+    const restored = await new RuntimeStateStore(root).load();
+    assert.equal(restored?.coordinator.messages.find((message) => message.id === "failure-1")?.promptState, "failed");
+    assert.equal(restored?.coordinator.pendingPrompts?.some((entry) => entry.messageId === "failure-1"), false, "restart cannot replay durable failure");
+  } finally {
+    releaseTerminal();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal persistence failure fails closed without claiming a durable prompt failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-orchestrator-failure-closed-"));
+  const events: ServerMessage[] = [];
+  const coordinator = { isIdle: true, async prompt() { throw new Error("backend failed"); } };
+  type Harness = { coordinator: typeof coordinator; stateStore: RuntimeStateStore };
+  try {
+    const orchestrator = new Orchestrator(root, (event) => events.push(event), { startup: false, intervalMs: 0, sweepIntervalMs: 0 });
+    const harness = orchestrator as unknown as Harness;
+    harness.coordinator = coordinator;
+    const stateStore = harness.stateStore as unknown as {
+      writeAtomic(state: import("./runtime-state.js").DurableRuntimeState): Promise<void>;
+    };
+    const writeAtomic = stateStore.writeAtomic.bind(stateStore);
+    stateStore.writeAtomic = async (state) => {
+      if (state.coordinator.messages.some((message) => message.id === "failure-closed" && message.promptState === "failed")) {
+        throw new Error("terminal write failed");
+      }
+      await writeAtomic(state);
+    };
+
+    await orchestrator.prompt("fails closed", [], [], "failure-closed");
+    await waitFor(() => events.some((event) => event.type === "error"));
+    assert.equal(events.some((event) => event.type === "coordinator_prompt_failed"), false);
+    assert.equal(events.some((event) => event.type === "coordinator_message_updated" && event.message.promptState === "failed"), false);
+    const restored = await new RuntimeStateStore(root).load();
+    assert.equal(restored?.coordinator.messages.find((message) => message.id === "failure-closed")?.promptState, "queued");
+    assert.equal(restored?.coordinator.pendingPrompts?.[0]?.messageId, "failure-closed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("orchestrator queues genuinely busy prompts durably and drains FIFO exactly once", async () => {
   const root = await mkdtemp(join(tmpdir(), "neocode-orchestrator-prompts-"));
   const events: ServerMessage[] = [];
