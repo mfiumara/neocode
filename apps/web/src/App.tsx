@@ -402,7 +402,7 @@ export function App() {
   const activityReady = connected && activitySynced;
   const activeWorking = activityReady && (active.kind === "coordinator"
     ? snapshot?.coordinator.status === "running"
-    : activeJob?.status === "queued" || activeJob?.status === "running");
+    : activeJob?.status === "running");
   const rows = useMemo<NavigableRow[]>(() => {
     const transcriptRows: NavigableRow[] = messages.map((message) => ({
       kind: "message",
@@ -955,10 +955,10 @@ export function App() {
                 )}</div>;
               })}
               </div>
-              {!!activeActivityHistory?.length && <ActivityHistory activities={activeActivityHistory} />}
-              {activeWorking && (
+              {activeWorking && <>
+                {!!activeActivityHistory?.length && <ActivityHistory activities={activeActivityHistory} />}
                 <WorkingIndicator activity={activeActivity} agentLabel={active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"} />
-              )}
+              </>}
               <div className="transcript-end" aria-hidden="true" />
               </div>
             </ScrollArea>
@@ -1009,7 +1009,6 @@ export function App() {
               }}
             />
             <div className="composer-actions">
-              <span className={`mode-badge ${mode.toLowerCase()}`}>{mode}</span>
               <div className="runtime-controls" aria-label="Pi runtime settings">
                 <Button variant="outline" type="button" className={`runtime-chip variant-${settings?.variant || "loading"}`} disabled={!settings?.availableVariants.length} onClick={() => send({ type: "cycle_variant" })} title="Cycle Build / Plan (Shift+Tab)">
                   <span>mode</span><strong>{settings?.variant || "loading"}</strong><kbd>⇧Tab</kbd>

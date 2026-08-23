@@ -203,8 +203,6 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .attachment-preview img { object-fit: cover; }
 .attachment-preview > button { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--panel); }
 .composer-actions { display: flex; gap: 8px; align-items: center; padding: 5px 7px 7px; color: var(--dim); font-size: 9px; }
-.mode-badge { padding: 2px 4px; background: var(--accent); color: #10120d; font-size: 8px; }
-.mode-badge.normal { background: #2b2e34; color: #b0b3b9; }
 .runtime-controls { display: flex; gap: 4px; }
 .runtime-chip { display: flex; gap: 5px; align-items: center; padding: 3px 5px; border: 1px solid #35383f; background: #17191d; color: var(--muted); font-size: 8px; text-transform: uppercase; }
 .runtime-chip strong { color: var(--accent); font-weight: 500; }

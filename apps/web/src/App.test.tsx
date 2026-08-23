@@ -3,7 +3,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { App } from "./App";
 
-test("the composer exposes send and an accessible image-picker fallback", () => {
+test("the composer exposes send and an accessible image-picker fallback without a keyboard mode badge", () => {
   const markup = renderToStaticMarkup(<App />);
   const actions = markup.match(/<div class="action-buttons">(.*?)<\/div>/)?.[1];
 
@@ -12,6 +12,7 @@ test("the composer exposes send and an accessible image-picker fallback", () => 
   assert.match(actions, /aria-label="Choose image attachments"/);
   assert.match(actions, />Attach images<\/button>/);
   assert.match(actions, />Send <span>↵<\/span><\/button>/);
+  assert.doesNotMatch(markup, /mode-badge|>INSERT<|>NORMAL</);
 });
 
 test("the workspace command-palette label uses Command/Ctrl-K", () => {
