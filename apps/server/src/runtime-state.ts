@@ -36,6 +36,14 @@ export interface CoordinatorNotificationState {
   lastSignals: Record<string, string>;
 }
 
+export interface DurableCoordinatorPrompt {
+  messageId: string;
+  context: string[];
+  mode: "build" | "plan";
+  createdAt: number;
+  state: "queued" | "processing";
+}
+
 export interface DurableRuntimeState {
   version: typeof RUNTIME_STATE_VERSION;
   workspaceRoot: string;
@@ -45,6 +53,8 @@ export interface DurableRuntimeState {
     activity?: AgentActivity;
     activityHistory?: AgentActivity[];
     piSessionFile?: string;
+    /** Prompts accepted by the server but not yet settled by the coordinator. */
+    pendingPrompts?: DurableCoordinatorPrompt[];
   };
   maintenance?: MaintenanceStatus;
   coordinatorNotifications?: CoordinatorNotificationState;
@@ -68,6 +78,12 @@ function isRuntimeState(value: unknown, workspaceRoot: string): value is Durable
     && !!candidate.coordinator
     && Array.isArray(candidate.coordinator.messages)
     && candidate.coordinator.messages.every((message) => !!message && typeof message.id === "string" && typeof message.text === "string")
+    && (candidate.coordinator.pendingPrompts === undefined || (Array.isArray(candidate.coordinator.pendingPrompts)
+      && candidate.coordinator.pendingPrompts.every((prompt) => !!prompt
+        && typeof prompt.messageId === "string"
+        && Array.isArray(prompt.context) && prompt.context.every((entry) => typeof entry === "string")
+        && (prompt.mode === "build" || prompt.mode === "plan")
+        && (prompt.state === "queued" || prompt.state === "processing"))))
     && Array.isArray(candidate.jobs)
     && candidate.jobs.every((entry) => {
       if (!entry || typeof entry !== "object" || !entry.job || typeof entry.job !== "object") return false;

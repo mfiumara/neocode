@@ -97,8 +97,10 @@ websocket.on("connection", (client) => {
           attachments: "attachments" in message ? message.attachments?.length : undefined,
         });
         if (message.type === "prompt") {
-          if (typeof message.text !== "string" || (message.context !== undefined && !Array.isArray(message.context))) throw new Error("Invalid prompt.");
-          await orchestrator.prompt(message.text, message.context, validateImageAttachments(message.attachments));
+          if (typeof message.text !== "string"
+            || (message.id !== undefined && (typeof message.id !== "string" || !message.id || message.id.length > 200))
+            || (message.context !== undefined && (!Array.isArray(message.context) || message.context.some((entry) => typeof entry !== "string")))) throw new Error("Invalid prompt.");
+          await orchestrator.prompt(message.text, message.context, validateImageAttachments(message.attachments), message.id);
         } else if (message.type === "abort") await orchestrator.abort();
         else if (message.type === "delegate") {
           if (typeof message.text !== "string") throw new Error("Invalid task.");
@@ -115,7 +117,14 @@ websocket.on("connection", (client) => {
           send(client, { type: "transcript_page", thread: message.thread, ...result });
         } else if (message.type === "clean_now") await orchestrator.cleanNow(true);
       } catch (error) {
-        send(client, { type: "error", message: error instanceof Error ? error.message : String(error) });
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        let failedId: string | undefined;
+        try {
+          const parsed = JSON.parse(raw.toString()) as Partial<ClientMessage>;
+          if (parsed.type === "prompt" && typeof parsed.id === "string") failedId = parsed.id;
+        } catch { /* the generic protocol error below covers malformed JSON */ }
+        if (failedId) send(client, { type: "coordinator_prompt_failed", messageId: failedId, error: errorMessage });
+        send(client, { type: "error", message: errorMessage });
       }
     })();
   });

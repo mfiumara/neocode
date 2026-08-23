@@ -73,6 +73,23 @@ test("runtime state atomically round-trips all job and session metadata", async 
   }
 });
 
+test("durable coordinator queue survives refresh with context and transcript lifecycle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-state-prompts-"));
+  try {
+    const state = fixture(root);
+    state.coordinator.messages.push({ id: "queued-1", role: "user", text: "later", timestamp: 5, promptState: "queued" });
+    state.coordinator.pendingPrompts = [{ messageId: "queued-1", context: ["selected context"], mode: "build", createdAt: 5, state: "queued" }];
+    const store = new RuntimeStateStore(root);
+    store.save(state);
+    await store.flush();
+    const restored = await store.load();
+    assert.equal(restored?.coordinator.messages.at(-1)?.promptState, "queued");
+    assert.deepEqual(restored?.coordinator.pendingPrompts?.[0]?.context, ["selected context"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("durable transcripts preserve image data used by restored clickable threads", async () => {
   const root = await mkdtemp(join(tmpdir(), "neocode-state-images-"));
   try {

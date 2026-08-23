@@ -34,6 +34,7 @@ import {
 import { activity, ActivityTimeline, toolActivity } from "./activity.js";
 import { CompletionPipeline, LocalReviewAdapter, readWorktreeDiff } from "./completion-pipeline.js";
 import { CoordinatorNotificationQueue } from "./coordinator-notifications.js";
+import { queuedCoordinatorPrompt, reconcileRestoredPromptStates, setPromptProcessing, settlePrompt } from "./coordinator-prompt-state.js";
 import { imagesForPi } from "./image-attachments.js";
 
 
@@ -53,6 +54,7 @@ import {
   RuntimeStateStore,
   type CoordinatorNotificationState,
   type CoordinatorWorkerEvent,
+  type DurableCoordinatorPrompt,
   type DurableRuntimeState,
 } from "./runtime-state.js";
 import { OperationLock, WorktreeJanitor } from "./worktree-janitor.js";
@@ -177,6 +179,8 @@ export class Orchestrator {
   private readonly workerConfigs = new Map<string, WorkerConfig>();
   private readonly workerTimelines = new Map<string, ActivityTimeline>();
   private readonly coordinatorMessages: TranscriptMessage[] = [];
+  private readonly pendingCoordinatorPrompts: DurableCoordinatorPrompt[] = [];
+  private promptDrain?: Promise<void>;
   private readonly coordinatorActivityHistory: AgentActivity[] = [];
   private readonly coordinatorTimeline = new ActivityTimeline(undefined, this.coordinatorActivityHistory);
   private readonly piSessionFiles = new Map<string, string>();
@@ -240,6 +244,14 @@ export class Orchestrator {
     const restored = await this.stateStore.load();
     if (restored) {
       this.coordinatorMessages.push(...restored.coordinator.messages);
+      this.pendingCoordinatorPrompts.push(...(restored.coordinator.pendingPrompts || []).map((entry) => ({
+        ...entry,
+        context: [...entry.context],
+        // A process cannot still be processing after restart. Redeliver the
+        // durable item and expose that truth in the transcript.
+        state: "queued" as const,
+      })));
+      reconcileRestoredPromptStates(this.coordinatorMessages, this.pendingCoordinatorPrompts);
       this.coordinatorActivityHistory.push(...(restored.coordinator.activityHistory || []).map(normalizeActivityTiming));
       if (restored.coordinator.activity) {
         const completedAt = Date.now();
@@ -468,7 +480,7 @@ export class Orchestrator {
     // recovery is visible without replaying side effects.
     for (const job of this.listJobs()) this.coordinatorNotifications.observe(job);
     this.persist();
-    this.coordinatorNotifications.settled();
+    if (!this.pendingCoordinatorPrompts.length) this.coordinatorNotifications.settled();
     await this.resumeRestoredJobs();
     if (this.maintenanceConfig.startup) this.startCleanup("startup");
     if (this.maintenanceConfig.intervalMs > 0) {
@@ -480,6 +492,7 @@ export class Orchestrator {
       this.sweepTimer.unref();
       this.scheduleBacklogSweep();
     }
+    this.schedulePromptDrain();
 
   }
 
@@ -518,26 +531,73 @@ export class Orchestrator {
     return { ...structuredClone(metadata), messages: window.messages, transcriptPage: window.page };
   }
 
-  async prompt(text: string, context: string[] = [], attachments: ImageAttachment[] = []): Promise<void> {
-    const modeInstruction = this.coordinatorVariant === "plan"
-      ? "<neocode-mode>PLAN: investigate and propose a plan only. Do not delegate implementation.</neocode-mode>"
-      : "<neocode-mode>BUILD: implementation work may be delegated to background workers.</neocode-mode>";
-    const content = `${text}${context.length
-      ? `\n\n<context-basket>\n${context.join("\n\n---\n\n")}\n</context-basket>`
-      : ""}\n\n${modeInstruction}`;
-
-    const userMessage: TranscriptMessage = { id: id(), role: "user", text, timestamp: Date.now(), attachments: attachments.length ? attachments : undefined };
+  async prompt(text: string, context: string[] = [], attachments: ImageAttachment[] = [], requestId?: string): Promise<void> {
+    const messageId = requestId || id();
+    // A reconnecting client may retry an accepted command. Its client id is the
+    // durable idempotency key, so neither transcript nor queue can duplicate it.
+    if (this.coordinatorMessages.some((message) => message.id === messageId)) return;
+    const { message: userMessage, pending } = queuedCoordinatorPrompt({
+      id: messageId,
+      text,
+      context,
+      attachments,
+      mode: this.coordinatorVariant,
+      now: Date.now(),
+      previousTimestamp: this.coordinatorMessages.at(-1)?.timestamp,
+    });
     this.coordinatorMessages.push(userMessage);
+    this.pendingCoordinatorPrompts.push(pending);
     this.persist();
-    this.emit({ type: "coordinator_message", message: userMessage });
+    this.emit({ type: "coordinator_message", message: { ...userMessage } });
+    this.schedulePromptDrain();
+  }
 
-    try {
-      await this.coordinator.prompt(content, {
-        ...(attachments.length ? { images: imagesForPi(attachments) } : {}),
-        ...(this.coordinator.isStreaming ? { streamingBehavior: "steer" as const } : {}),
-      });
-    } catch (error) {
-      if (!this.coordinatorAborting) this.fail(error);
+  private schedulePromptDrain(): void {
+    if (this.promptDrain || !this.coordinator) return;
+    this.promptDrain = this.drainCoordinatorPrompts().finally(() => { this.promptDrain = undefined; });
+  }
+
+  private async drainCoordinatorPrompts(): Promise<void> {
+    while (this.pendingCoordinatorPrompts.length && this.coordinatorStatus !== "running" && this.coordinator.isIdle) {
+      const pending = this.pendingCoordinatorPrompts[0]!;
+      const message = this.coordinatorMessages.find((entry) => entry.id === pending.messageId);
+      if (!message) {
+        this.pendingCoordinatorPrompts.shift();
+        this.persist();
+        continue;
+      }
+      setPromptProcessing(message, pending);
+      this.persist();
+      this.emit({ type: "coordinator_message_updated", message: { ...message } });
+
+      const modeInstruction = pending.mode === "plan"
+        ? "<neocode-mode>PLAN: investigate and propose a plan only. Do not delegate implementation.</neocode-mode>"
+        : "<neocode-mode>BUILD: implementation work may be delegated to background workers.</neocode-mode>";
+      const content = `${message.text}${pending.context.length
+        ? `\n\n<context-basket>\n${pending.context.join("\n\n---\n\n")}\n</context-basket>`
+        : ""}\n\n${modeInstruction}`;
+      try {
+        await this.coordinator.prompt(content, message.attachments?.length ? { images: imagesForPi(message.attachments) } : undefined);
+        this.pendingCoordinatorPrompts.shift();
+        settlePrompt(message);
+        this.persist();
+        this.emit({ type: "coordinator_message_updated", message: { ...message } });
+      } catch (error) {
+        this.pendingCoordinatorPrompts.shift();
+        const promptError = error instanceof Error ? error.message : String(error);
+        settlePrompt(message, promptError);
+        this.persist();
+        this.emit({ type: "coordinator_message_updated", message: { ...message } });
+        this.emit({ type: "coordinator_prompt_failed", messageId: message.id, error: promptError });
+        if (!this.coordinatorAborting) this.fail(error);
+        // This item is terminal, but later accepted prompts remain independent
+        // queue entries and must not be silently stranded behind it.
+        continue;
+      }
+    }
+    if (!this.pendingCoordinatorPrompts.length && this.coordinator.isIdle) {
+      this.coordinatorNotifications?.settled();
+      this.scheduleBacklogSweep();
     }
   }
 
@@ -551,6 +611,7 @@ export class Orchestrator {
       this.setCoordinatorActivity(undefined, "aborted");
       this.coordinatorAborting = false;
       this.persist();
+      this.schedulePromptDrain();
     }
   }
 
@@ -830,8 +891,11 @@ export class Orchestrator {
         }
         this.setCoordinatorActivity(undefined, this.coordinatorAborting ? "aborted" : "completed");
         this.persist();
-        this.coordinatorNotifications?.settled();
-        this.scheduleBacklogSweep();
+        if (this.pendingCoordinatorPrompts.length) this.schedulePromptDrain();
+        else {
+          this.coordinatorNotifications?.settled();
+          this.scheduleBacklogSweep();
+        }
       }
     });
   }
@@ -1442,6 +1506,7 @@ export class Orchestrator {
         activity: this.coordinatorActivity,
         activityHistory: [...this.coordinatorActivityHistory],
         piSessionFile: this.coordinatorSessionFile,
+        pendingPrompts: structuredClone(this.pendingCoordinatorPrompts),
       },
       maintenance: { ...this.maintenance },
       coordinatorNotifications: structuredClone(this.notificationState),

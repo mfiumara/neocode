@@ -130,6 +130,10 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .message-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 5px; color: var(--dim); font-size: 9px; }
 .message-meta > span { color: var(--muted); }
 .message.assistant .message-meta > span { color: var(--accent); }
+.message-meta .prompt-state { padding: 1px 5px; border: 1px solid #464b39; border-radius: 999px; color: #bccb93; font-size: 8px; letter-spacing: .04em; text-transform: uppercase; }
+.message-meta .prompt-state.sending { color: var(--dim); border-color: var(--line); }
+.message-meta .prompt-state.processing { color: var(--accent); }
+.message-meta .prompt-state.failed { color: #e59a9a; border-color: #714343; }
 .message-meta button { margin-left: auto; padding: 0; border: 0; background: transparent; color: var(--dim); opacity: 0; font-size: 9px; }
 .message:hover .message-meta button, .message.selected .message-meta button { opacity: 1; }
 .message-body { min-width: 0; max-width: 100%; color: var(--text); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }

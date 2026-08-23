@@ -175,6 +175,8 @@ export interface WorkerEventPresentation {
   actionRequired?: boolean;
 }
 
+export type PromptState = "sending" | "queued" | "processing" | "failed";
+
 export interface TranscriptMessage {
   id: string;
   role: "user" | "assistant" | "tool" | "system";
@@ -184,6 +186,9 @@ export interface TranscriptMessage {
   attachments?: ImageAttachment[];
   /** Compact transport/presentation metadata for structured lifecycle events. */
   workerEvent?: WorkerEventPresentation;
+  /** Coordinator user-prompt delivery state. Absence means the prompt settled. */
+  promptState?: PromptState;
+  promptError?: string;
 }
 
 export interface WorkerAttempt {
@@ -340,7 +345,7 @@ export interface AppSnapshot {
 }
 
 export type ClientMessage =
-  | { type: "prompt"; text: string; context?: string[]; attachments?: ImageAttachment[] }
+  | { type: "prompt"; id?: string; text: string; context?: string[]; attachments?: ImageAttachment[] }
   | { type: "abort" }
   | { type: "delegate"; text: string; isolation?: RequestedIsolationMode; attachments?: ImageAttachment[] }
   | { type: "cancel_job"; jobId: string }
@@ -360,6 +365,7 @@ export type ServerMessage =
   | { type: "coordinator_model_updated"; model: ModelRef }
   | { type: "coordinator_message"; message: TranscriptMessage }
   | { type: "coordinator_message_updated"; message: TranscriptMessage }
+  | { type: "coordinator_prompt_failed"; messageId: string; error: string }
   | { type: "coordinator_delta"; messageId: string; delta: string }
   | { type: "job_updated"; job: AgentJob }
   | { type: "transcript_page"; thread: TranscriptThread; messages: TranscriptMessage[]; page: TranscriptPageInfo }

@@ -16,6 +16,7 @@ import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
 import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
 import { presentIdentifierText, presentTranscriptMessage, shortReference } from "./transcriptPresentation";
+import { promptStateLabel } from "./transcriptMessages";
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
 
@@ -137,6 +138,7 @@ export function App() {
   const [workspaceStorageKey, setWorkspaceStorageKey] = useState<string>();
   const hydratedWorkspaceRef = useRef<string | undefined>(undefined);
   const socketRef = useRef<WebSocket | undefined>(undefined);
+  const localPromptIdsRef = useRef(new Set<string>());
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const transcriptContentRef = useRef<HTMLDivElement>(null);
@@ -209,20 +211,24 @@ export function App() {
             selectedKey: rowsRef.current[selectedRowRef.current]?.key,
           };
         }
+        const durableIds = new Set(message.snapshot.coordinator.messages.map((entry) => entry.id));
         setSnapshot((current) => {
+          const uncertain = (current?.coordinator.messages || []).filter((entry) =>
+            localPromptIdsRef.current.has(entry.id) && !durableIds.has(entry.id));
+          for (const durableId of durableIds) localPromptIdsRef.current.delete(durableId);
           if (!current || current.cwd !== message.snapshot.cwd) return message.snapshot;
           const currentJobs = new Map(current.jobs.map((job) => [job.id, job]));
+          const reconciledCoordinator = reconcileWindow(
+            { messages: current.coordinator.messages, page: current.coordinator.transcriptPage },
+            { messages: message.snapshot.coordinator.messages, page: message.snapshot.coordinator.transcriptPage },
+          );
+          const coordinatorMessages = uncertain.reduce(appendUnique, reconciledCoordinator.messages);
           return {
             ...message.snapshot,
             coordinator: {
               ...message.snapshot.coordinator,
-              ...(() => {
-                const reconciled = reconcileWindow(
-                  { messages: current.coordinator.messages, page: current.coordinator.transcriptPage },
-                  { messages: message.snapshot.coordinator.messages, page: message.snapshot.coordinator.transcriptPage },
-                );
-                return { messages: reconciled.messages, transcriptPage: reconciled.page };
-              })(),
+              messages: coordinatorMessages,
+              transcriptPage: reconciledCoordinator.page,
             },
             jobs: message.snapshot.jobs.map((job) => {
               const old = currentJobs.get(job.id);
@@ -270,6 +276,7 @@ export function App() {
         setPendingModel(undefined);
         setSnapshot((current) => current ? { ...current, coordinator: { ...current.coordinator, model: message.model } } : current);
       } else if (message.type === "coordinator_message") {
+        localPromptIdsRef.current.delete(message.message.id);
         setSnapshot((current) => current ? {
           ...current,
           coordinator: {
@@ -278,14 +285,26 @@ export function App() {
           },
         } : current);
       } else if (message.type === "coordinator_message_updated") {
+        localPromptIdsRef.current.delete(message.message.id);
         setSnapshot((current) => current ? {
           ...current,
           coordinator: {
             ...current.coordinator,
-            messages: current.coordinator.messages.map((entry) =>
-              entry.id === message.message.id ? message.message : entry),
+            messages: appendUnique(current.coordinator.messages, message.message),
           },
         } : current);
+      } else if (message.type === "coordinator_prompt_failed") {
+        localPromptIdsRef.current.delete(message.messageId);
+        setSnapshot((current) => current ? {
+          ...current,
+          coordinator: {
+            ...current.coordinator,
+            messages: current.coordinator.messages.map((entry) => entry.id === message.messageId
+              ? { ...entry, promptState: "failed", promptError: message.error }
+              : entry),
+          },
+        } : current);
+        setError(`Could not send the prompt: ${message.error}`);
       } else if (message.type === "coordinator_delta") {
         setSnapshot((current) => current ? {
           ...current,
@@ -360,7 +379,13 @@ export function App() {
         pendingPagesRef.current.clear();
         setSnapshot((current) => current ? {
           ...current,
-          coordinator: { ...current.coordinator, activity: undefined },
+          coordinator: {
+            ...current.coordinator,
+            activity: undefined,
+            messages: current.coordinator.messages.map((entry) => localPromptIdsRef.current.has(entry.id)
+              ? { ...entry, promptState: "failed", promptError: "Connection closed before the backend acknowledged this prompt; it may not have been received." }
+              : entry),
+          },
           jobs: current.jobs.map((job) => ({ ...job, activity: undefined })),
         } : current);
         if (!disposed) {
@@ -758,10 +783,31 @@ export function App() {
     const text = prompt.trim();
     if (!text && !images.length) return;
     const attachments = images.map(({ previewUrl: _previewUrl, ...image }) => image);
+    const messageId = globalThis.crypto?.randomUUID?.() || `prompt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     followTranscriptRef.current = true;
-    const sent = send({ type: "prompt", text, attachments, context: context.map((entry) => `${entry.label}\n${entry.text}`) });
+    const sent = send({ type: "prompt", id: messageId, text, attachments, context: context.map((entry) => `${entry.label}\n${entry.text}`) });
     if (!sent) return;
 
+    localPromptIdsRef.current.add(messageId);
+    setSnapshot((current) => {
+      if (!current) return current;
+      const previousTimestamp = current.coordinator.messages.at(-1)?.timestamp ?? 0;
+      const optimistic: TranscriptMessage = {
+        id: messageId,
+        role: "user",
+        text,
+        timestamp: Math.max(Date.now(), previousTimestamp + 1),
+        attachments: attachments.length ? attachments : undefined,
+        promptState: "sending",
+      };
+      return {
+        ...current,
+        coordinator: {
+          ...current.coordinator,
+          messages: upsertTranscriptMessage(current.coordinator.messages, optimistic),
+        },
+      };
+    });
     images.forEach((image) => URL.revokeObjectURL(image.previewUrl));
     imagesRef.current = [];
     setImages([]);
@@ -932,6 +978,7 @@ export function App() {
                     <div className="message-meta">
                       <span>{roleLabel(row.message.role)}</span>
                       <time>{new Date(row.message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                      {promptStateLabel(row.message) && <span className={`prompt-state ${row.message.promptState}`} title={row.message.promptError}>{promptStateLabel(row.message)}</span>}
                       <Button variant="ghost" title="Add to context" onClick={(event) => { event.stopPropagation(); setSelectedRow(index); addMessageToContext(row.message); }}>+context</Button>
                     </div>
                     {parseWorkerEvent(row.message)
