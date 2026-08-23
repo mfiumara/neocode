@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
 import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
+import { presentTranscriptMessage, shortReference } from "./transcriptPresentation";
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
 
@@ -861,7 +862,10 @@ export function App() {
                 <Tooltip><TooltipTrigger asChild><Badge className={`isolation-badge ${activeJob.isolation.mode}`}>
                   {isolationLabel(activeJob)} · {shortPath(activeJob.isolation.path)}
                 </Badge></TooltipTrigger><TooltipContent>{activeJob.isolation.path}</TooltipContent></Tooltip>
-                <code>{activeJob.id}</code>
+                <details className="technical-identity">
+                  <summary>Technical identity</summary>
+                  <code>{activeJob.id}</code>
+                </details>
                 <Tabs value={jobTab} onValueChange={(value) => setJobTab(value as JobTab)}>
                   <TabsList className="view-tabs" aria-label="Worker view">
                     <TabsTrigger value="conversation">Conversation</TabsTrigger>
@@ -930,11 +934,9 @@ export function App() {
                       <time>{new Date(row.message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
                       <Button variant="ghost" title="Add to context" onClick={(event) => { event.stopPropagation(); setSelectedRow(index); addMessageToContext(row.message); }}>+context</Button>
                     </div>
-                    <div className="message-body">
-                      {parseWorkerEvent(row.message)
-                        ? <WorkerEventCard message={row.message} />
-                        : row.message.text ? <Markdown>{row.message.text}</Markdown> : (!row.message.attachments?.length && <span className="stream-caret">▋</span>)}
-                    </div>
+                    {parseWorkerEvent(row.message)
+                      ? <div className="message-body"><WorkerEventCard message={row.message} /></div>
+                      : <TranscriptMessageBody message={row.message} jobs={snapshot?.jobs || []} />}
                     {!!row.message.attachments?.length && <AttachmentGallery attachments={row.message.attachments} />}
                   </article>
                 ) : (
@@ -949,7 +951,6 @@ export function App() {
                     <span className="worker-status">{jobLifecycleLabel(row.job)}{row.job.attempts?.length ? ` · attempt ${row.job.attempts.length}` : ""}</span>
                     <span className="worker-title">{row.job.title}</span>
                     {row.job.durationMs !== undefined && <span className="worker-duration">{formatDuration(row.job.durationMs)} total</span>}
-                    <code>{row.job.id}</code>
                     <span className="worker-open">l</span>
                   </Button>
                 )}</div>;
@@ -1073,6 +1074,19 @@ export function App() {
   );
 }
 
+export function TechnicalEvidence({ label = "Technical details", children }: { label?: string; children: ReactNode }) {
+  return <details className="technical-evidence"><summary>{label}</summary><pre>{children}</pre></details>;
+}
+
+function TranscriptMessageBody({ message, jobs }: { message: TranscriptMessage; jobs: AgentJob[] }) {
+  const presentation = presentTranscriptMessage(message, jobs);
+  return <div className={`message-body ${presentation.lifecycle ? "lifecycle-message" : ""}`}>
+    {presentation.primary ? <Markdown>{presentation.primary}</Markdown> : (!message.attachments?.length && <span className="stream-caret">▋</span>)}
+    {presentation.secondary && <small className="identifier-reference">{presentation.secondary}</small>}
+    {presentation.technical && <TechnicalEvidence>{presentation.technical}</TechnicalEvidence>}
+  </div>;
+}
+
 export function JobSidebarRow({ job, active, activityReady, onOpen }: {
   job: AgentJob; active: boolean; activityReady: boolean; onOpen: () => void;
 }) {
@@ -1125,16 +1139,16 @@ function WorkingIndicator({ activity: current, agentLabel }: { activity?: AgentA
   </div>;
 }
 
-function ReviewView({ job }: { job: AgentJob }) {
+export function ReviewView({ job }: { job: AgentJob }) {
   const review = job.review;
   if (!review) return <div className="review-view"><h2>Awaiting successful completion</h2><p>Completion will hand evidence to the main coordinator; it will not auto-judge or auto-merge.</p></div>;
   return <div className="review-view">
     <header><span className={`review-status ${review.status}`}>{review.status.replaceAll("_", " ")}</span><span>coordinator-owned · attempt {review.attempt} · target {review.targetBranch}</span></header>
-    {job.handoff && <><h2>Worker handoff · round {job.handoff.round}</h2><p>{job.handoff.report}</p><code>diff sha256 {job.handoff.diffSha256}</code></>}
-    {review.error && <pre className="review-error">{review.error}</pre>}
+    {job.handoff && <><h2>Worker handoff · round {job.handoff.round}</h2><p>{job.handoff.report}</p><p className="identifier-reference">Reviewed changes · {shortReference(job.handoff.diffSha256)}</p><TechnicalEvidence label="Exact handoff evidence">diff sha256 {job.handoff.diffSha256}</TechnicalEvidence></>}
+    {review.error && <><p className="review-error">Review needs attention.</p><TechnicalEvidence label="Exact review error">{review.error}</TechnicalEvidence></>}
     {review.remediation?.actions.length ? <>
       <h2>Action-required remediation</h2>
-      <div className="check-list">{review.remediation.actions.map((action) => <details key={action.id} open={action.id === review.remediation?.currentActionId} className={action.state === "resolved" ? "pass" : "fail"}>
+      <div className="check-list">{review.remediation.actions.map((action) => <details key={action.id} className={action.state === "resolved" ? "pass" : "fail"}>
         <summary>{action.failureClass.replaceAll("_", " ")} · {action.state} · repair {action.attempt}/{action.maxAttempts}</summary>
         <pre>{action.evidence.detail}</pre>
         {action.feedback && <p><strong>Coordinator feedback:</strong> {action.feedback}</p>}
@@ -1147,14 +1161,15 @@ function ReviewView({ job }: { job: AgentJob }) {
     {review.judge ? <section className="judge-evidence">
       <p><strong>{review.judge.approved ? "APPROVED" : "REJECTED"}</strong> · {review.judge.model.provider}/{review.judge.model.id}</p>
       <p>{review.judge.summary}</p>
-      <code>diff sha256 {review.judge.diffSha256}</code>
+      <p className="identifier-reference">Reviewed changes · {shortReference(review.judge.diffSha256)}</p>
+      <TechnicalEvidence label="Exact judge evidence">diff sha256 {review.judge.diffSha256}</TechnicalEvidence>
       <ul>{review.judge.requirements.map((item, index) => <li key={index} className={item.satisfied ? "pass" : "fail"}><b>{item.satisfied ? "✓" : "×"} {item.requirement}</b><span>{item.evidence}</span></li>)}</ul>
     </section> : <p className="muted">No structured verdict yet.</p>}
     <h2>Reconciliation</h2>
-    <p>{review.mergeCommit ? `commit ${review.mergeCommit}` : "Not reconciled."}</p>
+    {review.mergeCommit ? <><p>Integrated · {shortReference(review.mergeCommit)}</p><TechnicalEvidence label="Exact integration evidence">commit {review.mergeCommit}</TechnicalEvidence></> : <p>Not reconciled.</p>}
     <CheckList checks={review.postMergeCi} empty="Post-merge checks have not run." />
     <h2>Transition log</h2>
-    <ol className="transition-log">{review.transitions.map((entry, index) => <li key={index}><time>{new Date(entry.at).toLocaleTimeString()}</time><b>{entry.owner || "server"} · {entry.status}</b><span>{entry.detail}</span></li>)}</ol>
+    <ol className="transition-log">{review.transitions.map((entry, index) => <li key={index}><time>{new Date(entry.at).toLocaleTimeString()}</time><b>{entry.status.replaceAll("_", " ")}</b>{entry.detail ? <details><summary>Technical details</summary><pre>{entry.detail}</pre></details> : <span>{entry.owner || "server"}</span>}</li>)}</ol>
   </div>;
 }
 
