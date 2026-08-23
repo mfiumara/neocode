@@ -418,6 +418,12 @@ test("local integration rebases untracked work and fast-forwards main without a 
     const result = await adapter.reconcile(value);
     assert.equal(result.alreadyMerged, undefined);
     assert.equal(result.commit, reviewedHead, "main must fast-forward to the exact reviewed rebased commit");
+    assert.ok(result.candidateCi?.some((check) => check.command === `git diff --check ${currentMain} HEAD` && check.ok),
+      "standard candidate evidence includes the literal latest-main diff check");
+    const provenance = result.candidateCi?.find((check) => check.command.includes("git status --porcelain"));
+    assert.ok(provenance?.ok);
+    assert.match(provenance.output, new RegExp(`BASE=${currentMain}\\nHEAD=${reviewedHead}\\nPARENT=${currentMain}\\nTREE=[0-9a-f]{40}`));
+    assert.match(provenance.output, /A\s+new-file\.txt/);
     assert.equal((await execFileAsync("git", ["rev-list", "--parents", "-n", "1", "HEAD"], { cwd: root })).stdout.trim().split(/\s+/).length, 2,
       "integrated commit has exactly one parent, not a merge commit");
     assert.equal(await readFile(join(root, "new-file.txt"), "utf8"), "new content\n");

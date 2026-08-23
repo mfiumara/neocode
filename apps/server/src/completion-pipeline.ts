@@ -512,6 +512,14 @@ export class LocalReviewAdapter implements ReviewAdapter {
     const commands = this.options.command || process.env.NEOCODE_CI_COMMAND
       ? [this.options.command || process.env.NEOCODE_CI_COMMAND!]
       : await detectedCommands(cwd);
+    const targetHead = (await git(this.root, ["rev-parse", this.targetBranch])).trim();
+    // These are standard candidate checks, not worker-report prose. Keep the
+    // exact base, clean identity, tree, changed paths, and whitespace gate in
+    // durable CheckEvidence consumed by the independent judge.
+    commands.push(
+      `git diff --check ${targetHead} HEAD`,
+      `test -z "$(git status --porcelain)" && printf 'BASE=${targetHead}\\nHEAD=' && git rev-parse HEAD && printf 'PARENT=' && git rev-parse HEAD^ && printf 'TREE=' && git rev-parse 'HEAD^{tree}' && git diff --name-status ${shellQuote(targetHead)} HEAD`,
+    );
     const evidence: CheckEvidence[] = [];
     for (const command of commands) {
       const check = await runBounded(command, cwd, this.options.timeoutMs, this.options.maxOutputBytes);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TranscriptMessage } from "@neocode/protocol";
-import { appendUnique, prependPage, reconcileWindow, type TranscriptWindow } from "./transcript";
+import { appendUnique, insertPageBefore, messageContextText, prependPage, reconcileWindow, type TranscriptWindow } from "./transcript";
 
 const message = (id: string): TranscriptMessage => ({ id, role: "assistant", text: id, timestamp: Number(id.slice(1)) });
 const page = (messages: TranscriptMessage[], oldestCursor: string, hasOlder = true): TranscriptWindow =>
@@ -13,12 +13,12 @@ test("pages prepend in server order and deduplicate replayed boundaries", () => 
   assert.deepEqual(result.map(({ id }) => id), ["m1", "m2", "m3", "m4", "m5"]);
 });
 
-test("atomic reconnect adopts server cursor when a long cache and tail are disjoint", () => {
+test("atomic reconnect preserves a disjoint reader cache while adopting the server gap cursor", () => {
   const cached = page(Array.from({ length: 300 }, (_, index) => message(`m${index}`)), "m0", false);
   const server = page(Array.from({ length: 100 }, (_, index) => message(`m${900 + index}`)), "m900");
   const result = reconcileWindow(cached, server);
-  assert.deepEqual(result.messages.map(({ id }) => id), server.messages.map(({ id }) => id));
-  assert.deepEqual(result.page, server.page, "cursor changes atomically with the replaced messages");
+  assert.deepEqual(result.messages.map(({ id }) => id), [...cached.messages, ...server.messages].map(({ id }) => id));
+  assert.deepEqual(result.page, server.page, "server cursor becomes the gap-fill boundary");
 });
 
 test("partial overlap, downtime append, replay, and repeated reconnect retain continuity once", () => {
@@ -43,9 +43,37 @@ test("every durable id remains reachable exactly once after a no-overlap reconne
     const cursor = durable.findIndex((entry) => entry.id === current.page?.oldestCursor);
     const start = Math.max(0, cursor - 100);
     const older = durable.slice(start, cursor);
-    current = { messages: prependPage(current.messages, older), page: { oldestCursor: older[0]?.id, hasOlder: start > 0 } };
+    current = { messages: insertPageBefore(current.messages, older, current.page.oldestCursor), page: { oldestCursor: older[0]?.id, hasOlder: start > 0 } };
   }
   assert.deepEqual(current.messages.map(({ id }) => id), durable.map(({ id }) => id));
+  assert.equal(new Set(current.messages.map(({ id }) => id)).size, durable.length);
+});
+
+test("repeated disjoint reconnects and straddling pages preserve exact durable order", () => {
+  const durable = Array.from({ length: 2_000 }, (_, index) => message(`m${index}`));
+  let current = reconcileWindow(page(durable.slice(0, 300), "m0", false), page(durable.slice(900, 1_000), "m900"));
+  current = reconcileWindow(current, page(durable.slice(1_900), "m1900"));
+  while (current.page?.hasOlder) {
+    const cursor = durable.findIndex((entry) => entry.id === current.page?.oldestCursor);
+    const start = Math.max(0, cursor - 250);
+    const older = durable.slice(start, cursor);
+    current = { messages: insertPageBefore(current.messages, older, current.page.oldestCursor), page: { oldestCursor: older[0]?.id, hasOlder: start > 0 } };
+  }
+  assert.deepEqual(current.messages.map(({ id }) => id), durable.map(({ id }) => id));
+  assert.equal(new Set(current.messages.map(({ id }) => id)).size, durable.length);
+});
+
+test("lifecycle context includes readable summary and full raw evidence", () => {
+  const lifecycle: TranscriptMessage = {
+    id: "event", role: "system", timestamp: 1, text: "compact status",
+    workerEvent: {
+      jobId: "job-1", title: "Fix transport", state: "action_required", summary: "Review diagnostics",
+      rawEvidence: "{\"judge\":{\"approved\":false},\"diagnostic\":\"exact failure\"}", actionRequired: true,
+    },
+  };
+  const context = messageContextText(lifecycle);
+  assert.match(context, /Fix transport — action required: Review diagnostics/);
+  assert.match(context, /exact failure/);
 });
 
 test("stable row keys survive timestamp merges with jobs above and below the viewport", () => {

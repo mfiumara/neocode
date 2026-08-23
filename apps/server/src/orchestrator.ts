@@ -471,7 +471,10 @@ export class Orchestrator {
 
   private transportJob(job: AgentJob): AgentJob {
     const window = transcriptPage(job.messages);
-    return { ...structuredClone(job), messages: window.messages, transcriptPage: window.page };
+    // Exclude the durable transcript before cloning metadata. Cloning the full
+    // job and then replacing messages makes every update O(total history).
+    const { messages: _durableMessages, transcriptPage: _transportPage, ...metadata } = job;
+    return { ...structuredClone(metadata), messages: window.messages, transcriptPage: window.page };
   }
 
   async prompt(text: string, context: string[] = [], attachments: ImageAttachment[] = []): Promise<void> {

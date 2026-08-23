@@ -66,14 +66,27 @@ test("real browser virtualizes, measures, paginates, navigates, and preserves re
   };
   let peer: WebSocket | undefined;
   let loadRequests = 0;
+  let pageResponses = 0;
+  let serverHistory = all;
+  let serverHasOlder = true;
+  const pageSizes: number[] = [];
   wss.on("connection", (socket) => {
     peer = socket;
     socket.send(JSON.stringify({ type: "snapshot", snapshot: coordinatorSnapshot(all.slice(-100), job) } satisfies ServerMessage));
     socket.on("message", (raw) => {
-      const request = JSON.parse(raw.toString()) as { type: string };
+      const request = JSON.parse(raw.toString()) as { type: string; before?: string };
       if (request.type !== "load_older_messages") return;
       loadRequests += 1;
-      setTimeout(() => socket.send(JSON.stringify({ type: "transcript_page", thread: { kind: "coordinator" }, messages: all.slice(0, -100), page: { oldestCursor: "m-0", hasOlder: false } } satisfies ServerMessage)), 300);
+      const end = serverHistory.findIndex((message) => message.id === request.before);
+      const start = Math.max(0, end - 250);
+      const messages = end < 0 ? [] : serverHistory.slice(start, end);
+      const page = { oldestCursor: messages[0]?.id || request.before, hasOlder: start > 0 };
+      pageSizes.push(messages.length);
+      serverHasOlder = page.hasOlder;
+      setTimeout(() => {
+        socket.send(JSON.stringify({ type: "transcript_page", thread: { kind: "coordinator" }, messages, page } satisfies ServerMessage));
+        pageResponses += 1;
+      }, 30);
     });
   });
 
@@ -112,15 +125,24 @@ test("real browser virtualizes, measures, paginates, navigates, and preserves re
 
     // Let the initial ResizeObserver pass settle before recording the anchor.
     await new Promise((resolve) => setTimeout(resolve, 200));
-    // Top-scroll drives the real protocol request and prepends the remaining 9,900 rows.
+    // Top-scroll drives real protocol requests; every response is production-capped.
     await evaluate("(() => { const v=document.querySelector('.transcript-viewport'); v.scrollTop=0; v.dispatchEvent(new Event('scroll',{bubbles:true})); return true })()");
     await waitFor(async () => loadRequests === 1);
     const initialAnchor = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]; return {key:r.e.dataset.rowKey,offset:r.r.top-v.getBoundingClientRect().top} })()");
-    await waitFor(async () => evaluate<boolean>("document.querySelector('.transcript-window').style.height.replace('px','') > 100000"));
-    await new Promise((resolve) => setTimeout(resolve, 200)); // allow ResizeObserver measurements
+    await waitFor(async () => pageResponses >= 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
     const restoredAnchorOffset = await evaluate<number>(`document.querySelector('[data-row-key="${initialAnchor.key}"]')?.getBoundingClientRect().top-document.querySelector('.transcript-viewport').getBoundingClientRect().top`);
     assert.ok(Math.abs(restoredAnchorOffset - initialAnchor.offset) < 3,
       `prepend moved stable interleaved anchor ${initialAnchor.key}: ${initialAnchor.offset} -> ${restoredAnchorOffset}`);
+    for (let guard = 0; serverHasOlder && guard < 50; guard += 1) {
+      const previous = pageResponses;
+      await evaluate("(() => { const v=document.querySelector('.transcript-viewport'); v.scrollTop=0; v.dispatchEvent(new Event('scroll',{bubbles:true})); return true })()");
+      await waitFor(async () => pageResponses > previous || !serverHasOlder);
+    }
+    assert.equal(serverHasOlder, false);
+    assert.ok(pageSizes.length > 30 && pageSizes.every((size) => size <= 250));
+    await waitFor(async () => evaluate<boolean>("document.querySelector('.transcript-window').style.height.replace('px','') > 100000"));
+    await new Promise((resolve) => setTimeout(resolve, 200)); // allow ResizeObserver measurements
     const mounted = await evaluate<number>("document.querySelectorAll('[data-virtual-row]').length");
     assert.ok(mounted > 0 && mounted < 80, `actual virtualizer mounted ${mounted}/10,001 rows`);
 
@@ -162,6 +184,30 @@ test("real browser virtualizes, measures, paginates, navigates, and preserves re
     const restored = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]; return {key:r.e.dataset.rowKey,offset:r.r.top-v.getBoundingClientRect().top} })()");
     assert.equal(restored.key, beforeSwitch.key);
     assert.ok(Math.abs(restored.offset - beforeSwitch.offset) < 3, `thread anchor offset was not restored: ${beforeSwitch.offset} -> ${restored.offset}`);
+
+    // Reconnect with a disjoint tail while deep in history. The cached reader
+    // range and exact visual anchor remain while capped pages fill the gap.
+    const reconnectAnchor = restored;
+    const additions = Array.from({ length: 500 }, (_, offset): TranscriptMessage => ({
+      id: `m-${10_000 + offset}`, role: "assistant", timestamp: 20_001 + offset, text: `downtime ${offset}`,
+    }));
+    serverHistory = [...all, { id: "stream-new", role: "assistant", text: "stream", timestamp: 20_000 }, ...additions];
+    serverHasOlder = true;
+    const reconnectSnapshot = coordinatorSnapshot(serverHistory.slice(-100), job);
+    peer!.send(JSON.stringify({ type: "snapshot", snapshot: reconnectSnapshot } satisfies ServerMessage));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const afterReconnect = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]; return {key:r.e.dataset.rowKey,offset:r.r.top-v.getBoundingClientRect().top} })()");
+    assert.equal(afterReconnect.key, reconnectAnchor.key);
+    assert.ok(Math.abs(afterReconnect.offset - reconnectAnchor.offset) < 3,
+      `disjoint reconnect moved ${reconnectAnchor.key}: ${reconnectAnchor.offset} -> ${afterReconnect.offset}`);
+    for (let guard = 0; serverHasOlder && guard < 50; guard += 1) {
+      const previous = pageResponses;
+      await evaluate("(() => { const v=document.querySelector('.transcript-viewport'); v.scrollTop=0; v.dispatchEvent(new Event('scroll',{bubbles:true})); return true })()");
+      await waitFor(async () => pageResponses > previous || !serverHasOlder);
+    }
+    assert.equal(serverHasOlder, false);
+    await waitFor(async () => evaluate<boolean>("+document.querySelector('.transcript-window').dataset.rowCount === 10502"));
+    assert.ok(pageSizes.every((size) => size <= 250), `oversized pages: ${pageSizes.join(',')}`);
   } finally {
     cdp?.close();
     browser?.kill("SIGKILL");

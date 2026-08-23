@@ -14,7 +14,7 @@ import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcript
 import { isDoneJob, jobLifecycleLabel } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
-import { appendUnique, prependPage, reconcileWindow } from "./transcript";
+import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
 
@@ -147,7 +147,7 @@ export function App() {
   // Content may grow between scroll events. A render must not turn an
   // older-message reader back into a live-output follower.
   const followTranscriptRef = useRef(true);
-  const pendingPagesRef = useRef(new Set<string>());
+  const pendingPagesRef = useRef(new Map<string, string>());
   const currentThreadRef = useRef("coordinator");
   const rowsRef = useRef<NavigableRow[]>([]);
   const selectedRowRef = useRef(0);
@@ -196,6 +196,18 @@ export function App() {
         return;
       }
       if (message.type === "snapshot") {
+        const reconnectViewport = transcriptRef.current;
+        const reconnectKey = currentThreadRef.current;
+        const reconnectVisible = reconnectViewport ? visibleRowAnchor(reconnectViewport) : undefined;
+        if (reconnectVisible) {
+          selectionScrollSuppressionRef.current = 2;
+          prependAnchorRef.current = {
+            threadKey: reconnectKey,
+            visibleKey: reconnectVisible.key,
+            pixelOffset: reconnectVisible.offset,
+            selectedKey: rowsRef.current[selectedRowRef.current]?.key,
+          };
+        }
         setSnapshot((current) => {
           if (!current || current.cwd !== message.snapshot.cwd) return message.snapshot;
           const currentJobs = new Map(current.jobs.map((job) => [job.id, job]));
@@ -296,6 +308,7 @@ export function App() {
         });
       } else if (message.type === "transcript_page") {
         const key = message.thread.kind === "coordinator" ? "coordinator" : `job:${message.thread.jobId}`;
+        const requestedCursor = pendingPagesRef.current.get(key);
         pendingPagesRef.current.delete(key);
         const viewport = transcriptRef.current;
         if (viewport && currentThreadRef.current === key) {
@@ -312,11 +325,11 @@ export function App() {
           if (!current) return current;
           if (message.thread.kind === "coordinator") return {
             ...current,
-            coordinator: { ...current.coordinator, messages: prependPage(current.coordinator.messages, message.messages), transcriptPage: message.page },
+            coordinator: { ...current.coordinator, messages: insertPageBefore(current.coordinator.messages, message.messages, requestedCursor), transcriptPage: message.page },
           };
           const jobId = message.thread.jobId;
           return { ...current, jobs: current.jobs.map((job) => job.id === jobId
-            ? { ...job, messages: prependPage(job.messages, message.messages), transcriptPage: message.page }
+            ? { ...job, messages: insertPageBefore(job.messages, message.messages, requestedCursor), transcriptPage: message.page }
             : job) };
         });
       } else if (message.type === "maintenance_updated") {
@@ -412,7 +425,7 @@ export function App() {
   const requestOlder = () => {
     if (!activePage?.hasOlder || !activePage.oldestCursor || pendingPagesRef.current.has(activeThreadKey)) return false;
     const thread = active.kind === "coordinator" ? { kind: "coordinator" as const } : { kind: "job" as const, jobId: active.id };
-    pendingPagesRef.current.add(activeThreadKey);
+    pendingPagesRef.current.set(activeThreadKey, activePage.oldestCursor);
     if (!send({ type: "load_older_messages", thread, before: activePage.oldestCursor })) {
       pendingPagesRef.current.delete(activeThreadKey);
       return false;
@@ -514,7 +527,7 @@ export function App() {
     const entry: ContextEntry = {
       id: message.id,
       label: `${active.kind === "coordinator" ? "coordinator" : activeJob?.title} · ${message.role}`,
-      text: message.text,
+      text: messageContextText(message),
     };
     setContext((current) => current.some((item) => item.id === entry.id) ? current : [...current, entry]);
   }
@@ -895,7 +908,7 @@ export function App() {
               {activePage?.hasOlder
                 ? <div className="transcript-older" role="status" aria-live="polite">Scroll up to load older history</div>
                 : <div className="transcript-older" aria-hidden="true">{"\u00a0"}</div>}
-              <div className="transcript-window" style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
+              <div className="transcript-window" data-row-count={rows.length} style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
               {virtualRows.map((virtualRow) => {
                 const index = virtualRow.index;
                 const row = rows[index]!;
