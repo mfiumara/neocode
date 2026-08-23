@@ -12,6 +12,7 @@ import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
 import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
+import { reviewPipeline } from "./reviewPipeline";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
 import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
@@ -1008,6 +1009,7 @@ export function App() {
               }}
             >
               <div className="transcript-content" ref={transcriptContentRef}>
+              {activeJob && <ReviewStatusPanel job={activeJob} activityReady={connected} />}
               {activeJob?.recoveryIssue && <div className="recovery-notice">{activeJob.recoveryIssue}</div>}
               {!rows.length && (
                 <div className="empty-view">
@@ -1322,6 +1324,41 @@ function WorkingIndicator({ activity: current, agentLabel }: { activity?: AgentA
     </span>
     {current && <ActivityDuration activity={current} />}
   </div>;
+}
+
+function reviewTechnicalEvidence(job: AgentJob): string {
+  const review = job.review;
+  const lines = [
+    job.handoff && `handoff diff sha256 ${job.handoff.diffSha256}\nbranch ${job.handoff.branch}\nworktree ${job.handoff.worktree}`,
+    review?.reviewBaseRef && `review base ${review.reviewBaseRef}`,
+    review?.error && `review error\n${review.error}`,
+    ...(review?.remediation?.actions || []).map((action) => `action ${action.id}\n${action.failureClass} ${action.state}\n${action.evidence.detail}`),
+    ...(review?.ci || []).map((check) => `CI command: ${check.command}\nexit ${check.exitCode}\n${check.output}`),
+    review?.judge && `judge diff sha256 ${review.judge.diffSha256}\nmodel ${review.judge.model.provider}/${review.judge.model.id}\n${review.judge.raw}`,
+    review?.mergeCommit && `merge commit ${review.mergeCommit}`,
+    ...(review?.postMergeCi || []).map((check) => `Post-merge CI command: ${check.command}\nexit ${check.exitCode}\n${check.output}`),
+  ].filter(Boolean);
+  return lines.join("\n\n") || "No technical review evidence recorded.";
+}
+
+export function ReviewStatusPanel({ job, activityReady = true }: { job: AgentJob; activityReady?: boolean }) {
+  const pipeline = reviewPipeline(job, activityReady);
+  const updatedAt = job.review?.updatedAt || job.handoff?.createdAt || job.updatedAt;
+  return <section className="review-panel" aria-labelledby={`review-pipeline-${job.id}`}>
+    <header>
+      <div><span className="eyebrow">REVIEW PIPELINE</span><h2 id={`review-pipeline-${job.id}`}>{pipeline.headline}</h2></div>
+      <time dateTime={new Date(updatedAt).toISOString()} title={new Date(updatedAt).toLocaleString()}>Updated {new Date(updatedAt).toLocaleTimeString()}</time>
+    </header>
+    <p className="review-guidance" role="status">{pipeline.guidance}</p>
+    <ol className="review-pipeline" aria-label="Worker review progress">
+      {pipeline.stages.map((stage) => <li key={stage.id} className={stage.tone} aria-current={stage.tone === "active" ? "step" : undefined}>
+        <span className={`pipeline-marker ${stage.tone}`} aria-hidden="true" />
+        <div><strong>{stage.label}</strong><small>{stage.summary}</small></div>
+        {stage.at && <time dateTime={new Date(stage.at).toISOString()}>{new Date(stage.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>}
+      </li>)}
+    </ol>
+    <TechnicalEvidence label="Technical review evidence">{reviewTechnicalEvidence(job)}</TechnicalEvidence>
+  </section>;
 }
 
 export function ReviewView({ job, jobs = [job] }: { job: AgentJob; jobs?: AgentJob[] }) {

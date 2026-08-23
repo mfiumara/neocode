@@ -242,6 +242,27 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .diff-empty h2 { font-size: 13px; font-weight: 400; }
 .diff-empty p { font-size: 10px; }
 
+.review-panel { margin: 0 0 16px; padding: 12px; border: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 88%, transparent); font-size: 10px; }
+.review-panel > header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.review-panel h2 { margin: 2px 0 0; color: var(--text); font-size: 14px; font-weight: 500; }
+.review-panel > header time { color: var(--dim); font-size: 9px; white-space: nowrap; }
+.review-guidance { margin: 7px 0 11px; color: var(--muted); }
+.review-pipeline { display: grid; grid-template-columns: repeat(7, minmax(90px, 1fr)); margin: 0; padding: 0; overflow-x: auto; list-style: none; }
+.review-pipeline li { position: relative; display: grid; grid-template-columns: 12px 1fr; gap: 5px; min-width: 90px; padding-right: 8px; }
+.review-pipeline li::before { position: absolute; top: 5px; right: 0; left: 7px; height: 1px; background: var(--line); content: ""; }
+.review-pipeline li:last-child::before { display: none; }
+.pipeline-marker { z-index: 1; width: 9px; height: 9px; margin-top: 1px; border: 2px solid var(--line); border-radius: 50%; background: var(--panel); }
+.pipeline-marker.complete { border-color: var(--green); background: var(--green); }
+.pipeline-marker.failed, .pipeline-marker.blocked { border-color: var(--red); }
+.pipeline-marker.active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); animation: pulse 1.5s ease-in-out infinite; }
+.review-pipeline strong, .review-pipeline small { display: block; }
+.review-pipeline strong { position: relative; color: var(--text); font-size: 9px; font-weight: 500; }
+.review-pipeline small { margin-top: 3px; color: var(--dim); line-height: 1.35; }
+.review-pipeline li.active small { color: var(--accent); }
+.review-pipeline li.failed small, .review-pipeline li.blocked small { color: var(--red); }
+.review-pipeline time { grid-column: 2; color: var(--dim); font-size: 8px; }
+.review-panel > .technical-evidence { margin-top: 10px; }
+
 .review-view { min-height: 0; overflow: auto; padding: 20px max(24px, calc((100% - 900px) / 2)) 70px; font-size: 11px; line-height: 1.5; }
 .review-view > header { display: flex; gap: 12px; align-items: center; color: var(--muted); }
 .review-view h2 { margin: 24px 0 8px; color: var(--text); font-size: 11px; font-weight: 500; text-transform: uppercase; }
@@ -296,6 +317,8 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 
 @media (max-width: 720px) {
   .composer-actions { flex-wrap: wrap; }
+  .review-pipeline { grid-template-columns: repeat(7, 125px); }
+  .review-panel > header { align-items: start; }
   .composer-hint { display: none; }
   .model-selector > span { display: none; }
   .model-selector { max-width: 35vw; }

@@ -3,7 +3,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentJob } from "@neocode/protocol";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { App, ContextIndicator, JobSidebarRow, ReviewView } from "./App";
+import { App, ContextIndicator, JobSidebarRow, ReviewStatusPanel, ReviewView } from "./App";
 
 test("the composer exposes send and an accessible image-picker fallback without a keyboard mode badge", () => {
   const markup = renderToStaticMarkup(<App />);
@@ -124,6 +124,32 @@ test("sidebar keeps queued and terminal worker labels authoritative over stale l
   }
 });
 
+
+test("compact review panel has timeline semantics, check counts, and collapsed technical evidence", () => {
+  const value = sidebarJob("judging");
+  value.review!.ci = [
+    { command: "npm test -- --opaque", ok: true, exitCode: 0, durationMs: 10, output: "secret diagnostic" },
+    { command: "npm run check", ok: false, exitCode: 1, durationMs: 20, output: "type diagnostic" },
+  ];
+  value.review!.judge = { approved: false, summary: "One requirement remains", requirements: [], model: { provider: "pi", id: "judge" }, diffSha256: "exacthash", raw: "{\"approved\":false}" };
+  const markup = renderToStaticMarkup(<ReviewStatusPanel job={value} activityReady />);
+
+  assert.match(markup, /aria-label="Worker review progress"/);
+  assert.match(markup, /aria-current="step"/);
+  assert.match(markup, /1\/2 product checks passed/);
+  assert.match(markup, /Rejected: One requirement remains/);
+  assert.match(markup, /<details class="technical-evidence">/);
+  assert.match(markup, /Technical review evidence/);
+  assert.match(markup, /npm test -- --opaque/);
+  assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
+});
+
+test("compact panel does not show an active marker for stale review metadata", () => {
+  const markup = renderToStaticMarkup(<ReviewStatusPanel job={sidebarJob("judging")} activityReady={false} />);
+  assert.match(markup, /Review status recorded/);
+  assert.match(markup, /live activity is not confirmed/);
+  assert.doesNotMatch(markup, /aria-current="step"/);
+});
 
 test("review renders the complete handoff and owned lifecycle evidence", () => {
   const job: AgentJob = {
