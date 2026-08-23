@@ -21,10 +21,7 @@ export interface DurableRuntimeState {
   jobs: DurableJob[];
 }
 
-/**
- * New-server runtime data deliberately lives outside `.neocode/sessions`, which
- * belongs to the legacy Lua plugin.
- */
+/** Runtime data is versioned so future schema migrations remain isolated. */
 export function runtimeRoot(workspaceRoot: string): string {
   return join(workspaceRoot, ".neocode", "runtime", "server-v1");
 }
