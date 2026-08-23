@@ -804,7 +804,7 @@ export function App() {
         ...current,
         coordinator: {
           ...current.coordinator,
-          messages: upsertTranscriptMessage(current.coordinator.messages, optimistic),
+          messages: appendUnique(current.coordinator.messages, optimistic),
         },
       };
     });
