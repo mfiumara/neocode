@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
@@ -9,9 +10,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
-import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
+import { anchoredScrollTop, isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
 import { isDoneJob, jobLifecycleLabel } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
+import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
+import { appendUnique, prependPage, reconcileTail } from "./transcript";
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
 
@@ -129,6 +132,9 @@ export function App() {
   // Content may grow between scroll events. A render must not turn an
   // older-message reader back into a live-output follower.
   const followTranscriptRef = useRef(true);
+  const pendingPagesRef = useRef(new Set<string>());
+  const currentThreadRef = useRef("coordinator");
+  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | undefined>(undefined);
 
   const send = (message: ClientMessage): boolean => {
     const socket = socketRef.current;
@@ -167,7 +173,27 @@ export function App() {
         return;
       }
       if (message.type === "snapshot") {
-        setSnapshot(message.snapshot);
+        setSnapshot((current) => {
+          if (!current || current.cwd !== message.snapshot.cwd) return message.snapshot;
+          const currentJobs = new Map(current.jobs.map((job) => [job.id, job]));
+          return {
+            ...message.snapshot,
+            coordinator: {
+              ...message.snapshot.coordinator,
+              messages: reconcileTail(current.coordinator.messages, message.snapshot.coordinator.messages),
+              transcriptPage: current.coordinator.messages.length > message.snapshot.coordinator.messages.length
+                ? current.coordinator.transcriptPage : message.snapshot.coordinator.transcriptPage,
+            },
+            jobs: message.snapshot.jobs.map((job) => {
+              const old = currentJobs.get(job.id);
+              return old ? {
+                ...job,
+                messages: reconcileTail(old.messages, job.messages),
+                transcriptPage: old.messages.length > job.messages.length ? old.transcriptPage : job.transcriptPage,
+              } : job;
+            }),
+          };
+        });
         setActivitySynced(true);
         setPendingModel(undefined);
         if (hydratedWorkspaceRef.current !== message.snapshot.cwd) {
@@ -207,7 +233,7 @@ export function App() {
           ...current,
           coordinator: {
             ...current.coordinator,
-            messages: [...current.coordinator.messages, message.message],
+            messages: appendUnique(current.coordinator.messages, message.message),
           },
         } : current);
       } else if (message.type === "coordinator_message_updated") {
@@ -229,11 +255,37 @@ export function App() {
           },
         } : current);
       } else if (message.type === "job_updated") {
-        setSnapshot((current) => current ? {
-          ...current,
-          jobs: [message.job, ...current.jobs.filter((job) => job.id !== message.job.id)]
-            .sort((a, b) => b.createdAt - a.createdAt),
-        } : current);
+        setSnapshot((current) => {
+          if (!current) return current;
+          const old = current.jobs.find((job) => job.id === message.job.id);
+          const job = old ? {
+            ...message.job,
+            messages: reconcileTail(old.messages, message.job.messages),
+            transcriptPage: old.messages.length > message.job.messages.length ? old.transcriptPage : message.job.transcriptPage,
+          } : message.job;
+          return { ...current, jobs: [job, ...current.jobs.filter((entry) => entry.id !== job.id)]
+            .sort((a, b) => b.createdAt - a.createdAt) };
+        });
+      } else if (message.type === "transcript_page") {
+        const key = message.thread.kind === "coordinator" ? "coordinator" : `job:${message.thread.jobId}`;
+        pendingPagesRef.current.delete(key);
+        const viewport = transcriptRef.current;
+        if (viewport && currentThreadRef.current === key) prependAnchorRef.current = { scrollHeight: viewport.scrollHeight, scrollTop: viewport.scrollTop };
+        if (message.messages.length) setNavigation((current) => {
+          const saved = current[key];
+          return saved ? { ...current, [key]: { ...saved, selectedRow: saved.selectedRow + message.messages.length } } : current;
+        });
+        setSnapshot((current) => {
+          if (!current) return current;
+          if (message.thread.kind === "coordinator") return {
+            ...current,
+            coordinator: { ...current.coordinator, messages: prependPage(current.coordinator.messages, message.messages), transcriptPage: message.page },
+          };
+          const jobId = message.thread.jobId;
+          return { ...current, jobs: current.jobs.map((job) => job.id === jobId
+            ? { ...job, messages: prependPage(job.messages, message.messages), transcriptPage: message.page }
+            : job) };
+        });
       } else if (message.type === "maintenance_updated") {
         setSnapshot((current) => current ? { ...current, maintenance: message.maintenance } : current);
       } else if (message.type === "error") {
@@ -258,6 +310,7 @@ export function App() {
         setConnected(false);
         setActivitySynced(false);
         setPendingModel(undefined);
+        pendingPagesRef.current.clear();
         setSnapshot((current) => current ? {
           ...current,
           coordinator: { ...current.coordinator, activity: undefined },
@@ -297,6 +350,7 @@ export function App() {
   const messages = active.kind === "coordinator"
     ? snapshot?.coordinator.messages || []
     : activeJob?.messages || [];
+  const activePage = active.kind === "coordinator" ? snapshot?.coordinator.transcriptPage : activeJob?.transcriptPage;
   const activeActivity = active.kind === "coordinator" ? snapshot?.coordinator.activity : activeJob?.activity;
   const activeActivityHistory = active.kind === "coordinator" ? snapshot?.coordinator.activityHistory : activeJob?.activityHistory;
   const activityReady = connected && activitySynced;
@@ -321,6 +375,32 @@ export function App() {
   }, [active.kind, messages, snapshot?.jobs]);
 
   const activeThreadKey = active.kind === "job" ? `job:${active.id}` : "coordinator";
+  currentThreadRef.current = activeThreadKey;
+  const requestOlder = () => {
+    if (!activePage?.hasOlder || !activePage.oldestCursor || pendingPagesRef.current.has(activeThreadKey)) return false;
+    const thread = active.kind === "coordinator" ? { kind: "coordinator" as const } : { kind: "job" as const, jobId: active.id };
+    pendingPagesRef.current.add(activeThreadKey);
+    if (!send({ type: "load_older_messages", thread, before: activePage.oldestCursor })) {
+      pendingPagesRef.current.delete(activeThreadKey);
+      return false;
+    }
+    return true;
+  };
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => transcriptRef.current,
+    estimateSize: (index) => rows[index]?.kind === "job" ? 38 : 110,
+    initialRect: { width: 800, height: 600 },
+    overscan: 12,
+    getItemKey: (index) => rows[index]?.key || index,
+  });
+  const measuredVirtualRows = rowVirtualizer.getVirtualItems();
+  // Radix refs and ResizeObserver attach after the first commit. Keep that
+  // bootstrap commit useful (and bounded) in SSR/jsdom as well as browsers.
+  const virtualRows = measuredVirtualRows.length ? measuredVirtualRows : rows.slice(-25).map((_, offset) => {
+    const index = Math.max(0, rows.length - 25) + offset;
+    return { index, start: index * 110 };
+  });
   const selectedRow = navigationForView(navigation, activeThreadKey, rows.length).selectedRow;
   const setSelectedRow = (next: number | ((current: number) => number)) => {
     setNavigation((current) => {
@@ -448,7 +528,10 @@ export function App() {
         if (jobs.length) openJob(jobs[(index - 1 + jobs.length) % jobs.length]!);
       } else if (event.key === "i") focusPrompt();
       else if (event.key === "j" || event.key === "ArrowDown") setSelectedRow((value) => Math.min(Math.max(0, rows.length - 1), value + 1));
-      else if (event.key === "k" || event.key === "ArrowUp") setSelectedRow((value) => Math.max(0, value - 1));
+      else if (event.key === "k" || event.key === "ArrowUp") {
+        if (selectedRow === 0 && activePage?.hasOlder) requestOlder();
+        else setSelectedRow((value) => Math.max(0, value - 1));
+      }
       else if (event.key === "l" || event.key === "ArrowRight") {
         const row = rows[selectedRow];
         if (row?.kind === "job") openJob(row.job);
@@ -478,8 +561,11 @@ export function App() {
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
     const row = transcript?.querySelector<HTMLElement>(`[data-row-index="${selectedRow}"]`);
-    if (!transcript || !row) return;
-
+    if (!transcript) return;
+    if (!row) {
+      rowVirtualizer.scrollToIndex(selectedRow, { align: "auto" });
+      return;
+    }
     const viewport = transcript.getBoundingClientRect();
     const item = row.getBoundingClientRect();
     transcript.scrollTop = nearestTranscriptScrollTop({
@@ -489,7 +575,16 @@ export function App() {
       itemTop: item.top,
       itemBottom: item.bottom,
     });
-  }, [activeThreadKey, jobTab, selectedRow]);
+  }, [activeThreadKey, jobTab, selectedRow, rowVirtualizer]);
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current;
+    const transcript = transcriptRef.current;
+    if (!anchor || !transcript) return;
+    transcript.scrollTop = anchoredScrollTop(anchor.scrollTop, anchor.scrollHeight, transcript.scrollHeight);
+    scrollPositionsRef.current[activeThreadKey] = transcript.scrollTop;
+    prependAnchorRef.current = undefined;
+  }, [rows.length, activeThreadKey]);
 
   const lastRow = rows[rows.length - 1];
   const outputRevision = lastRow?.kind === "message"
@@ -706,6 +801,7 @@ export function App() {
               onViewportScroll={(event) => {
                 scrollPositionsRef.current[activeThreadKey] = event.currentTarget.scrollTop;
                 followTranscriptRef.current = isNearTranscriptBottom(event.currentTarget);
+                if (event.currentTarget.scrollTop <= 80) requestOlder();
               }}
             >
               <div className="transcript-content" ref={transcriptContentRef}>
@@ -715,41 +811,53 @@ export function App() {
                   {active.kind === "coordinator" ? "Type a prompt to start." : "Worker is starting."}
                 </div>
               )}
-              {rows.map((row, index) => row.kind === "message" ? (
-                <article
+              {activePage?.hasOlder && <div className="transcript-older" role="status">Scroll up to load older history</div>}
+              <div className="transcript-window" style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
+              {virtualRows.map((virtualRow) => {
+                const index = virtualRow.index;
+                const row = rows[index]!;
+                return <div
                   key={row.key}
-                  data-row-index={index}
-                  className={`message ${row.message.role} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
-                  onClick={() => setSelectedRow(index)}
-                >
-                  <div className="message-meta">
-                    <span>{roleLabel(row.message.role)}</span>
-                    <time>{new Date(row.message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
-                    <Button variant="ghost" title="Add to context" onClick={(event) => { event.stopPropagation(); setSelectedRow(index); addMessageToContext(row.message); }}>+context</Button>
-                  </div>
-                  <div className="message-body">
-                    {row.message.text ? <Markdown>{row.message.text}</Markdown> : (!row.message.attachments?.length && <span className="stream-caret">▋</span>)}
-                  </div>
-                  {!!row.message.attachments?.length && <AttachmentGallery attachments={row.message.attachments} />}
-                </article>
-              ) : (
-                <Button
-                  variant="ghost"
-                  key={row.key}
-                  data-row-index={index}
-                  className={`worker-line ${row.job.integration?.status || row.job.status} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
-                  onClick={() => setSelectedRow(index)}
-                  onDoubleClick={() => openJob(row.job)}
-                >
-                  <span className="worker-arrow">→</span>
-                  <span className="worker-status">{jobLifecycleLabel(row.job)}{row.job.attempts?.length ? ` · attempt ${row.job.attempts.length}` : ""}</span>
-
-                  <span className="worker-title">{row.job.title}</span>
-                  {row.job.durationMs !== undefined && <span className="worker-duration">{formatDuration(row.job.durationMs)} total</span>}
-                  <code>{row.job.id}</code>
-                  <span className="worker-open">l</span>
-                </Button>
-              ))}
+                  data-virtual-row=""
+                  data-index={index}
+                  ref={rowVirtualizer.measureElement}
+                  style={{ position: "absolute", width: "100%", transform: `translateY(${virtualRow.start}px)` }}
+                >{row.kind === "message" ? (
+                  <article
+                    data-row-index={index}
+                    className={`message ${row.message.role} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
+                    onClick={() => setSelectedRow(index)}
+                  >
+                    <div className="message-meta">
+                      <span>{roleLabel(row.message.role)}</span>
+                      <time>{new Date(row.message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                      <Button variant="ghost" title="Add to context" onClick={(event) => { event.stopPropagation(); setSelectedRow(index); addMessageToContext(row.message); }}>+context</Button>
+                    </div>
+                    <div className="message-body">
+                      {parseWorkerEvent(row.message)
+                        ? <WorkerEventCard message={row.message} />
+                        : row.message.text ? <Markdown>{row.message.text}</Markdown> : (!row.message.attachments?.length && <span className="stream-caret">▋</span>)}
+                    </div>
+                    {!!row.message.attachments?.length && <AttachmentGallery attachments={row.message.attachments} />}
+                  </article>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    data-row-index={index}
+                    className={`worker-line ${row.job.integration?.status || row.job.status} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
+                    onClick={() => setSelectedRow(index)}
+                    onDoubleClick={() => openJob(row.job)}
+                  >
+                    <span className="worker-arrow">→</span>
+                    <span className="worker-status">{jobLifecycleLabel(row.job)}{row.job.attempts?.length ? ` · attempt ${row.job.attempts.length}` : ""}</span>
+                    <span className="worker-title">{row.job.title}</span>
+                    {row.job.durationMs !== undefined && <span className="worker-duration">{formatDuration(row.job.durationMs)} total</span>}
+                    <code>{row.job.id}</code>
+                    <span className="worker-open">l</span>
+                  </Button>
+                )}</div>;
+              })}
+              </div>
               {!!activeActivityHistory?.length && <ActivityHistory activities={activeActivityHistory} />}
               {activeWorking && (
                 <WorkingIndicator activity={activeActivity} agentLabel={active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"} />

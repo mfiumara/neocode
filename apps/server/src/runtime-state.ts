@@ -19,6 +19,9 @@ export interface CoordinatorWorkerEvent {
   jobId: string;
   kind: CoordinatorWorkerEventKind;
   text: string;
+  /** Concise UI text stored alongside, never instead of, raw event evidence. */
+  summary?: string;
+  title?: string;
   createdAt: number;
   messageId: string;
   wakeRequested: boolean;

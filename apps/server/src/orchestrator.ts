@@ -29,6 +29,7 @@ import {
   type RequestedIsolationMode,
   type ServerMessage,
   type TranscriptMessage,
+  type TranscriptThread,
 } from "@neocode/protocol";
 import { activity, ActivityTimeline, toolActivity } from "./activity.js";
 import { CompletionPipeline, LocalReviewAdapter, readWorktreeDiff } from "./completion-pipeline.js";
@@ -55,6 +56,7 @@ import {
   type DurableRuntimeState,
 } from "./runtime-state.js";
 import { OperationLock, WorktreeJanitor } from "./worktree-janitor.js";
+import { transcriptPage } from "./transcript-pagination.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -424,20 +426,35 @@ export class Orchestrator {
   }
 
   snapshot(): AppSnapshot {
+    const coordinatorWindow = transcriptPage(this.coordinatorMessages);
     return {
       cwd: this.cwd,
       coordinator: {
         status: this.coordinatorStatus,
         activity: this.coordinatorActivity,
         activityHistory: [...this.coordinatorActivityHistory],
-        messages: [...this.coordinatorMessages],
+        messages: coordinatorWindow.messages,
+        transcriptPage: coordinatorWindow.page,
         settings: this.settings(),
         model: this.currentModel(),
         models: this.modelChoices(),
       },
-      jobs: this.listJobs(),
+      jobs: this.listJobs().map((job) => this.transportJob(job)),
       maintenance: { ...this.maintenance },
     };
+  }
+
+  transcriptPage(thread: TranscriptThread, before?: string, limit?: number) {
+    const source = thread.kind === "coordinator"
+      ? this.coordinatorMessages
+      : this.jobs.get(thread.jobId)?.messages;
+    if (!source) throw new Error("Unknown transcript thread.");
+    return transcriptPage(source, before, limit);
+  }
+
+  private transportJob(job: AgentJob): AgentJob {
+    const window = transcriptPage(job.messages);
+    return { ...structuredClone(job), messages: window.messages, transcriptPage: window.page };
   }
 
   async prompt(text: string, context: string[] = [], attachments: ImageAttachment[] = []): Promise<void> {
@@ -1235,7 +1252,7 @@ export class Orchestrator {
 
   private publishJob(job: AgentJob): void {
     this.persist();
-    this.emit({ type: "job_updated", job: structuredClone(job) });
+    this.emit({ type: "job_updated", job: this.transportJob(job) });
     this.coordinatorNotifications?.observe(job);
     this.scheduleBacklogSweep();
   }
@@ -1244,8 +1261,16 @@ export class Orchestrator {
     const message: TranscriptMessage = {
       id: event.messageId,
       role: "system",
-      text: event.text,
+      text: `[worker_status] ${event.title || event.jobId}: ${event.kind.replaceAll("_", " ")} — ${event.summary || "status updated"}`,
       timestamp: event.createdAt,
+      workerEvent: {
+        jobId: event.jobId,
+        title: event.title || event.jobId,
+        state: event.kind,
+        summary: event.summary || event.kind.replaceAll("_", " "),
+        rawEvidence: event.text,
+        actionRequired: event.kind === "action_required" || event.kind === "failed" || event.kind === "needs_attention",
+      },
     };
     if (this.coordinatorMessages.some((entry) => entry.id === message.id)) return;
     this.coordinatorMessages.push(message);

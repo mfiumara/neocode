@@ -70,13 +70,17 @@ export class CoordinatorNotificationQueue {
       jobId: job.id,
       title: job.title,
       state: signal.kind,
-      ...(signal.detail ? { detail: signal.kind === "action_required" ? signal.detail : concise(signal.detail) } : {}),
+      ...(signal.detail ? { detail: signal.detail } : {}),
     };
     const event: CoordinatorWorkerEvent = {
       id: eventId,
       jobId: job.id,
       kind: signal.kind,
       text: `[worker_status] ${JSON.stringify(payload)}`,
+      summary: signal.kind === "action_required"
+        ? "Action required — review diagnostics and evidence"
+        : concise(signal.detail) || signal.kind.replaceAll("_", " "),
+      title: job.title,
       createdAt: Date.now(),
       messageId: randomUUID(),
       wakeRequested: signal.wake,
@@ -117,6 +121,8 @@ export class CoordinatorNotificationQueue {
       jobId: job.id,
       kind: "backlog_sweep",
       text: `[worker_status] ${JSON.stringify(payload)}`,
+      summary: concise(payload.detail) || "backlog sweep",
+      title: job.title,
       createdAt: Date.now(),
       messageId: randomUUID(),
       wakeRequested: true,
