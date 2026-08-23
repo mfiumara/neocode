@@ -1,4 +1,13 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
@@ -113,6 +122,7 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
+  const [modelPaletteOpen, setModelPaletteOpen] = useState(false);
   const [activitySynced, setActivitySynced] = useState(false);
   const [pendingModel, setPendingModel] = useState<string>();
   const [workspaceStorageKey, setWorkspaceStorageKey] = useState<string>();
@@ -387,18 +397,15 @@ export function App() {
   useEffect(() => {
     let prefix = "";
     const onKey = (event: KeyboardEvent) => {
+      if (modelPaletteOpen) return;
       if (paletteOpen) {
         if (event.key === "Escape") setPaletteOpen(false);
-        else if (event.key === "ArrowDown" || (event.key === "j" && !paletteQuery)) {
+        else if (event.key === "j" && !paletteQuery) {
           event.preventDefault();
           setPaletteIndex((value) => Math.min(filteredPalette.length - 1, value + 1));
-        } else if (event.key === "ArrowUp" || (event.key === "k" && !paletteQuery)) {
+        } else if (event.key === "k" && !paletteQuery) {
           event.preventDefault();
           setPaletteIndex((value) => Math.max(0, value - 1));
-        } else if (event.key === "Enter" && filteredPalette[paletteIndex]) {
-          event.preventDefault();
-          filteredPalette[paletteIndex].action();
-          setPaletteOpen(false);
         }
         return;
       }
@@ -451,7 +458,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [mode, paletteOpen, paletteQuery, paletteIndex, filteredPalette, rows, selectedRow, snapshot?.jobs, active]);
+  }, [mode, modelPaletteOpen, paletteOpen, paletteQuery, paletteIndex, filteredPalette, rows, selectedRow, snapshot?.jobs, active]);
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
@@ -562,38 +569,41 @@ export function App() {
   };
 
   return (
+    <TooltipProvider delayDuration={350}>
     <main className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">N</span><span>neocode</span></div>
-        <button className="workspace-chip" onClick={() => setPaletteOpen(true)}>
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" className="workspace-chip" onClick={() => setPaletteOpen(true)}>
           <span className="muted">workspace</span> {snapshot ? shortPath(snapshot.cwd) : "loading…"}
           <kbd>⌘P</kbd>
-        </button>
-        <div className={`connection ${connected ? "online" : "offline"}`}>
-          <span />{connected ? "local" : "offline"}
+        </Button></TooltipTrigger><TooltipContent>Open command palette</TooltipContent></Tooltip>
+        <div className={`connection ${connected ? "online" : "offline"}`} role="status" aria-live="polite">
+          <span aria-hidden="true" />{connected ? "local" : "offline"}
         </div>
       </header>
 
       <section className="workspace-grid">
         <aside className="rail">
           <div className="section-label">Threads</div>
-          <button className={`thread-row ${active.kind === "coordinator" ? "active" : ""}`} onClick={openCoordinator}>
-            <span className={`agent-orb ${activityReady ? snapshot?.coordinator.status || "idle" : "idle"}`} />
+          <Button variant="ghost" className={`thread-row ${active.kind === "coordinator" ? "active" : ""}`} onClick={openCoordinator} aria-current={active.kind === "coordinator" ? "page" : undefined}>
+            <span className={`agent-orb ${activityReady ? snapshot?.coordinator.status || "idle" : "idle"}`} aria-hidden="true" />
             <span><strong>Coordinator</strong><small>{activityReady && snapshot?.coordinator.status === "running" ? snapshot.coordinator.activity?.description || "Working" : "Main thread"}</small></span>
             <span className="binding">q</span>
-          </button>
+          </Button>
 
           <div className="section-label jobs-label"><span>Workers</span><span>{snapshot?.jobs.length || 0}</span></div>
           <div className="jobs-list">
             {snapshot?.jobs.map((job) => (
-              <button key={job.id} className={`job-row ${active.kind === "job" && active.id === job.id ? "active" : ""}`} onClick={() => openJob(job)}>
-                <span className={`job-glyph ${activityReady || (job.status !== "queued" && job.status !== "running") ? job.status : "disconnected"}`}>{statusGlyph(job.status)}</span>
+              <Button variant="ghost" key={job.id} className={`job-row ${active.kind === "job" && active.id === job.id ? "active" : ""}`} onClick={() => openJob(job)} aria-current={active.kind === "job" && active.id === job.id ? "page" : undefined}>
+                <span className={`job-glyph ${activityReady || (job.status !== "queued" && job.status !== "running") ? job.status : "disconnected"}`} aria-hidden="true">{statusGlyph(job.status)}</span>
                 <span><strong>{job.title}</strong><small>{activityReady && (job.status === "queued" || job.status === "running") ? job.activity?.description || "Working" : `${isolationLabel(job)} · ${shortPath(job.isolation.path)}`}</small></span>
-              </button>
+                <span className="sr-only">Status: {job.status}</span>
+              </Button>
             ))}
             {!snapshot?.jobs.length && <p className="empty-copy">Implementation workers will appear here.</p>}
           </div>
 
+          <Separator className="key-hints-separator" />
           <div className="key-hints">
             <span><kbd>i</kbd> prompt</span>
             <span><kbd>j k</kbd> navigate</span>
@@ -610,48 +620,47 @@ export function App() {
               <span className="eyebrow">{active.kind === "coordinator" ? "MAIN THREAD" : activeJob?.status.toUpperCase()}</span>
               <h1>{active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"}</h1>
             </div>
-            {active.kind === "coordinator" && (
-              <label className={`model-selector ${modelSelectDisabled ? "disabled" : ""}`} title="Model used by the coordinator and new workers">
-                <span>model</span>
-                <select
-                  aria-label="Coordinator model"
-                  value={pendingModel || currentModelKey}
-                  disabled={modelSelectDisabled}
-                  onChange={(event) => {
-                    const choice = snapshot?.coordinator.models.find((model) => modelKey(model) === event.target.value);
-                    if (!choice || event.target.value === currentModelKey) return;
-                    setPendingModel(event.target.value);
-                    send({ type: "set_model", model: { provider: choice.provider, id: choice.id } });
-                  }}
-                >
-                  {!snapshot && <option value="">Loading models…</option>}
-                  {snapshot && !snapshot.coordinator.models.length && <option value="">No configured models</option>}
-                  {snapshot && !snapshot.coordinator.model && snapshot.coordinator.models.length > 0 && <option value="">Select a model…</option>}
-                  {modelGroups.map(([provider, models]) => <optgroup key={provider} label={provider}>
-                    {models.map((model) => <option key={modelKey(model)} value={modelKey(model)}>{model.label}</option>)}
-                  </optgroup>)}
-                </select>
-                {pendingModel && <small>switching…</small>}
-              </label>
-            )}
+            {active.kind === "coordinator" && (<>
+              <Tooltip><TooltipTrigger asChild><Button variant="outline" size="sm" className="model-selector" disabled={modelSelectDisabled} onClick={() => setModelPaletteOpen(true)} aria-label="Choose coordinator model">
+                <span>model</span><strong>{pendingModel ? "switching…" : snapshot?.coordinator.models.find((model) => modelKey(model) === currentModelKey)?.label || "select…"}</strong>
+              </Button></TooltipTrigger><TooltipContent>Model used by the coordinator and new workers</TooltipContent></Tooltip>
+              <CommandDialog open={modelPaletteOpen} onOpenChange={setModelPaletteOpen} title="Choose coordinator model" description="Search configured models">
+                <Command>
+                  <CommandInput placeholder="Search models…" />
+                  <CommandList><CommandEmpty>No configured models found.</CommandEmpty>
+                    {modelGroups.map(([provider, models]) => <CommandGroup key={provider} heading={provider}>
+                      {models.map((model) => <CommandItem key={modelKey(model)} value={`${modelKey(model)} ${model.label}`} onSelect={() => {
+                        const key = modelKey(model);
+                        setModelPaletteOpen(false);
+                        if (key === currentModelKey) return;
+                        setPendingModel(key);
+                        send({ type: "set_model", model: { provider: model.provider, id: model.id } });
+                      }}><span>{model.label}</span>{modelKey(model) === currentModelKey && <Badge variant="accent">current</Badge>}</CommandItem>)}
+                    </CommandGroup>)}
+                  </CommandList>
+                </Command>
+              </CommandDialog>
+            </>)}
             {activeJob && (
               <div className="view-controls">
-                <span className={`isolation-badge ${activeJob.isolation.mode}`} title={activeJob.isolation.path}>
+                <Tooltip><TooltipTrigger asChild><Badge className={`isolation-badge ${activeJob.isolation.mode}`}>
                   {isolationLabel(activeJob)} · {shortPath(activeJob.isolation.path)}
-                </span>
+                </Badge></TooltipTrigger><TooltipContent>{activeJob.isolation.path}</TooltipContent></Tooltip>
                 <code>{activeJob.id}</code>
-                <div className="view-tabs">
-                  <button className={jobTab === "conversation" ? "active" : ""} onClick={() => setJobTab("conversation")}>Conversation</button>
-                  <button className={jobTab === "diff" ? "active" : ""} onClick={() => setJobTab("diff")}>Diff</button>
-                  <button className={jobTab === "review" ? "active" : ""} onClick={() => setJobTab("review")}>Review{activeJob.review ? ` · ${activeJob.review.status}` : ""}</button>
-                </div>
+                <Tabs value={jobTab} onValueChange={(value) => setJobTab(value as JobTab)}>
+                  <TabsList className="view-tabs" aria-label="Worker view">
+                    <TabsTrigger value="conversation">Conversation</TabsTrigger>
+                    <TabsTrigger value="diff">Diff</TabsTrigger>
+                    <TabsTrigger value="review">Review{activeJob.review ? ` · ${activeJob.review.status}` : ""}</TabsTrigger>
+                  </TabsList>
+                </Tabs>
                 {activeJob.review && !["queued", "ci_running", "judging", "merge_queued", "merging", "post_merge_ci", "merged"].includes(activeJob.review.status) && (
-                  <button className="review-button" onClick={() => send({ type: "retry_review", jobId: activeJob.id })}>Retry review</button>
+                  <Button variant="outline" size="sm" className="review-button" onClick={() => send({ type: "retry_review", jobId: activeJob.id })}>Retry review</Button>
                 )}
                 {activeJob.review?.judge?.approved && ["approved", "blocked", "conflict", "post_ci_failed"].includes(activeJob.review.status) && (
-                  <button className="review-button" onClick={() => send({ type: "merge_review", jobId: activeJob.id })}>Reconcile</button>
+                  <Button variant="outline" size="sm" className="review-button" onClick={() => send({ type: "merge_review", jobId: activeJob.id })}>Reconcile</Button>
                 )}
-                {activeJob.status === "running" && <button className="cancel-button" onClick={() => send({ type: "cancel_job", jobId: activeJob.id })}>Cancel</button>}
+                {activeJob.status === "running" && <Button variant="destructive" size="sm" className="cancel-button" onClick={() => send({ type: "cancel_job", jobId: activeJob.id })}>Cancel</Button>}
               </div>
             )}
           </div>
@@ -661,10 +670,11 @@ export function App() {
           ) : jobTab === "review" && activeJob ? (
             <ReviewView job={activeJob} />
           ) : (
-            <div
+            <ScrollArea
               className="transcript"
-              ref={transcriptRef}
-              onScroll={(event) => {
+              viewportRef={transcriptRef}
+              viewportClassName="transcript-viewport"
+              onViewportScroll={(event) => {
                 scrollPositionsRef.current[activeThreadKey] = event.currentTarget.scrollTop;
                 followTranscriptRef.current = isNearTranscriptBottom(event.currentTarget);
               }}
@@ -685,7 +695,7 @@ export function App() {
                   <div className="message-meta">
                     <span>{roleLabel(row.message.role)}</span>
                     <time>{new Date(row.message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
-                    <button title="Add to context" onClick={(event) => { event.stopPropagation(); setSelectedRow(index); addMessageToContext(row.message); }}>+context</button>
+                    <Button variant="ghost" title="Add to context" onClick={(event) => { event.stopPropagation(); setSelectedRow(index); addMessageToContext(row.message); }}>+context</Button>
                   </div>
                   <div className="message-body">
                     {row.message.text ? <Markdown>{row.message.text}</Markdown> : (!row.message.attachments?.length && <span className="stream-caret">▋</span>)}
@@ -693,7 +703,8 @@ export function App() {
                   {!!row.message.attachments?.length && <AttachmentGallery attachments={row.message.attachments} />}
                 </article>
               ) : (
-                <button
+                <Button
+                  variant="ghost"
                   key={row.key}
                   data-row-index={index}
                   className={`worker-line ${row.job.status} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
@@ -705,23 +716,23 @@ export function App() {
                   <span className="worker-title">{row.job.title}</span>
                   <code>{row.job.id}</code>
                   <span className="worker-open">l</span>
-                </button>
+                </Button>
               ))}
               {activeWorking && (
                 <WorkingIndicator activity={activeActivity} agentLabel={active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"} />
               )}
               <div className="transcript-end" aria-hidden="true" />
               </div>
-            </div>
+            </ScrollArea>
           )}
 
           <div className={`composer ${mode === "INSERT" ? "focused" : ""}`}>
             {context.length > 0 && (
               <div className="context-chips">
                 {context.map((entry) => (
-                  <button key={entry.id} onClick={() => setContext((items) => items.filter((item) => item.id !== entry.id))}>
+                  <Button variant="outline" key={entry.id} onClick={() => setContext((items) => items.filter((item) => item.id !== entry.id))}>
                     <span>◇</span>{entry.label}<b>×</b>
-                  </button>
+                  </Button>
                 ))}
               </div>
             )}
@@ -729,11 +740,11 @@ export function App() {
               <div className="attachment-previews" aria-label="Image attachments">
                 {images.map((image) => <div className="attachment-preview" key={image.id}>
                   <a href={image.previewUrl} target="_blank" rel="noreferrer"><img src={image.previewUrl} alt={image.name || "Pasted image"} /></a>
-                  <button type="button" aria-label={`Remove ${image.name || "image"}`} onClick={() => removeImage(image.id)}>×</button>
+                  <Button variant="outline" size="icon" type="button" aria-label={`Remove ${image.name || "image"}`} onClick={() => removeImage(image.id)}>×</Button>
                 </div>)}
               </div>
             )}
-            <textarea
+            <Textarea
               ref={promptRef}
               value={prompt}
               rows={2}
@@ -759,48 +770,60 @@ export function App() {
             <div className="composer-actions">
               <span className={`mode-badge ${mode.toLowerCase()}`}>{mode}</span>
               <div className="runtime-controls" aria-label="Pi runtime settings">
-                <button type="button" className={`runtime-chip variant-${settings?.variant || "loading"}`} disabled={!settings?.availableVariants.length} onClick={() => send({ type: "cycle_variant" })} title="Cycle Build / Plan (Shift+Tab)">
+                <Button variant="outline" type="button" className={`runtime-chip variant-${settings?.variant || "loading"}`} disabled={!settings?.availableVariants.length} onClick={() => send({ type: "cycle_variant" })} title="Cycle Build / Plan (Shift+Tab)">
                   <span>mode</span><strong>{settings?.variant || "loading"}</strong><kbd>⇧Tab</kbd>
-                </button>
-                <button type="button" className="runtime-chip" disabled={!thinkingSupported} onClick={() => send({ type: "cycle_thinking" })} title={thinkingSupported ? "Cycle reasoning effort (Ctrl+.)" : "This model does not support reasoning effort"}>
+                </Button>
+                <Button variant="outline" type="button" className="runtime-chip" disabled={!thinkingSupported} onClick={() => send({ type: "cycle_thinking" })} title={thinkingSupported ? "Cycle reasoning effort (Ctrl+.)" : "This model does not support reasoning effort"}>
                   <span>effort</span><strong>{thinkingSupported ? settings?.thinkingLevel : "n/a"}</strong><kbd>⌃.</kbd>
-                </button>
+                </Button>
               </div>
               <span className="muted composer-hint">↵ send · ⇧↵ newline · esc normal</span>
               <div className="action-buttons">
                 <label className="isolation-picker" title="auto uses root only for clearly read-only tasks">
                   isolation
-                  <select value={isolation} onChange={(event) => setIsolation(event.target.value as RequestedIsolationMode)}>
-                    <option value="auto">auto</option>
-                    <option value="worktree">worktree</option>
-                    <option value="root">root</option>
-                  </select>
+                  <Select value={isolation} onValueChange={(value) => setIsolation(value as RequestedIsolationMode)}>
+                    <SelectTrigger aria-label="Worker isolation"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">auto</SelectItem>
+                      <SelectItem value="worktree">worktree</SelectItem>
+                      <SelectItem value="root">root</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </label>
-                <button className="delegate-button" title={isPlan ? "Switch to Build mode to delegate" : undefined} disabled={(!prompt.trim() && !images.length) || isPlan} onClick={() => submit(true)}>Hand off</button>
-                <button className="send-button" disabled={!prompt.trim() && !images.length} onClick={() => submit(false)}>Send <span>↵</span></button>
+                <Button variant="outline" className="delegate-button" title={isPlan ? "Switch to Build mode to delegate" : undefined} disabled={(!prompt.trim() && !images.length) || isPlan} onClick={() => submit(true)}>Hand off</Button>
+                <Button className="send-button" disabled={!prompt.trim() && !images.length} onClick={() => submit(false)}>Send <span>↵</span></Button>
               </div>
             </div>
           </div>
         </section>
       </section>
 
-      {paletteOpen && (
-        <div className="palette-backdrop" onMouseDown={() => setPaletteOpen(false)}>
-          <div className="palette" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="palette-input"><span>⌕</span><input autoFocus value={paletteQuery} onChange={(event) => setPaletteQuery(event.target.value)} placeholder="Find threads, workers and commands…" /></div>
-            <div className="palette-results">
+      <CommandDialog open={paletteOpen} onOpenChange={setPaletteOpen} title="Command palette" description="Search threads, workers, and commands">
+        <Command
+          shouldFilter={false}
+          value={filteredPalette[paletteIndex]?.id || ""}
+          onValueChange={(value) => {
+            const index = filteredPalette.findIndex((entry) => entry.id === value);
+            if (index >= 0) setPaletteIndex(index);
+          }}
+        >
+          <CommandInput autoFocus value={paletteQuery} onValueChange={setPaletteQuery} placeholder="Find threads, workers and commands…" />
+          <CommandList>
+            <CommandEmpty>No matches.</CommandEmpty>
+            <CommandGroup>
               {filteredPalette.map((entry, index) => (
-                <button key={entry.id} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => { entry.action(); setPaletteOpen(false); }}>
+                <CommandItem key={entry.id} value={entry.id} onMouseEnter={() => setPaletteIndex(index)} onSelect={() => { entry.action(); setPaletteOpen(false); }}>
                   <span>{entry.label}</span><small>{entry.detail}</small>
-                </button>
+                </CommandItem>
               ))}
-            </div>
-          </div>
-        </div>
-      )}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </CommandDialog>
 
-      {error && <button className="error-toast" onClick={() => setError(undefined)}>{error}<span>×</span></button>}
+      {error && <Button variant="destructive" className="error-toast" onClick={() => setError(undefined)} aria-label={`${error}. Dismiss`}>{error}<span aria-hidden="true">×</span></Button>}
     </main>
+    </TooltipProvider>
   );
 }
 
