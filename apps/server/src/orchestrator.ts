@@ -498,7 +498,13 @@ export class Orchestrator {
       this.janitorTimer.unref();
     }
     if (this.maintenanceConfig.sweepIntervalMs > 0) {
-      this.sweepTimer = setInterval(() => this.scheduleBacklogSweep(), this.maintenanceConfig.sweepIntervalMs);
+      this.sweepTimer = setInterval(() => {
+        // A restored Pi session can become idle without emitting a fresh
+        // agent_settled event. Always retry durable wake delivery before the
+        // fallback sweep so completed handoffs cannot remain stranded.
+        this.coordinatorNotifications?.settled();
+        this.scheduleBacklogSweep();
+      }, this.maintenanceConfig.sweepIntervalMs);
       this.sweepTimer.unref();
       this.scheduleBacklogSweep();
     }
