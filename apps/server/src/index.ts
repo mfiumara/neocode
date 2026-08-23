@@ -107,7 +107,7 @@ websocket.on("connection", (client) => {
         else if (message.type === "cycle_thinking") orchestrator.cycleThinking();
         else if (message.type === "set_model") await orchestrator.setModel(message.model);
         else if (message.type === "refresh") send(client, { type: "snapshot", snapshot: orchestrator.snapshot() });
-        else if (message.type === "clean_now") await orchestrator.cleanNow();
+        else if (message.type === "clean_now") await orchestrator.cleanNow(true);
       } catch (error) {
         send(client, { type: "error", message: error instanceof Error ? error.message : String(error) });
       }

@@ -102,16 +102,19 @@ export class WorktreeJanitor {
 
     const commits = (await this.git(["rev-list", `${identity.baseRef}..${job.completion.head}`], this.workspaceRoot))
       .split("\n").filter(Boolean);
-    if (!commits.length) return refusal(job, "no_intended_commits", "No intended commits were recorded after the base.", checkedAt);
 
     const targetHead = await this.git(["rev-parse", this.options.targetRef], this.workspaceRoot);
-    let mergeMethod: CleanupEvidence["mergeMethod"] = "commit-ancestry";
-    let merged = true;
+    let mergeMethod: CleanupEvidence["mergeMethod"] = commits.length ? "commit-ancestry" : "no-changes";
+    // A clean branch with no commits after its immutable base contains no work
+    // to lose. This safely removes wrapper/recovery jobs that touched another
+    // checkout while retaining every branch with unique commits or dirty files.
+    let merged = commits.length === 0;
     for (const commit of commits) {
       if (!(await this.gitSuccess(["merge-base", "--is-ancestor", commit, targetHead], this.workspaceRoot))) {
         merged = false;
         break;
       }
+      merged = true;
     }
     if (!merged && await this.gitSuccess(["diff", "--quiet", job.completion.head, targetHead, "--"], this.workspaceRoot)) {
       merged = true;

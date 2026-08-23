@@ -77,7 +77,7 @@ export interface MaintenanceConfig {
   startup?: boolean;
 }
 
-const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge"];
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "reconcile_jobs", "clean_worktrees"];
 const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
 const VARIANTS: AgentVariant[] = ["build", "plan"];
 
@@ -244,7 +244,7 @@ export class Orchestrator {
     const loader = new DefaultResourceLoader({
       cwd: this.cwd,
       agentDir: getAgentDir(),
-      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, and only after final approval call guarded_merge. Every action_required event must be inspected for the exact command/output. For source, test, judge, conflict, or post-merge failures, quote specific diagnostics with request_worker_changes so the SAME worktree is resumed; await its new handoff, rerun CI, and launch a fresh judge. For a genuinely transient failure use retry_infrastructure. Never bypass bounded repair rounds; needs_attention requires reporting all evidence. Judges report to you and never merge. Conflicts must return to the same worker, be handed off, and be re-judged. Never ask a worker to mutate root/main. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
+      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, and only after final approval call guarded_merge. Every action_required event must be inspected for the exact command/output. For source, test, judge, conflict, or post-merge failures, quote specific diagnostics with request_worker_changes so the SAME worktree is resumed; await its new handoff, rerun CI, and launch a fresh judge. For a genuinely transient failure use retry_infrastructure. Never bypass bounded repair rounds; needs_attention requires reporting all evidence. Judges report to you and never merge. Conflicts must return to the same worker, be handed off, and be re-judged. Never ask a worker to mutate root/main. After a guarded merge, call reconcile_jobs so externally or previously integrated workers move to Done, then clean_worktrees to safely remove only clean, Git-verified worktrees. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
 
     });
     await loader.reload();
@@ -321,6 +321,23 @@ export class Orchestrator {
         parameters: Type.Object({ jobId: Type.String() }),
         execute: async (_callId: string, params: { jobId: string }) => { this.completionPipeline.requestMerge(this.requireJob(params.jobId)); return { content: [{ type: "text" as const, text: `Coordinator authorized guarded merge for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
       },
+      {
+        name: "reconcile_jobs", label: "Reconcile jobs", description: "Verify completed worker commits against main and move proven integrated or no-op jobs to Done.",
+        parameters: Type.Object({}),
+        execute: async () => {
+          const result = await this.reconcileIntegratedJobs();
+          return { content: [{ type: "text" as const, text: `Reconciled ${result.integrated} integrated and ${result.noOp} no-op jobs; ${result.pending} still have unique work.` }], details: result };
+        },
+      },
+      {
+        name: "clean_worktrees", label: "Clean worktrees", description: "Remove clean worktrees only after Git proves their work is integrated or empty. Bypasses the observation grace period but never safety checks.",
+        parameters: Type.Object({}),
+        execute: async () => {
+          await this.reconcileIntegratedJobs();
+          await this.cleanNow(true);
+          return { content: [{ type: "text" as const, text: `Verified worktree cleanup finished: ${this.maintenance.removed || 0} removed, ${this.maintenance.refused || 0} retained.` }], details: { ...this.maintenance } };
+        },
+      },
     ];
 
     const coordinatorSessionDir = join(this.stateStore.root, "pi-sessions", "coordinator");
@@ -354,6 +371,7 @@ export class Orchestrator {
       judge: (job, diff, diffSha256) => this.runJudge(job, diff, diffSha256),
     });
     this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock);
+    await this.reconcileIntegratedJobs(targetBranch);
     this.coordinatorNotifications = new CoordinatorNotificationQueue(this.notificationState, {
       append: (event) => this.appendCoordinatorWorkerEvent(event),
       persist: () => this.persist(),
@@ -952,18 +970,87 @@ export class Orchestrator {
     return this.operationLock.run(operation);
   }
 
-  cleanNow(): Promise<void> {
-    this.startCleanup("manual");
+  /**
+   * Reconcile durable worker records with Git instead of trusting stale review
+   * labels. This repairs jobs integrated externally, by an older harness, or as
+   * patch-equivalent commits, and safely classifies clean no-op wrapper jobs.
+   */
+  private async reconcileIntegratedJobs(targetRef = process.env.NEOCODE_MERGE_BRANCH || "main"):
+    Promise<{ integrated: number; noOp: number; pending: number }> {
+    const result = { integrated: 0, noOp: 0, pending: 0 };
+    const targetHead = await this.git(["rev-parse", targetRef]);
+
+    for (const job of this.jobs.values()) {
+      if (job.status !== "completed" || job.isolation.mode !== "worktree"
+        || job.integration?.status === "merged" || this.workers.has(job.id)) continue;
+      try {
+        const porcelain = await this.gitAt(["status", "--porcelain=v1", "--untracked-files=all"], job.isolation.path);
+        if (porcelain) { result.pending += 1; continue; }
+        const branch = await this.gitAt(["branch", "--show-current"], job.isolation.path);
+        if (branch !== job.branch) { result.pending += 1; continue; }
+        const actualHead = await this.gitAt(["rev-parse", "HEAD"], job.isolation.path);
+        const commits = (await this.git(["rev-list", "--reverse", `${job.baseRef}..${actualHead}`]))
+          .split("\n").filter(Boolean);
+        let integrated = commits.length === 0;
+        if (!integrated) {
+          const cherry = await this.git(["cherry", targetRef, actualHead]).catch(() => "");
+          const equivalent = new Set(cherry.split("\n")
+            .filter((line) => line.startsWith("- "))
+            .map((line) => line.slice(2).trim()));
+          integrated = true;
+          for (const commit of commits) {
+            const ancestor = await execFileAsync("git", ["merge-base", "--is-ancestor", commit, targetHead], { cwd: this.cwd })
+              .then(() => true, () => false);
+            if (!ancestor && !equivalent.has(commit)) { integrated = false; break; }
+          }
+        }
+        if (!integrated) { result.pending += 1; continue; }
+
+        const now = Date.now();
+        job.completion = { head: actualHead, finishedAt: job.completion?.finishedAt || now };
+        job.integration = {
+          status: "merged", targetRef, verifiedAt: now,
+          targetHead, completionHead: actualHead,
+        };
+        if (job.review) {
+          job.review.status = "merged";
+          job.review.mergeCommit = targetHead;
+          job.review.updatedAt = now;
+          delete job.review.error;
+          job.review.transitions.push({
+            status: "merged", at: now, owner: "server",
+            detail: commits.length
+              ? "Git reconciliation proved every worker commit is integrated or patch-equivalent."
+              : "Git reconciliation proved this clean wrapper job contains no unique commits.",
+          });
+        }
+        delete job.cleanup;
+        job.updatedAt = now;
+        this.publishJob(job);
+        if (commits.length) result.integrated += 1;
+        else result.noOp += 1;
+      } catch {
+        result.pending += 1;
+      }
+    }
+    return result;
+  }
+
+  cleanNow(ignoreGrace = false): Promise<void> {
+    this.startCleanup("manual", ignoreGrace);
     return this.janitorRun ?? Promise.resolve();
   }
 
-  private startCleanup(source: "startup" | "scheduled" | "manual"): void {
+  private startCleanup(source: "startup" | "scheduled" | "manual", ignoreGrace = false): void {
     if (this.janitorRun) return;
     this.janitorRun = this.operationLock.run(async () => {
       this.maintenance = { state: "running", source };
       this.emit({ type: "maintenance_updated", maintenance: { ...this.maintenance } });
       try {
-        const result = await this.janitor.run(this.listJobs(), (job) => this.publishJob(job));
+        const janitor = ignoreGrace
+          ? new WorktreeJanitor(this.cwd, { graceMs: 0, targetRef: this.maintenanceConfig.targetRef })
+          : this.janitor;
+        const result = await janitor.run(this.listJobs(), (job) => this.publishJob(job));
         this.maintenance = { state: "idle", source, lastRunAt: Date.now(), ...result };
       } catch (error) {
         this.maintenance = {

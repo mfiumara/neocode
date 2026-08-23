@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -121,9 +121,11 @@ test("refuses jobs before grace and jobs missing durable completion metadata", a
   });
 });
 
-test("refuses a completed branch with no intended commits", async () => {
-  await withFixture({ commit: false }, async ({ root, job }) => {
-    assert.equal(await janitor(root).review(job), false);
-    assert.equal(reason(job), "no_intended_commits");
+test("removes a clean completed no-op wrapper without risking unique work", async () => {
+  await withFixture({ commit: false }, async ({ root, worktree, job }) => {
+    assert.equal(await janitor(root).review(job), true);
+    assert.equal(job.cleanup?.status, "removed");
+    if (job.cleanup?.status === "removed") assert.equal(job.cleanup.evidence.mergeMethod, "no-changes");
+    assert.equal(await stat(worktree).then(() => true, () => false), false);
   });
 });
