@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TranscriptMessage } from "@neocode/protocol";
-import { appendUnique } from "./transcript";
-import { promptStateLabel } from "./transcriptMessages";
+import { appendUnique, reconcileWindow } from "./transcript";
+import { promptStateLabel, reconcilePromptSettlement } from "./transcriptMessages";
 
 const message = (id: string, timestamp: number, promptState?: TranscriptMessage["promptState"]): TranscriptMessage =>
   ({ id, role: "user", text: id, timestamp, promptState });
@@ -21,6 +21,29 @@ test("multiple queued prompts retain server ordering and settled updates do not 
   rows = appendUnique(rows, message("first", 10));
   assert.deepEqual(rows.map((entry) => entry.id), ["first", "second"]);
   assert.equal(rows[0]?.promptState, undefined);
+});
+
+test("disjoint reconnect clears paged-out pending state without dropping cached ranges", () => {
+  const cached = [message("old", 1), message("paged-out", 2, "queued"), message("cached-tail", 3)];
+  const server = [message("server-tail", 6), message("newer-active", 7, "queued")];
+  const window = reconcileWindow(
+    { messages: cached, page: { oldestCursor: "old", hasOlder: true } },
+    { messages: server, page: { oldestCursor: "server-tail", hasOlder: true } },
+  );
+  const reconciled = reconcilePromptSettlement(window.messages, { throughTimestamp: 2, failures: [] });
+  assert.deepEqual(reconciled.map((entry) => entry.id), ["old", "paged-out", "cached-tail", "server-tail", "newer-active"]);
+  assert.equal(reconciled[1]?.promptState, undefined);
+  assert.equal(reconciled[4]?.promptState, "queued");
+  assert.equal(window.page?.oldestCursor, "server-tail", "the disjoint gap cursor remains authoritative");
+});
+
+test("bounded settlement authority preserves recent correlated failures", () => {
+  const reconciled = reconcilePromptSettlement([message("failed", 2, "processing")], {
+    throughTimestamp: 2,
+    failures: [{ messageId: "failed", error: "backend failed" }],
+  });
+  assert.equal(reconciled[0]?.promptState, "failed");
+  assert.equal(reconciled[0]?.promptError, "backend failed");
 });
 
 test("prompt lifecycle labels distinguish pending, processing, and failure", () => {

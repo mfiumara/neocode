@@ -26,6 +26,7 @@ import {
   type ModelChoice,
   type ModelRef,
   type MaintenanceStatus,
+  type PromptSettlementSnapshot,
   type RequestedIsolationMode,
   type ServerMessage,
   type TranscriptMessage,
@@ -183,6 +184,7 @@ export class Orchestrator {
   private promptDrain?: Promise<void>;
   private activeCoordinatorPromptId?: string;
   private promptResponseCheckpoint?: { messageId: string; flushed: Promise<void> };
+  private promptSettlement: PromptSettlementSnapshot = { throughTimestamp: 0, failures: [] };
   private readonly coordinatorActivityHistory: AgentActivity[] = [];
   private readonly coordinatorTimeline = new ActivityTimeline(undefined, this.coordinatorActivityHistory);
   private readonly piSessionFiles = new Map<string, string>();
@@ -250,7 +252,14 @@ export class Orchestrator {
         ...entry,
         context: [...entry.context],
       })));
+      this.promptSettlement = structuredClone(restored.coordinator.promptSettlement || this.promptSettlement);
+      const respondedTimestamps = this.pendingCoordinatorPrompts
+        .filter((entry) => entry.state === "responded")
+        .map((entry) => entry.createdAt);
       reconcileRestoredPromptStates(this.coordinatorMessages, this.pendingCoordinatorPrompts);
+      if (respondedTimestamps.length) this.promptSettlement.throughTimestamp = Math.max(
+        this.promptSettlement.throughTimestamp, ...respondedTimestamps,
+      );
       this.coordinatorActivityHistory.push(...(restored.coordinator.activityHistory || []).map(normalizeActivityTiming));
       if (restored.coordinator.activity) {
         const completedAt = Date.now();
@@ -505,6 +514,7 @@ export class Orchestrator {
         activityHistory: [...this.coordinatorActivityHistory],
         messages: coordinatorWindow.messages,
         transcriptPage: coordinatorWindow.page,
+        promptSettlement: structuredClone(this.promptSettlement),
         settings: this.settings(),
         model: this.currentModel(),
         models: this.modelChoices(),
@@ -547,6 +557,16 @@ export class Orchestrator {
     this.coordinatorMessages.push(userMessage);
     this.pendingCoordinatorPrompts.push(pending);
     this.persist();
+    try {
+      // Queue acknowledgement is acceptance truth, so it must never race the
+      // atomic durable write that makes this prompt recoverable.
+      await this.stateStore.flush();
+    } catch (error) {
+      this.pendingCoordinatorPrompts.splice(this.pendingCoordinatorPrompts.indexOf(pending), 1);
+      this.coordinatorMessages.splice(this.coordinatorMessages.indexOf(userMessage), 1);
+      this.persist();
+      throw error;
+    }
     this.emit({ type: "coordinator_message", message: { ...userMessage } });
     this.schedulePromptDrain();
   }
@@ -590,6 +610,7 @@ export class Orchestrator {
         if (this.promptResponseCheckpoint?.messageId === pending.messageId) await this.promptResponseCheckpoint.flushed;
         this.pendingCoordinatorPrompts.shift();
         settlePrompt(message);
+        this.recordPromptSettlement(message);
         this.activeCoordinatorPromptId = undefined;
         this.promptResponseCheckpoint = undefined;
         this.persist();
@@ -600,6 +621,7 @@ export class Orchestrator {
         this.promptResponseCheckpoint = undefined;
         const promptError = error instanceof Error ? error.message : String(error);
         settlePrompt(message, promptError);
+        this.recordPromptSettlement(message, promptError);
         this.persist();
         this.emit({ type: "coordinator_message_updated", message: { ...message } });
         this.emit({ type: "coordinator_prompt_failed", messageId: message.id, error: promptError });
@@ -613,6 +635,13 @@ export class Orchestrator {
       this.coordinatorNotifications?.settled();
       this.scheduleBacklogSweep();
     }
+  }
+
+  private recordPromptSettlement(message: TranscriptMessage, error?: string): void {
+    this.promptSettlement.throughTimestamp = Math.max(this.promptSettlement.throughTimestamp, message.timestamp);
+    this.promptSettlement.failures = this.promptSettlement.failures.filter((entry) => entry.messageId !== message.id);
+    if (error) this.promptSettlement.failures.push({ messageId: message.id, error });
+    this.promptSettlement.failures = this.promptSettlement.failures.slice(-100);
   }
 
   async abort(): Promise<void> {
@@ -850,8 +879,10 @@ export class Orchestrator {
   private bindCoordinator(): void {
     let streaming: TranscriptMessage | undefined;
     let emitted = false;
+    let lastAssistantMessageId: string | undefined;
     this.coordinator.subscribe((event) => {
       if (event.type === "agent_start") {
+        lastAssistantMessageId = undefined;
         this.coordinatorStatus = "running";
         this.persist();
         this.emit({ type: "coordinator_status", status: "running" });
@@ -895,12 +926,8 @@ export class Orchestrator {
             this.emit({ type: "coordinator_message", message: { ...streaming } });
           } else this.emit({ type: "coordinator_message_updated", message: { ...streaming } });
         }
-        const pending = this.pendingCoordinatorPrompts[0];
-        if (pending?.messageId === this.activeCoordinatorPromptId && pending.state === "processing") {
-          checkpointPromptResponse(pending, streaming.id);
-          this.persist();
-          this.promptResponseCheckpoint = { messageId: pending.messageId, flushed: this.stateStore.flush() };
-        } else this.persist();
+        lastAssistantMessageId = streaming.id;
+        this.persist();
         streaming = undefined;
         emitted = false;
       } else if (event.type === "agent_settled") {
@@ -909,7 +936,14 @@ export class Orchestrator {
           this.emit({ type: "coordinator_status", status: "idle" });
         }
         this.setCoordinatorActivity(undefined, this.coordinatorAborting ? "aborted" : "completed");
-        this.persist();
+        const pending = this.pendingCoordinatorPrompts[0];
+        if (!this.coordinatorAborting && pending?.messageId === this.activeCoordinatorPromptId && pending.state === "processing") {
+          // Only agent settlement proves the assistant/tool loop is complete;
+          // intermediate assistant message_end events may merely request tools.
+          checkpointPromptResponse(pending, lastAssistantMessageId);
+          this.persist();
+          this.promptResponseCheckpoint = { messageId: pending.messageId, flushed: this.stateStore.flush() };
+        } else this.persist();
         if (this.pendingCoordinatorPrompts.length) this.schedulePromptDrain();
         else {
           this.coordinatorNotifications?.settled();
@@ -1526,6 +1560,7 @@ export class Orchestrator {
         activityHistory: [...this.coordinatorActivityHistory],
         piSessionFile: this.coordinatorSessionFile,
         pendingPrompts: structuredClone(this.pendingCoordinatorPrompts),
+        promptSettlement: structuredClone(this.promptSettlement),
       },
       maintenance: { ...this.maintenance },
       coordinatorNotifications: structuredClone(this.notificationState),

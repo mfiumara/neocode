@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AgentActivity, AgentJob, MaintenanceStatus, TranscriptMessage } from "@neocode/protocol";
+import type { AgentActivity, AgentJob, MaintenanceStatus, PromptSettlementSnapshot, TranscriptMessage } from "@neocode/protocol";
 
 
 export const RUNTIME_STATE_VERSION = 1;
@@ -58,6 +58,7 @@ export interface DurableRuntimeState {
     piSessionFile?: string;
     /** Prompts accepted by the server but not yet settled by the coordinator. */
     pendingPrompts?: DurableCoordinatorPrompt[];
+    promptSettlement?: PromptSettlementSnapshot;
   };
   maintenance?: MaintenanceStatus;
   coordinatorNotifications?: CoordinatorNotificationState;
@@ -81,6 +82,10 @@ function isRuntimeState(value: unknown, workspaceRoot: string): value is Durable
     && !!candidate.coordinator
     && Array.isArray(candidate.coordinator.messages)
     && candidate.coordinator.messages.every((message) => !!message && typeof message.id === "string" && typeof message.text === "string")
+    && (candidate.coordinator.promptSettlement === undefined || (typeof candidate.coordinator.promptSettlement.throughTimestamp === "number"
+      && Array.isArray(candidate.coordinator.promptSettlement.failures)
+      && candidate.coordinator.promptSettlement.failures.every((failure) => !!failure
+        && typeof failure.messageId === "string" && typeof failure.error === "string")))
     && (candidate.coordinator.pendingPrompts === undefined || (Array.isArray(candidate.coordinator.pendingPrompts)
       && candidate.coordinator.pendingPrompts.every((prompt) => !!prompt
         && typeof prompt.messageId === "string"

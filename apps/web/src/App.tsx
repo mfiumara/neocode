@@ -16,7 +16,7 @@ import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
 import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
 import { presentIdentifierText, presentTranscriptMessage, shortReference } from "./transcriptPresentation";
-import { promptStateLabel } from "./transcriptMessages";
+import { promptStateLabel, reconcilePromptSettlement } from "./transcriptMessages";
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
 
@@ -222,7 +222,10 @@ export function App() {
             { messages: current.coordinator.messages, page: current.coordinator.transcriptPage },
             { messages: message.snapshot.coordinator.messages, page: message.snapshot.coordinator.transcriptPage },
           );
-          const coordinatorMessages = uncertain.reduce(appendUnique, reconciledCoordinator.messages);
+          const coordinatorMessages = reconcilePromptSettlement(
+            uncertain.reduce(appendUnique, reconciledCoordinator.messages),
+            message.snapshot.coordinator.promptSettlement,
+          );
           return {
             ...message.snapshot,
             coordinator: {

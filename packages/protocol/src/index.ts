@@ -176,6 +176,12 @@ export interface WorkerEventPresentation {
 }
 
 export type PromptState = "sending" | "queued" | "processing" | "failed";
+export interface PromptSettlementSnapshot {
+  /** All FIFO prompts at or before this timestamp are terminal. */
+  throughTimestamp: number;
+  /** Bounded recent failure tombstones; other terminal prompts settled normally. */
+  failures: Array<{ messageId: string; error: string }>;
+}
 
 export interface TranscriptMessage {
   id: string;
@@ -336,6 +342,8 @@ export interface AppSnapshot {
     activityHistory: AgentActivity[];
     messages: TranscriptMessage[];
     transcriptPage?: TranscriptPageInfo;
+    /** Bounded authority for reconciling lifecycle state in cached older pages. */
+    promptSettlement?: PromptSettlementSnapshot;
     settings: AgentSettings;
     model: ModelRef | null;
     models: ModelChoice[];

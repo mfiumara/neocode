@@ -45,11 +45,15 @@ test("orchestrator queues genuinely busy prompts durably and drains FIFO exactly
   const root = await mkdtemp(join(tmpdir(), "neocode-orchestrator-prompts-"));
   const events: ServerMessage[] = [];
   const calls: string[] = [];
+  let savedGeneration = 0;
+  let flushedGeneration = 0;
   const releases: Array<() => void> = [];
   let active = 0;
   let maxActive = 0;
+  let notify: ((event: unknown) => void) | undefined;
   const coordinator = {
     isIdle: true,
+    subscribe(listener: (event: unknown) => void) { notify = listener; return () => undefined; },
     async prompt(content: string): Promise<void> {
       calls.push(content.split("\n", 1)[0]!);
       active += 1;
@@ -68,12 +72,23 @@ test("orchestrator queues genuinely busy prompts durably and drains FIFO exactly
     coordinatorMessages: TranscriptMessage[];
     pendingCoordinatorPrompts: DurableCoordinatorPrompt[];
     stateStore: RuntimeStateStore;
+    bindCoordinator(): void;
   };
 
   try {
-    const orchestrator = new Orchestrator(root, (event) => events.push(event), { startup: false, intervalMs: 0, sweepIntervalMs: 0 });
+    const orchestrator = new Orchestrator(root, (event) => {
+      if (event.type === "coordinator_message" && event.message.role === "user") {
+        assert.equal(flushedGeneration, savedGeneration, "durable queue flush precedes accepted transcript acknowledgement");
+      }
+      events.push(event);
+    }, { startup: false, intervalMs: 0, sweepIntervalMs: 0 });
     const harness = orchestrator as unknown as Harness;
     harness.coordinator = coordinator;
+    const durableSave = harness.stateStore.save.bind(harness.stateStore);
+    harness.stateStore.save = (state) => { savedGeneration += 1; durableSave(state); };
+    const durableFlush = harness.stateStore.flush.bind(harness.stateStore);
+    harness.stateStore.flush = async () => { await durableFlush(); flushedGeneration = savedGeneration; };
+    harness.bindCoordinator();
 
     await orchestrator.prompt("first", [], [], "prompt-1");
     await orchestrator.prompt("second", [], [], "prompt-2");
@@ -86,6 +101,18 @@ test("orchestrator queues genuinely busy prompts durably and drains FIFO exactly
     assert.deepEqual(harness.pendingCoordinatorPrompts.map((entry) => entry.messageId), ["prompt-1", "prompt-2", "prompt-3"]);
     assert.equal(calls.length, 1, "busy coordinator starts only the queue head");
     assert.equal(events.filter((event) => event.type === "coordinator_message").length, 3, "each accepted prompt is immediately visible once");
+
+    notify?.({ type: "message_start", message: { role: "assistant", content: [] } });
+    notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: {} }] } });
+    notify?.({ type: "tool_execution_start", toolName: "read", args: {} });
+    assert.equal(harness.pendingCoordinatorPrompts[0]?.state, "processing", "intermediate assistant/tool work is not completed");
+    notify?.({ type: "tool_execution_end", toolName: "read", isError: false });
+    notify?.({ type: "message_start", message: { role: "assistant", content: [] } });
+    notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "final" }] } });
+    assert.equal(harness.pendingCoordinatorPrompts[0]?.state, "processing", "even a message end awaits authoritative agent settlement");
+    coordinator.isIdle = true;
+    notify?.({ type: "agent_settled" });
+    assert.equal(harness.pendingCoordinatorPrompts[0]?.state, "responded");
 
     releases.shift()?.();
     await waitFor(() => calls.length === 2);
@@ -104,7 +131,7 @@ test("orchestrator queues genuinely busy prompts durably and drains FIFO exactly
     assert.ok(harness.coordinatorMessages.every((entry) => entry.promptState === undefined));
     const restored = await new RuntimeStateStore(root).load();
     assert.deepEqual(restored?.coordinator.pendingPrompts, []);
-    assert.deepEqual(restored?.coordinator.messages.map((entry) => entry.id), ["prompt-1", "prompt-2", "prompt-3"]);
+    assert.deepEqual(restored?.coordinator.messages.filter((entry) => entry.role === "user").map((entry) => entry.id), ["prompt-1", "prompt-2", "prompt-3"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
