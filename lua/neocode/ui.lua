@@ -84,74 +84,14 @@ function M.select(items, opts, on_choice)
   local top = math.floor((vim.o.lines - total_h) / 2)
   local left = math.floor((vim.o.columns - total_w) / 2)
 
+  local title = opts.prompt and clip(opts.prompt, math.max(list_w - 6, 10)) or nil
+
+  local prompt_win, list_win, preview_win
   local prompt_buf = vim.api.nvim_create_buf(false, true)
   local list_buf = vim.api.nvim_create_buf(false, true)
   local preview_buf = has_preview and vim.api.nvim_create_buf(false, true) or nil
 
-  local function open_win(buf, cfg)
-    cfg.relative = "editor"
-    cfg.style = "minimal"
-    cfg.title_pos = "center"
-    vim.api.nvim_buf_set_name(buf, "")
-    return vim.api.nvim_open_win(buf, false, cfg)
-  end
-
-  local title = opts.prompt and clip(opts.prompt, math.max(list_w - 6, 10)) or nil
-  local prompt_win = open_win(prompt_buf, {
-    row = top + 1,
-    col = left + 1,
-    width = list_w,
-    height = 1,
-    border = PROMPT_BORDER,
-    title = title and (" " .. title .. " ") or nil,
-    zindex = 60,
-  })
-  local list_win = open_win(list_buf, {
-    row = top + 3,
-    col = left + 1,
-    width = list_w,
-    height = height,
-    border = LIST_BORDER,
-    zindex = 61,
-  })
-  local preview_win
-  if has_preview then
-    preview_win = open_win(preview_buf, {
-      row = top + 1,
-      col = left + list_w + 2,
-      width = prev_w,
-      height = height + 2,
-      border = PREVIEW_BORDER,
-      title = " Preview ",
-      zindex = 62,
-    })
-    vim.wo[preview_win].wrap = false
-  end
-
-  vim.api.nvim_open_win(prompt_buf, true, {
-    enter = true,
-    relative = "editor",
-    row = top + 1,
-    col = left + 1,
-    width = list_w,
-    height = 1,
-    border = PROMPT_BORDER,
-    title = title and (" " .. title .. " ") or nil,
-    title_pos = "center",
-    style = "minimal",
-    zindex = 60,
-  })
-
-  for _, w in ipairs({ prompt_win, list_win, preview_win }) do
-    if w then
-      vim.wo[w].winblend = 8
-      vim.wo[w].cursorline = false
-    end
-  end
-  vim.wo[list_win].cursorline = true
-  vim.api.nvim_win_close(prompt_win, true)
-  prompt_win = nil
-
+  local query = ""
   local view = {}
 
   local function set_lines(buf, lines)
@@ -161,14 +101,14 @@ function M.select(items, opts, on_choice)
   end
 
   local function render_list()
+    if not vim.api.nvim_buf_is_valid(list_buf) then return end
     vim.api.nvim_buf_clear_namespace(list_buf, NS, 0, -1)
-    local out = {}
     if #view == 0 then
-      out[1] = "  no matches"
-      set_lines(list_buf, out)
-      vim.api.nvim_buf_set_extmark(list_buf, NS, 0, 0, { end_col = #out[1], hl_group = "NeocodeDimText" })
+      set_lines(list_buf, { "  no matches" })
+      vim.api.nvim_buf_set_extmark(list_buf, NS, 0, 0, { end_col = 12, hl_group = "NeocodeDimText" })
       return
     end
+    local out = {}
     for row, idx in ipairs(view) do
       out[row] = "  " .. clip(labels[idx], list_w - 2)
     end
@@ -176,22 +116,28 @@ function M.select(items, opts, on_choice)
     if query ~= "" then
       local ok, res = pcall(vim.fn.matchfuzzypos, labels, query)
       if ok and type(res) == "table" and type(res[2]) == "table" then
-        local used = {}
-        local row_of = {}
+        local row_of, used = {}, {}
         for r, idx in ipairs(view) do row_of[idx] = r end
-        for k, matched in ipairs(res[1]) do
+        for k, matched in ipairs(res[1] or {}) do
           for i, lab in ipairs(labels) do
             if lab == matched and not used[i] then
               used[i] = true
               local r = row_of[i]
-              if r then
+              local rendered = r and out[r]
+              if rendered then
                 for _, p in ipairs(res[2][k] or {}) do
                   local b = vim.fn.byteidx(lab, p)
-                  local b2 = p + 1 >= #lab and #lab or vim.fn.byteidx(lab, p + 1)
-                  vim.api.nvim_buf_set_extmark(list_buf, NS, r - 1, b + 2, {
-                    end_col = b2 + 2,
-                    hl_group = "NeocodeFuzzyMatch",
-                  })
+                  if b and b >= 0 then
+                    local nxt = vim.fn.byteidx(lab, p + 1)
+                    if not nxt or nxt < 0 then nxt = #lab end
+                    local c0, c1 = b + 2, math.min(nxt + 2, #rendered)
+                    if c0 < c1 then
+                      vim.api.nvim_buf_set_extmark(list_buf, NS, r - 1, c0, {
+                        end_col = c1,
+                        hl_group = "NeocodeFuzzyMatch",
+                      })
+                    end
+                  end
                 end
               end
               break
@@ -211,27 +157,21 @@ function M.select(items, opts, on_choice)
   end
 
   local function render_preview()
-    if not preview_buf then return end
+    if not preview_buf or not vim.api.nvim_buf_is_valid(preview_buf) then return end
     local hv = hovered()
-    local out
-    if not hv then
-      out = {}
-    else
+    local out = {}
+    if hv then
       local ok, res = pcall(preview_fn, hv.item)
       if ok and type(res) == "table" then
-        out = {}
         for _, l in ipairs(res) do
-          out[#out + 1] = tostring(l)
+          out[#out + 1] = clip(tostring(l), prev_w)
         end
         if #out == 0 then out[1] = "" end
       elseif ok then
-        out = { tostring(res) }
+        out = { clip(tostring(res), prev_w) }
       else
         out = { "(preview error)" }
       end
-    end
-    for i, l in ipairs(out) do
-      out[i] = clip(l, prev_w)
     end
     set_lines(preview_buf, out)
     if preview_win and vim.api.nvim_win_is_valid(preview_win) then
@@ -239,8 +179,6 @@ function M.select(items, opts, on_choice)
       pcall(vim.api.nvim_win_set_config, preview_win, { title = " " .. t .. " ", title_pos = "center" })
     end
   end
-
-  local query = ""
 
   local function apply_filter()
     view = {}
@@ -278,6 +216,9 @@ function M.select(items, opts, on_choice)
     render_preview()
   end
 
+  local finished = false
+  local augroup = vim.api.nvim_create_augroup("", { clear = true })
+
   local help_state = { win = nil, buf = nil, ns = nil }
 
   local function close_help()
@@ -295,23 +236,26 @@ function M.select(items, opts, on_choice)
     help_state.buf = nil
   end
 
-  local finished = false
-  local augroup = vim.api.nvim_create_augroup("", { clear = true })
-
   local function finish(choice)
     if finished then return end
     finished = true
     close_help()
-    pcall(vim.api.nvim_clear_autocmds, { group = augroup, buffer = prompt_buf })
-    for _, w in ipairs({ preview_win, list_win, prompt_focus_win }) do
+    pcall(vim.api.nvim_clear_autocmds, { group = augroup })
+    for _, w in ipairs({ preview_win, list_win }) do
       if w and vim.api.nvim_win_is_valid(w) then
         pcall(vim.api.nvim_win_close, w, true)
       end
     end
-    for _, b in ipairs({ preview_buf, list_buf, prompt_buf }) do
+    for _, b in ipairs({ preview_buf, list_buf }) do
       if b and vim.api.nvim_buf_is_valid(b) then
         pcall(vim.api.nvim_buf_delete, b, { force = true })
       end
+    end
+    if vim.api.nvim_win_is_valid(prompt_win) then
+      pcall(vim.api.nvim_win_close, prompt_win, true)
+    end
+    if vim.api.nvim_buf_is_valid(prompt_buf) then
+      pcall(vim.api.nvim_buf_delete, prompt_buf, { force = true })
     end
     on_choice(choice)
   end
@@ -321,15 +265,11 @@ function M.select(items, opts, on_choice)
     finish(hv and hv.item or nil)
   end
 
-  local function map(modes, lhs, rhs)
-    vim.keymap.set(modes, lhs, rhs, { buffer = prompt_buf, silent = true, nowait = true })
-  end
-
-  map("n", "<CR>", pick)
-  map("n", "q", function() finish(nil) end)
-  map("n", "<Esc>", function() finish(nil) end)
-  map("n", "?", function()
-    if help_state.win then close_help() return end
+  local function toggle_help()
+    if help_state.win then
+      close_help()
+      return
+    end
     local hbuf, rows = help_buffer(actions)
     local hw = 0
     for _, r in ipairs(rows) do
@@ -355,7 +295,16 @@ function M.select(items, opts, on_choice)
       if key and key:byte() == 128 then return end
       close_help()
     end, ns)
-  end)
+  end
+
+  local function map(modes, lhs, rhs)
+    vim.keymap.set(modes, lhs, rhs, { buffer = prompt_buf, silent = true, nowait = true })
+  end
+
+  map("n", "<CR>", pick)
+  map("n", "q", function() finish(nil) end)
+  map("n", "<Esc>", function() finish(nil) end)
+  map("n", "?", toggle_help)
   map("n", "j", function() move(1) end)
   map("n", "k", function() move(-1) end)
   map({ "n", "i" }, "<Down>", function() move(1) end)
@@ -370,10 +319,63 @@ function M.select(items, opts, on_choice)
     end)
   end
 
+  prompt_win = vim.api.nvim_open_win(prompt_buf, true, {
+    relative = "editor",
+    row = top + 1,
+    col = left + 1,
+    width = list_w,
+    height = 1,
+    style = "minimal",
+    border = PROMPT_BORDER,
+    title = title and (" " .. title .. " ") or nil,
+    title_pos = "center",
+    zindex = 60,
+  })
+  vim.wo[prompt_win].winblend = 8
+
+  list_win = vim.api.nvim_open_win(list_buf, false, {
+    relative = "editor",
+    row = top + 3,
+    col = left + 1,
+    width = list_w,
+    height = height,
+    style = "minimal",
+    border = LIST_BORDER,
+    zindex = 61,
+  })
+  vim.wo[list_win].winblend = 8
+  vim.wo[list_win].cursorline = true
+
+  if has_preview then
+    preview_win = vim.api.nvim_open_win(preview_buf, false, {
+      relative = "editor",
+      row = top + 1,
+      col = left + list_w + 2,
+      width = prev_w,
+      height = height + 2,
+      style = "minimal",
+      border = PREVIEW_BORDER,
+      title = " Preview ",
+      title_pos = "center",
+      focusable = false,
+      zindex = 62,
+    })
+    vim.wo[preview_win].wrap = false
+    vim.wo[preview_win].winblend = 8
+  end
+
+  vim.api.nvim_buf_set_extmark(prompt_buf, NS, 0, 0, {
+    id = 1,
+    virt_text = { { "> ", "NeocodePromptPrefix" } },
+    virt_text_pos = "inline",
+    right_gravity = false,
+  })
+
   vim.api.nvim_create_autocmd({ "TextChangedI", "TextChanged" }, {
     group = augroup,
     buffer = prompt_buf,
     callback = function()
+      if not vim.api.nvim_buf_is_valid(prompt_buf) then return end
       query = vim.trim(vim.api.nvim_buf_get_lines(prompt_buf, 0, 1, false)[1] or "")
       apply_filter()
     end,
@@ -389,11 +391,12 @@ function M.select(items, opts, on_choice)
 
   vim.api.nvim_create_autocmd("WinClosed", {
     group = augroup,
-    pattern = tostring(prompt_focus_win),
+    pattern = tostring(prompt_win),
     once = true,
     callback = function() finish(nil) end,
   })
 
+  apply_filter()
   vim.cmd("startinsert")
 end
 
