@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentJob, TranscriptMessage } from "@neocode/protocol";
-import { ReviewView, TechnicalEvidence } from "./App";
+import { ReviewView, TechnicalEvidence, TranscriptMessageBody } from "./App";
 import { presentTranscriptMessage } from "./transcriptPresentation";
 
 const jobId = "9b361a1b-625f-4ea7-83fd-29f4e0b942fe";
@@ -47,6 +47,53 @@ test("unknown lifecycle IDs have a readable short-reference fallback", () => {
   assert.match(presentation.technical || "", new RegExp(unknownId));
 });
 
+test("known IDs resolve in lifecycle sentences that do not match a fixed template", () => {
+  const message: TranscriptMessage = {
+    id: "completion", role: "assistant", timestamp: 4,
+    text: `Worker ${jobId} completed successfully`,
+  };
+  const presentation = presentTranscriptMessage(message, [job()]);
+
+  assert.equal(presentation.primary, "Worker Clean composer focus completed successfully");
+  assert.equal(presentation.secondary, "Clean composer focus · 9b361a1b");
+  assert.equal(presentation.technical, message.text);
+});
+
+test("ordinary system and tool text shortens commit, diff, and fingerprint hashes", () => {
+  const commit = "ab1234567890ab1234567890ab1234567890abcd";
+  const fingerprint = "cd1234567890cd1234567890cd1234567890cd1234567890cd1234567890cdef";
+  for (const role of ["system", "tool"] as const) {
+    const message: TranscriptMessage = {
+      id: role, role, timestamp: 5,
+      text: `Commit ${commit}; diff ${exactDiff}; fingerprint ${fingerprint}.`,
+    };
+    const presentation = presentTranscriptMessage(message, []);
+    assert.equal(presentation.primary, "Commit ab123456; diff 8b64f0c6; fingerprint cd123456.");
+    assert.equal(presentation.technical, message.text);
+  }
+});
+
+test("mixed known and unknown IDs stay readable and retain their exact original", () => {
+  const unknownId = "f14ecabe-7b93-4872-9f70-72553543ab61";
+  const message: TranscriptMessage = {
+    id: "mixed", role: "system", timestamp: 6,
+    text: `Compared ${jobId} with ${unknownId}.`,
+  };
+  const presentation = presentTranscriptMessage(message, [job()]);
+
+  assert.equal(presentation.primary, "Compared Clean composer focus with f14ecabe.");
+  assert.equal(presentation.secondary, "Clean composer focus · 9b361a1b");
+  assert.equal(presentation.technical, message.text);
+  assert.doesNotMatch(presentation.primary, /625f|7b93/);
+});
+
+test("ordinary prose and user-authored identifiers are not hidden", () => {
+  const prose: TranscriptMessage = { id: "prose", role: "assistant", timestamp: 7, text: "Worker completed successfully." };
+  const user: TranscriptMessage = { id: "user", role: "user", timestamp: 8, text: `Please inspect ${exactDiff}.` };
+  assert.deepEqual(presentTranscriptMessage(prose, [job()]), { primary: prose.text, lifecycle: false });
+  assert.deepEqual(presentTranscriptMessage(user, [job()]), { primary: user.text, lifecycle: false });
+});
+
 test("exact hashes and identifiers remain available only in collapsed technical evidence", () => {
   const value = job();
   value.handoff = {
@@ -66,4 +113,11 @@ test("exact hashes and identifiers remain available only in collapsed technical 
   const identity = renderToStaticMarkup(<TechnicalEvidence>{jobId}</TechnicalEvidence>);
   assert.match(identity, new RegExp(`<details class="technical-evidence"><summary>Technical details</summary><pre>${jobId}`));
   assert.doesNotMatch(identity, /<details[^>]* open/);
+
+  const ordinary = statusMessage({ eventId: "event", jobId, state: "handoff", detail: exactDiff });
+  const transcript = renderToStaticMarkup(<TranscriptMessageBody message={ordinary} jobs={[job()]} />);
+  assert.match(transcript, /Clean composer focus · Ready for review/);
+  assert.match(transcript, /<details class="technical-evidence"><summary>Technical details<\/summary><pre>\[worker_status\]/);
+  assert.match(transcript, new RegExp(exactDiff));
+  assert.doesNotMatch(transcript, /<details[^>]* open/);
 });

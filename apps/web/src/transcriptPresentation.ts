@@ -63,30 +63,40 @@ function workerStatusPresentation(text: string, jobs: AgentJob[]): TranscriptPre
   }
 }
 
-const lifecycleLanguage = /\b(started background job|worker .*resumed|judge started|feedback sent|retry scheduled|authorized guarded|marked .*superseded|worker_status)\b/i;
+const fullUuid = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+const longHash = /\b[0-9a-f]{16,}\b/gi;
 
 /** Build readable display copy without changing the exact durable transcript. */
 export function presentTranscriptMessage(message: TranscriptMessage, jobs: AgentJob[]): TranscriptPresentation {
+  if (message.role === "user") return { primary: message.text, lifecycle: false };
   const status = workerStatusPresentation(message.text, jobs);
   if (status) return status;
-  if (!lifecycleLanguage.test(message.text)) return { primary: message.text, lifecycle: false };
 
   let primary = message.text;
-  let replaced = false;
+  let transformed = false;
+  const knownReferences: string[] = [];
+  // Durable IDs win over stale transcript labels and sentence-shape guesses.
+  // This handles every assistant/system/tool sentence, not only known templates.
   for (const job of jobs) {
     if (!primary.includes(job.id)) continue;
     primary = primary.split(job.id).join(job.title);
-    replaced = true;
+    knownReferences.push(`${job.title} · ${shortReference(job.id)}`);
+    transformed = true;
   }
-  // Lifecycle output can arrive before its job record. Keep it understandable
-  // without leaking the long unknown token into the primary conversation.
-  primary = primary.replace(/\b(?:[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,})\b/gi, (identifier) => {
-    replaced = true;
-    return `worker ${shortReference(identifier)}`;
+  primary = primary.replace(fullUuid, (identifier) => {
+    transformed = true;
+    return shortReference(identifier)!;
   });
+  primary = primary.replace(longHash, (identifier) => {
+    transformed = true;
+    return shortReference(identifier)!;
+  });
+
+  if (!transformed) return { primary: message.text, lifecycle: false };
   return {
     primary,
-    technical: replaced ? message.text : undefined,
+    secondary: knownReferences.length ? [...new Set(knownReferences)].join(" · ") : undefined,
+    technical: message.text,
     lifecycle: true,
   };
 }

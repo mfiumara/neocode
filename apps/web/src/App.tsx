@@ -1078,7 +1078,7 @@ export function TechnicalEvidence({ label = "Technical details", children }: { l
   return <details className="technical-evidence"><summary>{label}</summary><pre>{children}</pre></details>;
 }
 
-function TranscriptMessageBody({ message, jobs }: { message: TranscriptMessage; jobs: AgentJob[] }) {
+export function TranscriptMessageBody({ message, jobs }: { message: TranscriptMessage; jobs: AgentJob[] }) {
   const presentation = presentTranscriptMessage(message, jobs);
   return <div className={`message-body ${presentation.lifecycle ? "lifecycle-message" : ""}`}>
     {presentation.primary ? <Markdown>{presentation.primary}</Markdown> : (!message.attachments?.length && <span className="stream-caret">▋</span>)}
