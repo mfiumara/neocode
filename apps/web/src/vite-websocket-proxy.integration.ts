@@ -70,7 +70,10 @@ async function closeVite(vite: ViteDevServer | undefined): Promise<void> {
   if (vite) await vite.close();
 }
 
-/** Send an upgrade by hand and abandon it as soon as proxied bytes arrive. */
+/**
+ * Inject a deliberately destructive raw-TCP reset to reproduce the reported
+ * proxy failure. This is fault injection, not a model of normal browser close.
+ */
 function abandonUpgrade(port: number): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = connectTcp(port, "127.0.0.1", () => {
@@ -81,15 +84,15 @@ function abandonUpgrade(port: number): Promise<Socket> {
     });
     socket.once("error", reject);
     socket.once("data", () => {
-      // A reset models a renderer/navigation disappearing during the upgrade and
-      // makes the downstream write failure deterministic across platforms.
+      // Force the abnormal downstream-write failure; real reload/close/HMR
+      // behavior is covered separately with Playwright.
       socket.resetAndDestroy();
       resolve(socket);
     });
   });
 }
 
-test("Vite proxy identifies the abandoned-upgrade EPIPE while clean close, reconnect, and backend restart stay quiet", { timeout: 20_000 }, async () => {
+test("Vite proxy reproduces synthetic reset EPIPE while clean transport reconnect and backend restart stay quiet", { timeout: 20_000 }, async () => {
   let backend = await listenBackend();
   let vite: ViteDevServer | undefined;
   const errors: Array<{ message: string; code?: string }> = [];
