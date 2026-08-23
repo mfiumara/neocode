@@ -25,6 +25,7 @@ import {
   type JudgeEvidence,
   type ModelChoice,
   type ModelRef,
+  type MaintenanceStatus,
   type RequestedIsolationMode,
   type ServerMessage,
   type TranscriptMessage,
@@ -47,6 +48,7 @@ import {
   RuntimeStateStore,
   type DurableRuntimeState,
 } from "./runtime-state.js";
+import { OperationLock, WorktreeJanitor } from "./worktree-janitor.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -61,6 +63,12 @@ interface RunningWorker {
 interface WorkerConfig {
   model: AgentSession["model"];
   thinkingLevel: PiThinkingLevel;
+}
+export interface MaintenanceConfig {
+  graceMs?: number;
+  intervalMs?: number;
+  targetRef?: string;
+  startup?: boolean;
 }
 
 const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job"];
@@ -147,18 +155,37 @@ export class Orchestrator {
   private modelRuntime!: ModelRuntime;
   private coordinator!: AgentSession;
   private completionPipeline!: CompletionPipeline;
+  private readonly operationLock = new OperationLock();
+  private readonly janitor: WorktreeJanitor;
+  private maintenance: MaintenanceStatus = { state: "idle" };
+  private janitorTimer?: NodeJS.Timeout;
+  private janitorRun?: Promise<void>;
+  private readonly maintenanceConfig: Required<MaintenanceConfig>;
+
 
   readonly cwd: string;
 
   constructor(
     cwd: string,
     private readonly emit: Emit,
+    maintenanceConfig: MaintenanceConfig = {},
   ) {
     // The server resolves this before constructing the orchestrator. Keeping a
     // single root here prevents the coordinator from following worker cwd state.
     this.cwd = cwd;
     this.stateStore = new RuntimeStateStore(cwd);
     this.recoveryConfig = recoveryConfig();
+    this.maintenanceConfig = {
+      graceMs: maintenanceConfig.graceMs ?? 7 * 24 * 60 * 60 * 1000,
+      intervalMs: maintenanceConfig.intervalMs ?? 6 * 60 * 60 * 1000,
+      targetRef: maintenanceConfig.targetRef ?? "main",
+      startup: maintenanceConfig.startup ?? true,
+    };
+    this.janitor = new WorktreeJanitor(cwd, {
+      graceMs: this.maintenanceConfig.graceMs,
+      targetRef: this.maintenanceConfig.targetRef,
+    });
+
   }
 
   async initialize(): Promise<void> {
@@ -171,6 +198,7 @@ export class Orchestrator {
         this.jobs.set(entry.job.id, entry.job);
         if (entry.piSessionFile) this.piSessionFiles.set(entry.job.id, entry.piSessionFile);
       }
+      if (restored.maintenance) this.maintenance = { ...restored.maintenance, state: "idle" };
       await this.reconcileRestoredJobs();
     }
 
@@ -277,6 +305,12 @@ export class Orchestrator {
     this.completionPipeline.recover(this.listJobs());
     this.persist();
     await this.resumeRestoredJobs();
+    if (this.maintenanceConfig.startup) this.startCleanup("startup");
+    if (this.maintenanceConfig.intervalMs > 0) {
+      this.janitorTimer = setInterval(() => this.startCleanup("scheduled"), this.maintenanceConfig.intervalMs);
+      this.janitorTimer.unref();
+    }
+
   }
 
   snapshot(): AppSnapshot {
@@ -291,6 +325,7 @@ export class Orchestrator {
         models: this.modelChoices(),
       },
       jobs: this.listJobs(),
+      maintenance: { ...this.maintenance },
     };
   }
 
@@ -365,6 +400,9 @@ export class Orchestrator {
   async dispose(): Promise<void> {
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
+    if (this.janitorTimer) clearInterval(this.janitorTimer);
+    await this.janitorRun;
+
     await this.coordinator.abort().catch(() => undefined);
     for (const [jobId, worker] of this.workers) {
       worker.cancelled = true;
@@ -420,6 +458,7 @@ export class Orchestrator {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       messages: [{ id: id(), role: "user", text: task, timestamp: Date.now(), attachments: attachments.length ? attachments : undefined }],
+      worktreeIdentity: isolationMode === "worktree" ? { path: worktree, branch, baseRef, createdAt: Date.now() } : undefined,
       activity: activity("starting", "Waiting to start"),
       settings: { variant: "build", thinkingLevel: this.coordinator.thinkingLevel },
       recovery: { retryCount: 0, maxRetries: this.recoveryConfig.maxRetries, generation: 1 },
@@ -636,6 +675,10 @@ export class Orchestrator {
       if (activeWorker?.cancelled || !this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;
       job.status = "completed";
       job.activity = undefined;
+      if (job.isolation.mode === "worktree") {
+        job.completion = { head: await this.gitAt(["rev-parse", "HEAD"], job.isolation.path), finishedAt: Date.now() };
+        job.integration = { status: "unmerged" };
+      }
       job.summary = [...job.messages].reverse().find((message) => message.role === "assistant")?.text;
       await this.refreshDiff(job);
       job.updatedAt = Date.now();
@@ -797,8 +840,41 @@ export class Orchestrator {
   }
 
   private async git(args: string[]): Promise<string> {
-    const { stdout } = await execFileAsync("git", args, { cwd: this.cwd });
+    return this.gitAt(args, this.cwd);
+  }
+
+  private async gitAt(args: string[], cwd: string): Promise<string> {
+    const { stdout } = await execFileAsync("git", args, { cwd });
     return stdout.trim();
+  }
+
+  /** Completion/integration code must use this lock so cleanup cannot race it. */
+  async withIntegrationLock<T>(operation: () => Promise<T>): Promise<T> {
+    return this.operationLock.run(operation);
+  }
+
+  cleanNow(): Promise<void> {
+    this.startCleanup("manual");
+    return this.janitorRun ?? Promise.resolve();
+  }
+
+  private startCleanup(source: "startup" | "scheduled" | "manual"): void {
+    if (this.janitorRun) return;
+    this.janitorRun = this.operationLock.run(async () => {
+      this.maintenance = { state: "running", source };
+      this.emit({ type: "maintenance_updated", maintenance: { ...this.maintenance } });
+      try {
+        const result = await this.janitor.run(this.listJobs(), (job) => this.publishJob(job));
+        this.maintenance = { state: "idle", source, lastRunAt: Date.now(), ...result };
+      } catch (error) {
+        this.maintenance = {
+          state: "idle", source, lastRunAt: Date.now(),
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      this.persist();
+      this.emit({ type: "maintenance_updated", maintenance: { ...this.maintenance } });
+    }).finally(() => { this.janitorRun = undefined; });
   }
 
   private async ensureLocalExcludes(): Promise<void> {
@@ -872,6 +948,7 @@ export class Orchestrator {
         messages: [...this.coordinatorMessages],
         piSessionFile: this.coordinatorSessionFile,
       },
+      maintenance: { ...this.maintenance },
       jobs: this.listJobs().map((job) => ({
         job: structuredClone(job),
         piSessionFile: this.piSessionFiles.get(job.id),

@@ -1,5 +1,11 @@
 export type AgentStatus = "idle" | "running" | "error";
 export type JobStatus = "queued" | "running" | "interrupted" | "needs_attention" | "completed" | "failed" | "cancelled";
+export type IntegrationStatus = "unmerged" | "reviewing" | "integrating" | "conflicted" | "merged";
+export type CleanupRefusalReason =
+  | "not_completed" | "missing_durable_identity" | "grace_period" | "integration_active" | "conflicted"
+  | "identity_mismatch" | "not_registered" | "branch_mismatch" | "head_mismatch" | "dirty"
+  | "no_intended_commits" | "not_merged" | "git_error" | "removal_unverified";
+
 export type RequestedIsolationMode = "auto" | "worktree" | "root";
 export type IsolationMode = Exclude<RequestedIsolationMode, "auto">;
 export type AgentVariant = "build" | "plan";
@@ -123,6 +129,44 @@ export interface WorkerRecovery {
   checkoutDirty?: boolean;
 }
 
+export interface WorktreeIdentity {
+  path: string;
+  branch: string;
+  baseRef: string;
+  createdAt: number;
+}
+
+export interface JobCompletion {
+  /** Immutable branch head captured when the worker finished successfully. */
+  head: string;
+  finishedAt: number;
+}
+
+export interface JobIntegration {
+  status: IntegrationStatus;
+  targetRef?: string;
+  verifiedAt?: number;
+  targetHead?: string;
+  completionHead?: string;
+}
+
+export interface CleanupEvidence {
+  checkedAt: number;
+  targetRef: string;
+  targetHead: string;
+  completionHead: string;
+  intendedCommits: string[];
+  mergeMethod: "commit-ancestry" | "identical-content";
+  cleanPorcelain: true;
+  registeredPath: string;
+  registeredBranch: string;
+}
+
+export type JobCleanup =
+  | { status: "refused"; checkedAt: number; reason: CleanupRefusalReason; detail: string }
+  | { status: "removed"; checkedAt: number; removedAt: number; evidence: CleanupEvidence };
+
+
 export interface AgentJob {
   id: string;
   title: string;
@@ -151,6 +195,23 @@ export interface AgentJob {
   attempts?: WorkerAttempt[];
   /** Durable automated CI, independent review, and reconciliation state. */
   review?: JobReview;
+  /** Immutable creation identity used to reject stale or repurposed paths. */
+  worktreeIdentity?: WorktreeIdentity;
+  completion?: JobCompletion;
+  /** `completed` means the worker stopped; only `merged` means Git verified integration. */
+  integration?: JobIntegration;
+  cleanup?: JobCleanup;
+}
+
+export interface MaintenanceStatus {
+  state: "idle" | "running";
+  lastRunAt?: number;
+  source?: "startup" | "scheduled" | "manual";
+  checked?: number;
+  removed?: number;
+  refused?: number;
+  error?: string;
+
 }
 
 export interface AppSnapshot {
@@ -164,6 +225,7 @@ export interface AppSnapshot {
     models: ModelChoice[];
   };
   jobs: AgentJob[];
+  maintenance: MaintenanceStatus;
 }
 
 export type ClientMessage =
@@ -177,7 +239,8 @@ export type ClientMessage =
   | { type: "cycle_variant" }
   | { type: "cycle_thinking" }
   | { type: "set_model"; model: ModelRef }
-  | { type: "refresh" };
+  | { type: "refresh" }
+  | { type: "clean_now" };
 
 export type ServerMessage =
   | { type: "snapshot"; snapshot: AppSnapshot }
@@ -189,4 +252,5 @@ export type ServerMessage =
   | { type: "coordinator_message_updated"; message: TranscriptMessage }
   | { type: "coordinator_delta"; messageId: string; delta: string }
   | { type: "job_updated"; job: AgentJob }
+  | { type: "maintenance_updated"; maintenance: MaintenanceStatus }
   | { type: "error"; message: string };

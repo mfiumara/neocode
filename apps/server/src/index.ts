@@ -24,7 +24,17 @@ function broadcast(message: ServerMessage): void {
   for (const client of clients) send(client, message);
 }
 
-const orchestrator = new Orchestrator(cwd, broadcast);
+function envMs(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+const orchestrator = new Orchestrator(cwd, broadcast, {
+  graceMs: envMs("NEOCODE_JANITOR_GRACE_MS", 7 * 24 * 60 * 60 * 1000),
+  intervalMs: envMs("NEOCODE_JANITOR_INTERVAL_MS", 6 * 60 * 60 * 1000),
+  targetRef: process.env.NEOCODE_JANITOR_TARGET_REF || "main",
+  startup: process.env.NEOCODE_JANITOR_STARTUP !== "false",
+});
 await orchestrator.initialize();
 
 const server = createServer((request, response) => {
@@ -63,6 +73,7 @@ websocket.on("connection", (client) => {
         else if (message.type === "cycle_thinking") orchestrator.cycleThinking();
         else if (message.type === "set_model") await orchestrator.setModel(message.model);
         else if (message.type === "refresh") send(client, { type: "snapshot", snapshot: orchestrator.snapshot() });
+        else if (message.type === "clean_now") await orchestrator.cleanNow();
       } catch (error) {
         send(client, { type: "error", message: error instanceof Error ? error.message : String(error) });
       }

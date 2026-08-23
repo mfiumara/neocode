@@ -11,6 +11,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
+import { isDoneJob, jobLifecycleLabel } from "./jobLifecycle";
 import {
   MAX_IMAGE_ATTACHMENTS,
   MAX_IMAGE_BYTES,
@@ -124,6 +125,8 @@ export function App() {
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [modelPaletteOpen, setModelPaletteOpen] = useState(false);
+  const [doneOpen, setDoneOpen] = useState(true);
+
   const [activitySynced, setActivitySynced] = useState(false);
   const [pendingModel, setPendingModel] = useState<string>();
   const [workspaceStorageKey, setWorkspaceStorageKey] = useState<string>();
@@ -239,6 +242,8 @@ export function App() {
           jobs: [message.job, ...current.jobs.filter((job) => job.id !== message.job.id)]
             .sort((a, b) => b.createdAt - a.createdAt),
         } : current);
+      } else if (message.type === "maintenance_updated") {
+        setSnapshot((current) => current ? { ...current, maintenance: message.maintenance } : current);
       } else if (message.type === "error") {
         setPendingModel(undefined);
         setError(message.message);
@@ -295,6 +300,8 @@ export function App() {
   }, [workspaceStorageKey, snapshot?.cwd, active, jobTab, prompt, isolation, context]);
 
   const activeJob = active.kind === "job" ? snapshot?.jobs.find((job) => job.id === active.id) : undefined;
+  const actionableJobs = useMemo(() => (snapshot?.jobs || []).filter((job) => !isDoneJob(job)), [snapshot?.jobs]);
+  const doneJobs = useMemo(() => (snapshot?.jobs || []).filter(isDoneJob), [snapshot?.jobs]);
   const messages = active.kind === "coordinator"
     ? snapshot?.coordinator.messages || []
     : activeJob?.messages || [];
@@ -359,11 +366,15 @@ export function App() {
       { id: "focus-prompt", label: "Focus prompt", detail: "command", action: () => focusPrompt() },
       { id: "abort", label: "Abort coordinator", detail: "command", action: () => send({ type: "abort" }) },
     ];
+    entries.push({
+      id: "clean-now", label: "Clean merged worktrees now", detail: "maintenance command",
+      action: () => send({ type: "clean_now" }),
+    });
     for (const job of snapshot?.jobs || []) {
       entries.push({
         id: `job-${job.id}`,
         label: job.title,
-        detail: `${job.status} · ${isolationLabel(job)} · ${shortPath(job.isolation.path)}`,
+        detail: `${isDoneJob(job) ? "Done" : "Actionable"} · ${jobLifecycleLabel(job)} · ${shortPath(job.isolation.path)}`,
         action: () => openJob(job),
       });
     }
@@ -592,19 +603,30 @@ export function App() {
             <span className="binding">q</span>
           </Button>
 
-          <div className="section-label jobs-label"><span>Workers</span><span>{snapshot?.jobs.length || 0}</span></div>
-          <div className="jobs-list">
-            {snapshot?.jobs.map((job) => (
-              <Button variant="ghost" key={job.id} className={`job-row ${active.kind === "job" && active.id === job.id ? "active" : ""}`} onClick={() => openJob(job)} aria-current={active.kind === "job" && active.id === job.id ? "page" : undefined}>
-                <span className={`job-glyph ${activityReady || (job.status !== "queued" && job.status !== "running") ? job.status : "disconnected"}`} aria-hidden="true">{statusGlyph(job.status)}</span>
-                <span><strong>{job.title}</strong><small>{activityReady && (job.status === "queued" || job.status === "running") ? job.activity?.description || "Working" : `${job.attempts?.length ? `attempt ${job.attempts.length} · ` : ""}${isolationLabel(job)} · ${shortPath(job.isolation.path)}`}</small></span>
-                <span className="sr-only">Status: {job.status}</span>
-              </Button>
+          <div className="section-label jobs-label"><span>Workers · actionable</span><span>{actionableJobs.length}</span></div>
+          <div className="jobs-list actionable-jobs">
+            {actionableJobs.map((job) => (
+              <JobSidebarRow key={job.id} job={job} active={active.kind === "job" && active.id === job.id} activityReady={activityReady} onOpen={() => openJob(job)} />
+
             ))}
-            {!snapshot?.jobs.length && <p className="empty-copy">Implementation workers will appear here.</p>}
+            {!actionableJobs.length && <p className="empty-copy">No active or actionable workers.</p>}
           </div>
 
+          <button className="section-label done-label" aria-expanded={doneOpen} onClick={() => setDoneOpen((value) => !value)}>
+            <span><b>{doneOpen ? "▾" : "▸"}</b> Done</span><span>{doneJobs.length}</span>
+          </button>
+          {doneOpen && <div className="jobs-list done-jobs">
+            {doneJobs.map((job) => (
+              <JobSidebarRow key={job.id} job={job} active={active.kind === "job" && active.id === job.id} activityReady={activityReady} onOpen={() => openJob(job)} />
+            ))}
+            {!doneJobs.length && <p className="empty-copy">Verified merges and terminal jobs appear here.</p>}
+          </div>}
+          <button className="clean-now" disabled={!connected || snapshot?.maintenance.state === "running"} onClick={() => send({ type: "clean_now" })}>
+            {snapshot?.maintenance.state === "running" ? "Cleaning…" : "Clean merged worktrees now"}
+          </button>
+
           <Separator className="key-hints-separator" />
+
           <div className="key-hints">
             <span><kbd>i</kbd> prompt</span>
             <span><kbd>j k</kbd> navigate</span>
@@ -618,7 +640,7 @@ export function App() {
         <section className="main-panel">
           <div className="view-header">
             <div>
-              <span className="eyebrow">{active.kind === "coordinator" ? "MAIN THREAD" : activeJob?.status.toUpperCase()}</span>
+              <span className="eyebrow">{active.kind === "coordinator" ? "MAIN THREAD" : activeJob ? jobLifecycleLabel(activeJob).toUpperCase() : "WORKER"}</span>
               <h1>{active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"}</h1>
             </div>
             {active.kind === "coordinator" && (<>
@@ -712,12 +734,13 @@ export function App() {
                   variant="ghost"
                   key={row.key}
                   data-row-index={index}
-                  className={`worker-line ${row.job.status} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
+                  className={`worker-line ${row.job.integration?.status || row.job.status} ${index === selectedRow && mode === "NORMAL" ? "selected" : ""}`}
                   onClick={() => setSelectedRow(index)}
                   onDoubleClick={() => openJob(row.job)}
                 >
                   <span className="worker-arrow">→</span>
-                  <span className="worker-status">{row.job.status}{row.job.attempts?.length ? ` · attempt ${row.job.attempts.length}` : ""}</span>
+                  <span className="worker-status">{jobLifecycleLabel(row.job)}{row.job.attempts?.length ? ` · attempt ${row.job.attempts.length}` : ""}</span>
+
                   <span className="worker-title">{row.job.title}</span>
                   <code>{row.job.id}</code>
                   <span className="worker-open">l</span>
@@ -830,6 +853,21 @@ export function App() {
     </main>
     </TooltipProvider>
   );
+}
+
+function JobSidebarRow({ job, active, activityReady, onOpen }: {
+  job: AgentJob; active: boolean; activityReady: boolean; onOpen: () => void;
+}) {
+  const live = activityReady && (job.status === "queued" || job.status === "running");
+  const semanticClass = job.integration?.status || job.status;
+  return <button className={`job-row ${active ? "active" : ""}`} onClick={onOpen} title={jobLifecycleLabel(job)}>
+    <span className={`job-glyph ${activityReady || !live ? semanticClass : "disconnected"}`}>
+      {job.integration?.status === "merged" ? "✓" : statusGlyph(job.status)}
+    </span>
+    <span><strong>{job.title}</strong><small>{live
+      ? job.activity?.description || "Working"
+      : `${jobLifecycleLabel(job)} · ${isolationLabel(job)}`}</small></span>
+  </button>;
 }
 
 function AttachmentGallery({ attachments }: { attachments: ImageAttachment[] }) {

@@ -27,11 +27,25 @@ function fixture(root: string, title = "durable"): DurableRuntimeState {
     summary: "summary",
     diff: "+change",
     recoverable: true,
+    worktreeIdentity: {
+      path: join(root, ".worktrees", "durable-job-1"), branch: "neocode/durable-job-1", baseRef: "abc123", createdAt: 1,
+    },
+    completion: { head: "def456", finishedAt: 2 },
+    integration: { status: "merged", targetRef: "main", verifiedAt: 3, targetHead: "fed789", completionHead: "def456" },
+    cleanup: {
+      status: "removed", checkedAt: 3, removedAt: 4,
+      evidence: {
+        checkedAt: 3, targetRef: "main", targetHead: "fed789", completionHead: "def456",
+        intendedCommits: ["def456"], mergeMethod: "commit-ancestry", cleanPorcelain: true,
+        registeredPath: join(root, ".worktrees", "durable-job-1"), registeredBranch: "neocode/durable-job-1",
+      },
+    },
   };
   return {
     version: RUNTIME_STATE_VERSION,
     workspaceRoot: root,
     updatedAt: 3,
+    maintenance: { state: "idle", lastRunAt: 4, source: "scheduled", checked: 1, removed: 1, refused: 0 },
     coordinator: {
       messages: [{ id: "c1", role: "assistant", text: "hello", timestamp: 1 }],
       piSessionFile: join(root, ".neocode", "runtime", "server-v1", "pi-sessions", "coordinator", "session.jsonl"),
@@ -49,6 +63,9 @@ test("runtime state atomically round-trips all job and session metadata", async 
     const restored = await store.load();
     assert.equal(restored?.jobs[0]?.job.summary, "summary");
     assert.equal(restored?.jobs[0]?.job.diff, "+change");
+    assert.equal(restored?.jobs[0]?.job.cleanup?.status, "removed");
+    assert.equal(restored?.jobs[0]?.job.integration?.status, "merged");
+    assert.equal(restored?.maintenance?.removed, 1);
     assert.match(restored?.coordinator.piSessionFile || "", /pi-sessions/);
     assert.match(runtimeStatePath(root), /\.neocode\/runtime\/server-v1\/state\.json$/);
   } finally {
