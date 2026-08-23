@@ -126,6 +126,7 @@ export function App() {
   const scrollPositionsRef = useRef<Record<string, number>>({});
   const imagesRef = useRef<ComposerImage[]>([]);
   const mountedRef = useRef(true);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   // Content may grow between scroll events. A render must not turn an
   // older-message reader back into a live-output follower.
   const followTranscriptRef = useRef(true);
@@ -146,9 +147,14 @@ export function App() {
   };
 
   useEffect(() => { imagesRef.current = images; }, [images]);
-  useEffect(() => () => {
-    mountedRef.current = false;
-    imagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl));
+  useEffect(() => {
+    // StrictMode runs setup → cleanup → setup in development. Restore this
+    // guard in setup so the second (live) mount can publish prepared images.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      imagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl));
+    };
   }, []);
 
   useEffect(() => {
@@ -793,7 +799,7 @@ export function App() {
                   if (!clipboardPlainText(event.clipboardData)) event.preventDefault();
                   void addPastedImages(files);
                 } else if (unreadableFileItems) {
-                  setError("The browser reported a clipboard image but did not make its bytes available. Try copying the image again or save it as PNG and paste the file.");
+                  setError("The browser reported a clipboard image but did not make its bytes available. Copy it again or use Attach images.");
                 }
               }}
               onKeyDown={(event) => {
@@ -815,8 +821,23 @@ export function App() {
               </div>
               <span className="muted composer-hint">↵ send · ⇧↵ newline · esc normal</span>
               <div className="action-buttons">
+                <input
+                  ref={imageInputRef}
+                  className="sr-only"
+                  type="file"
+                  accept="image/png,image/jpeg,image/gif,image/webp"
+                  multiple
+                  aria-label="Choose image attachments"
+                  onChange={(event) => {
+                    const files = Array.from(event.currentTarget.files || []);
+                    event.currentTarget.value = "";
+                    if (files.length) void addPastedImages(files);
+                  }}
+                />
+                <Button variant="outline" type="button" className="attach-button" onClick={() => imageInputRef.current?.click()}>
+                  Attach images
+                </Button>
                 <Button className="send-button" disabled={!prompt.trim() && !images.length} onClick={submit}>Send <span>↵</span></Button>
-
               </div>
             </div>
           </div>
