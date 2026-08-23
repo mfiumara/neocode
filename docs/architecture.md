@@ -8,7 +8,7 @@ Pi owns model/provider integration, the tool loop, context compaction, and agent
 
 ## Runtime model
 
-The main coordinator's primary job is reconciliation and integration. Alongside read/search it receives explicit orchestration tools: `delegate_task`, `list_jobs`, `inspect_job`, `start_judge`, `request_worker_changes`, `retry_infrastructure`, and `guarded_merge`.
+The main coordinator's primary job is reconciliation and integration. Alongside read/search it receives explicit orchestration tools: `delegate_task`, `list_jobs`, `inspect_job`, `start_judge`, `request_worker_changes`, `retry_infrastructure`, `guarded_merge`, and `verify_integration`.
 
 It cannot edit the checkout directly and is always anchored at the repository root. Implementation workers run asynchronously in worktrees and never mutate or merge root/main. Completion emits a durable structured handoff (report, requirements, exact diff hash, branch/worktree, tests, and risks), appends it to the main transcript, and schedules one coordinator wake. User prompts retain priority while lifecycle events wait durably.
 
@@ -35,7 +35,7 @@ There are two intentionally separate persistence layers:
 - The server atomically replaces `.neocode/runtime/server-v1/state.json`. This stores coordinator/job transcripts, metadata, summaries, diffs, effective isolation paths and branches, and references to Pi session files. Pi JSONL sessions are kept below the adjacent `pi-sessions` directory and are opened through `SessionManager.open` when it is safe to continue the coordinator context. The `server-v1` namespace deliberately does not collide with legacy Lua `.neocode/sessions` metadata.
 
 
-On startup, Neocode reconciles worktree jobs against `git worktree list`, their recorded branch, and filesystem paths. A process cannot survive a backend restart: persisted `queued` or `running` jobs become `interrupted`, never `running`. Their transcript, checkout, diff, and Pi session reference remain reviewable and are marked recoverable when the checkout still agrees with git. Worker execution is not automatically resumed because reopening a Pi transcript cannot safely recreate an in-flight tool subprocess. A missing/corrupt Pi file starts fresh model context without discarding Neocode's own transcript.
+On startup, Neocode reconciles worktree jobs against `git worktree list`, their recorded branch, and filesystem paths. Persisted `queued` or `running` jobs become `interrupted`, never falsely remain `running`. Their transcript, checkout, diff, and Pi session reference remain reviewable and are marked recoverable when the checkout still agrees with git. Safe isolated workers resume as a new bounded generation; stale callbacks are rejected by durable generation tokens. Shared-root or invalid checkouts require explicit attention. A missing/corrupt Pi file starts fresh model context without discarding Neocode's own transcript.
 
 A browser reconnect always receives a current snapshot and then continues to consume incremental WebSocket updates, so refreshing the page does not turn a live server job into a static restored copy. State is workspace-local; moving a workspace to another absolute path creates a new browser/server state scope.
 

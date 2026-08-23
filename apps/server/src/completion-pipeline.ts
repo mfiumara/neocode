@@ -201,7 +201,8 @@ export class CompletionPipeline {
     this.transition(job, "handoff_received", `New handoff ${job.handoff.diffSha256} delivered from the same worktree for review round ${job.handoff.round}`, "worker");
   }
 
-  requestMerge(job: AgentJob): void {
+  requestMerge(job: AgentJob, actor: "coordinator" | "worker" | "judge" | "server"): void {
+    if (actor !== "coordinator") throw new Error("Only the main coordinator tool can authorize guarded merge.");
     if (!job.review?.judge?.approved) throw new Error("A fresh independent judge approval is required before guarded merge.");
     if (this.active.has(job.id)) throw new Error("A lifecycle action is already running.");
     if (job.review.status !== "approved") {

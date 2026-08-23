@@ -649,7 +649,7 @@ export function App() {
           <div className="view-header">
             <div>
               <span className="eyebrow">{active.kind === "coordinator" ? "MAIN THREAD" : activeJob ? jobLifecycleLabel(activeJob).toUpperCase() : "WORKER"}</span>
-              <h1>{active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"}</h1>
+              <h1>{active.kind === "coordinator" ? "Coordinator · reconciliation & integration" : activeJob?.title || "Worker"}</h1>
             </div>
             {active.kind === "coordinator" && (<>
               <Tooltip><TooltipTrigger asChild><Button variant="outline" size="sm" className="model-selector" disabled={modelSelectDisabled} onClick={() => setModelPaletteOpen(true)} aria-label="Choose coordinator model">

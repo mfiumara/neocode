@@ -78,7 +78,7 @@ export interface MaintenanceConfig {
   startup?: boolean;
 }
 
-const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "reconcile_jobs", "clean_worktrees"];
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "verify_integration", "reconcile_jobs", "clean_worktrees"];
 const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
 const VARIANTS: AgentVariant[] = ["build", "plan"];
 
@@ -332,7 +332,26 @@ export class Orchestrator {
       {
         name: "guarded_merge", label: "Guarded fast-forward", description: "Authorize serialized integration of the exact rebased diff with --ff-only after fresh judge approval.",
         parameters: Type.Object({ jobId: Type.String() }),
-        execute: async (_callId: string, params: { jobId: string }) => { this.completionPipeline.requestMerge(this.requireJob(params.jobId)); return { content: [{ type: "text" as const, text: `Coordinator authorized guarded rebased fast-forward for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
+        execute: async (_callId: string, params: { jobId: string }) => { this.completionPipeline.requestMerge(this.requireJob(params.jobId), "coordinator"); return { content: [{ type: "text" as const, text: `Coordinator authorized guarded rebased fast-forward for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
+      },
+      {
+        name: "verify_integration", label: "Verify integration", description: "Verify one job against main and return its persisted merge and CI evidence without authorizing a merge.",
+        parameters: Type.Object({ jobId: Type.String() }),
+        execute: async (_callId: string, params: { jobId: string }) => {
+          await this.reconcileIntegratedJobs();
+          const job = this.requireJob(params.jobId);
+          if (job.integration?.status !== "merged") throw new Error(`Job ${params.jobId} is not verified on main.`);
+          const evidence = {
+            jobId: job.id,
+            targetRef: job.integration.targetRef,
+            targetHead: job.integration.targetHead,
+            completionHead: job.integration.completionHead,
+            verifiedAt: job.integration.verifiedAt,
+            reviewedDiffSha256: job.review?.judge?.diffSha256,
+            checks: job.review?.postMergeCi || [],
+          };
+          return { content: [{ type: "text" as const, text: `Verified ${job.id} on ${evidence.targetRef || "main"} at ${evidence.targetHead || "unknown head"}.` }], details: evidence };
+        },
       },
       {
         name: "reconcile_jobs", label: "Reconcile jobs", description: "Verify completed worker commits against main and move proven integrated or no-op jobs to Done.",
@@ -769,7 +788,7 @@ export class Orchestrator {
       const loader = new DefaultResourceLoader({
         cwd: job.isolation.path,
         agentDir: getAgentDir(),
-        systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode background worker\nYou are a background worker running in ${job.isolation.mode === "worktree" ? "an isolated git worktree" : "the shared root checkout"} at ${job.isolation.path}. ${job.isolation.mode === "root" && job.isolation.requested === "auto" ? "This task was classified as non-mutating: inspect and report only; do not edit files." : "Complete the assigned task autonomously, including edits when requested."} Run relevant checks. Do not ask conversational questions unless completely blocked. End with a concise report covering changes, tests, and remaining risks.`,
+        systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode background worker\nYou are a background worker running in ${job.isolation.mode === "worktree" ? "an isolated git worktree" : "the shared root checkout"} at ${job.isolation.path}. ${job.isolation.mode === "root" && job.isolation.requested === "auto" ? "This task was classified as non-mutating: inspect and report only; do not edit files." : "Complete the assigned task autonomously, including edits when requested."} You never merge, mutate root/main, launch a judge, or directly start integration; only the MAIN coordinator owns those decisions and tool calls. Keep all implementation and conflict-resolution edits inside this assigned checkout. Run relevant checks. Do not ask conversational questions unless completely blocked. End with a structured, concise handoff covering requirements, changes, tests, and unresolved risks.`,
       });
       await loader.reload();
       const workerSessionDir = join(this.stateStore.root, "pi-sessions", "workers", job.id);

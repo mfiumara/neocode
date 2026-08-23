@@ -94,17 +94,21 @@ test("legacy queued reviews gain a durable exact-diff handoff before autonomous 
   assert.equal(value.review?.status, "approved");
 });
 
-test("fresh judge and guarded merge require distinct coordinator actions", async () => {
+test("worker, judge, and server cannot merge; judge and coordinator approval stay distinct", async () => {
   const adapter = new FakeAdapter();
   const value = job();
   const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
   pipeline.enqueue(value);
-  assert.throws(() => pipeline.requestMerge(value), /judge approval/);
+  assert.throws(() => pipeline.requestMerge(value, "coordinator"), /judge approval/);
   pipeline.startJudge(value);
   await pipeline.idle();
   assert.equal(value.review?.status, "approved");
   assert.equal(adapter.reconcileCalls, 0);
-  pipeline.requestMerge(value);
+  assert.throws(() => pipeline.requestMerge(value, "worker"), /Only the main coordinator tool/);
+  assert.throws(() => pipeline.requestMerge(value, "judge"), /Only the main coordinator tool/);
+  assert.throws(() => pipeline.requestMerge(value, "server"), /Only the main coordinator tool/);
+  assert.equal(adapter.reconcileCalls, 0, "worker, judge, and server cannot authorize root mutation");
+  pipeline.requestMerge(value, "coordinator");
   await pipeline.idle();
   assert.equal(value.review?.status, "merged");
   assert.ok(value.review?.coordinatorAuthorizedAt);
@@ -120,7 +124,7 @@ test("guarded integration remains serialized", async () => {
   const first = job("first"), second = job("second");
   pipeline.enqueue(first); pipeline.enqueue(second);
   pipeline.startJudge(first); pipeline.startJudge(second); await pipeline.idle();
-  pipeline.requestMerge(first); pipeline.requestMerge(second);
+  pipeline.requestMerge(first, "coordinator"); pipeline.requestMerge(second, "coordinator");
   while (adapter.reconcileCalls < 1) await new Promise((resolve) => setTimeout(resolve, 1));
   assert.equal(adapter.reconcileCalls, 1);
   release(); await pipeline.idle();
@@ -265,7 +269,7 @@ test("successful infrastructure retry resolves durably and restart cannot resche
     while (value.review?.status !== "approved") await new Promise((resolve) => setTimeout(resolve, 2));
     assert.equal(value.review.remediation?.actions[0]?.state, "resolved");
     assert.equal(value.review.remediation?.currentActionId, undefined);
-    pipeline.requestMerge(value); await pipeline.idle();
+    pipeline.requestMerge(value, "coordinator"); await pipeline.idle();
     assert.equal(value.review.status, "merged");
 
     const callsAfterSuccess = adapter.ciCalls;
@@ -300,11 +304,11 @@ test("conflict returns to worker handoff and fresh judge before retry", async ()
   const adapter = new FakeAdapter(); const value = job(); let conflict = true;
   adapter.reconcile = async () => { adapter.reconcileCalls += 1; if (conflict) throw new PipelineError("conflict", "content conflict"); return { commit: "resolved" }; };
   const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
-  pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle(); pipeline.requestMerge(value); await pipeline.idle();
+  pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle(); pipeline.requestMerge(value, "coordinator"); await pipeline.idle();
   assert.equal(value.review?.status, "conflict");
   pipeline.requestChanges(value, "Resolve conflict on the worker branch, never root"); pipeline.workerResumed(value);
   conflict = false; value.diff = "resolved diff"; pipeline.nextHandoff(value); pipeline.startJudge(value); await pipeline.idle();
-  pipeline.requestMerge(value); await pipeline.idle(); assert.equal(value.review?.status, "merged"); assert.equal(adapter.judgeCalls, 2);
+  pipeline.requestMerge(value, "coordinator"); await pipeline.idle(); assert.equal(value.review?.status, "merged"); assert.equal(adapter.judgeCalls, 2);
 });
 
 test("restart invalidates legacy server-owned auto-decision verdicts", async () => {
@@ -333,7 +337,7 @@ test("candidate and post-merge verification failures become evidence-complete ac
   const candidate = job("candidate-fail");
   const candidatePipeline = new CompletionPipeline(candidateAdapter, () => undefined, "main", "/root");
   candidatePipeline.enqueue(candidate); candidatePipeline.startJudge(candidate); await candidatePipeline.idle();
-  candidatePipeline.requestMerge(candidate); await candidatePipeline.idle();
+  candidatePipeline.requestMerge(candidate, "coordinator"); await candidatePipeline.idle();
   assert.equal(candidate.review?.remediation?.actions.at(-1)?.failureClass, "candidate_ci");
   assert.equal(candidate.review?.remediation?.actions.at(-1)?.evidence.checks?.[0]?.output, candidateCheck.output);
   assert.notEqual(candidate.integration?.status, "merged");
@@ -345,7 +349,7 @@ test("candidate and post-merge verification failures become evidence-complete ac
   const post = job("post-fail");
   const postPipeline = new CompletionPipeline(postAdapter, () => undefined, "main", "/root");
   postPipeline.enqueue(post); postPipeline.startJudge(post); await postPipeline.idle();
-  postPipeline.requestMerge(post); await postPipeline.idle();
+  postPipeline.requestMerge(post, "coordinator"); await postPipeline.idle();
   assert.equal(post.review?.status, "post_ci_failed");
   assert.equal(post.review?.remediation?.actions.at(-1)?.failureClass, "post_merge_ci");
   assert.equal(post.review?.remediation?.actions.at(-1)?.evidence.mergeCommit, "commit-post-fail");
@@ -356,7 +360,7 @@ test("changed diff after approval blocks guarded integration", async () => {
   const adapter = new FakeAdapter(); let reads = 0;
   adapter.readDiff = async () => ++reads === 1 ? "reviewed" : "changed";
   const value = job(); const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
-  pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle(); pipeline.requestMerge(value); await pipeline.idle();
+  pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle(); pipeline.requestMerge(value, "coordinator"); await pipeline.idle();
   assert.equal(value.review?.status, "blocked"); assert.equal(adapter.reconcileCalls, 0);
 });
 
