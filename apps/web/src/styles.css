@@ -110,11 +110,14 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
   overflow: hidden;
 }
 .transcript-viewport {
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
   overscroll-behavior: contain;
   scroll-padding-block: 16px 32px;
   padding: 18px max(20px, calc((100% - 900px) / 2)) 0;
 }
-.transcript-content { min-width: 0; }
+.transcript-content { width: 100%; min-width: 0; max-width: 100%; }
 .transcript-end { height: max(40px, env(safe-area-inset-bottom)); pointer-events: none; }
 .transcript [data-row-index], .working-row { scroll-margin-block: 16px 32px; }
 .empty-view { padding: 20px 0; color: var(--dim); font-size: 11px; }
@@ -128,7 +131,7 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .message-body { min-width: 0; max-width: 100%; color: var(--text); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .message.tool .message-body, .message.system .message-body { color: #aab0ba; font-family: inherit; font-size: 11px; }
 .message.tool .message-markdown { white-space: pre-wrap; }
-.message-markdown { min-width: 0; }
+.message-markdown { min-width: 0; max-width: 100%; }
 .message-markdown > :first-child { margin-top: 0; }
 .message-markdown > :last-child { margin-bottom: 0; }
 .message-markdown p { margin: 0 0 .7em; }
