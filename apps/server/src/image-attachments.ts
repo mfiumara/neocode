@@ -6,15 +6,24 @@ import {
   type ImageAttachment,
 } from "@neocode/protocol";
 
+export const MAX_WEBSOCKET_PAYLOAD_BYTES = 48 * 1024 * 1024;
+
 const supportedTypes = new Set<string>(SUPPORTED_IMAGE_MIME_TYPES);
 const base64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function hasExpectedSignature(bytes: Buffer, mimeType: string): boolean {
   if (mimeType === "image/png") return bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-  if (mimeType === "image/jpeg") return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[bytes.length - 2] === 0xff && bytes[bytes.length - 1] === 0xd9;
+  // Browsers may retain bytes after JPEG's EOI marker when copying from a
+  // native macOS pasteboard. The SOI plus marker prefix is the stable magic;
+  // Pi/the model provider remains responsible for fully decoding the image.
+  if (mimeType === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   if (mimeType === "image/gif") return bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a";
   if (mimeType === "image/webp") return bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
   return false;
+}
+
+export function imagesForPi(attachments: ImageAttachment[]): Array<{ type: "image"; data: string; mimeType: ImageAttachment["mimeType"] }> {
+  return attachments.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
 }
 
 /** Validate all untrusted image data at the WebSocket boundary before passing it to Pi. */

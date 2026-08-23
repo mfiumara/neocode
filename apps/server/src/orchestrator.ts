@@ -29,6 +29,7 @@ import {
   type TranscriptMessage,
 } from "@neocode/protocol";
 import { activity, toolActivity } from "./activity.js";
+import { imagesForPi } from "./image-attachments.js";
 import { resolveIsolationMode } from "./isolation.js";
 import {
   RUNTIME_STATE_VERSION,
@@ -281,7 +282,7 @@ export class Orchestrator {
 
     try {
       await this.coordinator.prompt(content, {
-        ...(attachments.length ? { images: attachments.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })) } : {}),
+        ...(attachments.length ? { images: imagesForPi(attachments) } : {}),
         ...(this.coordinator.isStreaming ? { streamingBehavior: "steer" as const } : {}),
       });
     } catch (error) {
@@ -523,7 +524,7 @@ export class Orchestrator {
       this.workers.set(job.id, { session, cancelled: false });
       this.bindWorker(job, session);
       await session.prompt(job.prompt, attachments.length ? {
-        images: attachments.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })),
+        images: imagesForPi(attachments),
       } : undefined);
 
       if (this.workers.get(job.id)?.cancelled) return;
