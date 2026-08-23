@@ -138,6 +138,36 @@ export interface AgentActivity {
 
 export interface ModelRef { provider: string; id: string }
 export interface ModelChoice extends ModelRef { label: string }
+
+/** Safe aggregate model-context telemetry. No prompt or summary content is transported. */
+export interface ModelContextUsage {
+  /** Null after compaction until a successful post-compaction model response makes usage trustworthy. */
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+  updatedAt: number;
+}
+
+export type CompactionState = "active" | "completed" | "failed" | "aborted";
+export interface CoordinatorCompactionStatus {
+  state: CompactionState;
+  reason: "manual" | "threshold" | "overflow";
+  startedAt: number;
+  completedAt?: number;
+  /** Safe SDK metadata only. The generated summary and private context are never transported. */
+  tokensBefore?: number;
+  estimatedTokensAfter?: number;
+  error?: string;
+}
+
+export interface CoordinatorContextState {
+  usage?: ModelContextUsage;
+  autoCompactionEnabled: boolean;
+  /** Authoritative server gate; manual compaction is coordinator-only and idle-only. */
+  manualCompactionAvailable: boolean;
+  compaction?: CoordinatorCompactionStatus;
+}
+
 export interface AgentSettings {
   variant: AgentVariant;
   thinkingLevel: ThinkingLevel;
@@ -347,6 +377,7 @@ export interface AppSnapshot {
     settings: AgentSettings;
     model: ModelRef | null;
     models: ModelChoice[];
+    context: CoordinatorContextState;
   };
   jobs: AgentJob[];
   maintenance: MaintenanceStatus;
@@ -361,6 +392,7 @@ export type ClientMessage =
   | { type: "cycle_variant" }
   | { type: "cycle_thinking" }
   | { type: "set_model"; model: ModelRef }
+  | { type: "compact_coordinator" }
   | { type: "refresh" }
   | { type: "load_older_messages"; thread: TranscriptThread; before?: string; limit?: number }
   | { type: "clean_now" };
@@ -371,6 +403,7 @@ export type ServerMessage =
   | { type: "coordinator_activity"; activity?: AgentActivity; activityHistory: AgentActivity[] }
   | { type: "coordinator_settings"; settings: AgentSettings }
   | { type: "coordinator_model_updated"; model: ModelRef }
+  | { type: "coordinator_context"; context: CoordinatorContextState }
   | { type: "coordinator_message"; message: TranscriptMessage }
   | { type: "coordinator_message_updated"; message: TranscriptMessage }
   | { type: "coordinator_prompt_failed"; messageId: string; error: string }

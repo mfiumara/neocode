@@ -28,6 +28,7 @@ import {
   type AgentJob,
   type AppSnapshot,
   type ClientMessage,
+  type CoordinatorContextState,
   type ImageAttachment,
   type ServerMessage,
   type TranscriptMessage,
@@ -278,6 +279,8 @@ export function App() {
       } else if (message.type === "coordinator_model_updated") {
         setPendingModel(undefined);
         setSnapshot((current) => current ? { ...current, coordinator: { ...current.coordinator, model: message.model } } : current);
+      } else if (message.type === "coordinator_context") {
+        setSnapshot((current) => current ? { ...current, coordinator: { ...current.coordinator, context: message.context } } : current);
       } else if (message.type === "coordinator_message") {
         localPromptIdsRef.current.delete(message.message.id);
         setSnapshot((current) => current ? {
@@ -885,10 +888,15 @@ export function App() {
               <span className="eyebrow">{active.kind === "coordinator" ? "MAIN THREAD · RECONCILIATION & INTEGRATION" : activeJob ? jobLifecycleLabel(activeJob).toUpperCase() : "WORKER"}</span>
               <h1>{active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"}</h1>
             </div>
-            {active.kind === "coordinator" && (<>
+            {active.kind === "coordinator" && (<div className="coordinator-header-controls">
               <Tooltip><TooltipTrigger asChild><Button variant="outline" size="sm" className="model-selector" disabled={modelSelectDisabled} onClick={() => setModelPaletteOpen(true)} aria-label="Choose coordinator model">
                 <span>model</span><strong>{pendingModel ? "switching…" : snapshot?.coordinator.models.find((model) => modelKey(model) === currentModelKey)?.label || "select…"}</strong>
               </Button></TooltipTrigger><TooltipContent>Model used by the coordinator and new workers</TooltipContent></Tooltip>
+              <ContextIndicator
+                context={snapshot?.coordinator.context}
+                connected={connected}
+                onCompact={() => send({ type: "compact_coordinator" })}
+              />
               <CommandDialog open={modelPaletteOpen} onOpenChange={setModelPaletteOpen} title="Choose coordinator model" description="Search configured models">
                 <Command>
                   <CommandInput placeholder="Search models…" />
@@ -905,7 +913,7 @@ export function App() {
                   </CommandList>
                 </Command>
               </CommandDialog>
-            </>)}
+            </div>)}
             {activeJob && (
               <div className="view-controls">
                 <Tooltip><TooltipTrigger asChild><Badge className={`isolation-badge ${activeJob.isolation.mode}`}>
@@ -1122,6 +1130,73 @@ export function App() {
     </main>
     </TooltipProvider>
   );
+}
+
+function tokenCount(value: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+}
+
+export function ContextIndicator({ context, connected, onCompact }: {
+  context?: CoordinatorContextState;
+  connected: boolean;
+  onCompact: () => void;
+}) {
+  const usage = context?.usage;
+  const known = usage?.tokens !== null && usage?.tokens !== undefined;
+  const percent = known && usage?.percent !== null && usage?.percent !== undefined
+    ? Math.max(0, usage.percent)
+    : undefined;
+  const compaction = context?.compaction;
+  const active = compaction?.state === "active";
+  const statusLabel = active
+    ? `Compacting model context (${compaction.reason})`
+    : compaction
+      ? `Compaction ${compaction.state}${compaction.error ? `: ${compaction.error}` : ""}`
+      : "No compaction reported this session";
+  const usageLabel = !usage
+    ? "Context capacity unknown"
+    : known
+      ? `${tokenCount(usage.tokens!)} of ${tokenCount(usage.contextWindow)} tokens (${Math.round(percent!)}%)`
+      : compaction?.state === "completed"
+        ? `Usage unknown after compaction; capacity ${tokenCount(usage.contextWindow)} tokens`
+        : `Context usage unknown; capacity ${tokenCount(usage.contextWindow)} tokens`;
+  const autoLabel = context ? (context.autoCompactionEnabled ? "on" : "off") : "unknown";
+
+  return <div className="context-indicator" aria-label="Coordinator model context">
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div className="context-usage" tabIndex={0}>
+          <span className="context-label">context</span>
+          <strong>{usage && known ? `${tokenCount(usage.tokens!)} / ${tokenCount(usage.contextWindow)}` : usage ? `unknown / ${tokenCount(usage.contextWindow)}` : "unknown"}</strong>
+          {percent !== undefined && <span className="context-percent">{Math.round(percent)}%</span>}
+          {usage && known
+            ? <meter min={0} max={usage.contextWindow} value={Math.min(usage.tokens!, usage.contextWindow)} aria-label={usageLabel} />
+            : <span className="context-unknown" role="status" aria-label={usageLabel}>?</span>}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent>{usageLabel}. This shows token usage only, never prompts, reasoning, secrets, or summary contents.</TooltipContent>
+    </Tooltip>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={`auto-compact ${context ? (context.autoCompactionEnabled ? "enabled" : "disabled") : "unknown"}`} tabIndex={0} aria-label={`Automatic context compaction ${context ? (context.autoCompactionEnabled ? "enabled" : "disabled") : "unknown"}`}>
+          auto {autoLabel}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>Automatic SDK compaction is {context ? (context.autoCompactionEnabled ? "enabled" : "disabled") : "unknown"}. It summarizes active model context; it does not delete Neocode transcript history.</TooltipContent>
+    </Tooltip>
+    <Button
+      variant="outline"
+      size="sm"
+      className="compact-button"
+      disabled={!connected || !context?.manualCompactionAvailable}
+      onClick={onCompact}
+      aria-label="Compact coordinator model context"
+      aria-describedby="compaction-status"
+    >{active ? "Compacting…" : "Compact"}</Button>
+    <span id="compaction-status" className={`compaction-status ${compaction?.state || "idle"}`} role="status" aria-live="polite">
+      {statusLabel}
+    </span>
+  </div>;
 }
 
 export function TechnicalEvidence({ label = "Technical details", children }: { label?: string; children: ReactNode }) {

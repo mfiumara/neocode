@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentJob } from "@neocode/protocol";
-import { App, JobSidebarRow, ReviewView } from "./App";
+import { TooltipProvider } from "./components/ui/tooltip";
+import { App, ContextIndicator, JobSidebarRow, ReviewView } from "./App";
 
 test("the composer exposes send and an accessible image-picker fallback without a keyboard mode badge", () => {
   const markup = renderToStaticMarkup(<App />);
@@ -14,6 +15,46 @@ test("the composer exposes send and an accessible image-picker fallback without 
   assert.match(actions, />Attach images<\/button>/);
   assert.match(actions, />Send <span>↵<\/span><\/button>/);
   assert.doesNotMatch(markup, /mode-badge|>INSERT<|>NORMAL</);
+});
+
+test("context indicator exposes usage, capacity, percentage, auto state, and an accessible compact action", () => {
+  const markup = renderToStaticMarkup(<TooltipProvider><ContextIndicator
+    connected
+    onCompact={() => {}}
+    context={{
+      usage: { tokens: 48_000, contextWindow: 128_000, percent: 37.5, updatedAt: 1 },
+      autoCompactionEnabled: true,
+      manualCompactionAvailable: true,
+      compaction: { state: "completed", reason: "manual", startedAt: 1, completedAt: 2, tokensBefore: 60_000 },
+    }}
+  /></TooltipProvider>);
+
+  assert.match(markup, /48,000 \/ 128,000/);
+  assert.match(markup, /38%/);
+  assert.match(markup, /<meter[^>]+max="128000"[^>]+value="48000"/);
+  assert.match(markup, /Automatic context compaction enabled/);
+  assert.match(markup, /aria-label="Compact coordinator model context"/);
+  assert.match(markup, /role="status" aria-live="polite">Compaction completed/);
+});
+
+test("context indicator clearly announces unknown post-compaction usage and disables unsafe compaction", () => {
+  const markup = renderToStaticMarkup(<TooltipProvider><ContextIndicator
+    connected
+    onCompact={() => {}}
+    context={{
+      usage: { tokens: null, contextWindow: 128_000, percent: null, updatedAt: 1 },
+      autoCompactionEnabled: false,
+      manualCompactionAvailable: false,
+      compaction: { state: "completed", reason: "overflow", startedAt: 1, completedAt: 2 },
+    }}
+  /></TooltipProvider>);
+
+  assert.match(markup, /unknown \/ 128,000/);
+  assert.match(markup, /Usage unknown after compaction/);
+  assert.match(markup, /Automatic context compaction disabled/);
+  assert.match(markup, /<button[^>]+disabled=""[^>]+aria-label="Compact coordinator model context"/);
+  assert.match(markup, /Compaction completed/);
+  assert.doesNotMatch(markup, /<meter/);
 });
 
 test("the workspace command-palette label uses Command/Ctrl-K", () => {

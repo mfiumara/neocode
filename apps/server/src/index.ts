@@ -110,6 +110,7 @@ websocket.on("connection", (client) => {
         else if (message.type === "cycle_variant") orchestrator.cycleVariant();
         else if (message.type === "cycle_thinking") orchestrator.cycleThinking();
         else if (message.type === "set_model") await orchestrator.setModel(message.model);
+        else if (message.type === "compact_coordinator") await orchestrator.compactCoordinator();
         else if (message.type === "refresh") send(client, { type: "snapshot", snapshot: orchestrator.snapshot() });
         else if (message.type === "load_older_messages") {
           if (!message.thread || (message.thread.kind !== "coordinator" && message.thread.kind !== "job")) throw new Error("Invalid transcript thread.");

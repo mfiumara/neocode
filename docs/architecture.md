@@ -6,6 +6,25 @@ Neocode is an agent cockpit, not a code editor. The repository has one implement
 
 Pi owns model/provider integration, the tool loop, context compaction, and agent sessions. Neocode owns workspaces, background jobs, worktrees, navigation, review, and context selection.
 
+## Coordinator model context and compaction
+
+Neocode transports only aggregate coordinator model-context usage (used tokens,
+model capacity, and percentage) and safe compaction lifecycle metadata. It never
+transports hidden prompts, reasoning, context contents, or generated compaction
+summaries. After successful compaction, usage is intentionally unknown until the
+SDK observes a trustworthy response in the compacted context.
+
+The Pi SDK supports automatic compaction. When settings do not override it, the
+current SDK defaults are enabled with `reserveTokens: 16384` and
+`keepRecentTokens: 20000`. Neocode reads and displays that setting without
+changing it. Previously, Neocode had no compaction UI, status transport, or
+manual action despite that automatic SDK behavior.
+
+Manual compaction requires an explicit coordinator action while fully idle, with
+no queued prompt, model change, compaction, or shutdown in progress. It lossily
+summarizes only the active SDK model session; the independent paginated Neocode
+transcript remains durable and is never deleted or rewritten.
+
 ## Runtime model
 
 The main coordinator's primary job is reconciliation and integration. Alongside read/search it receives explicit orchestration tools: `delegate_task`, `list_jobs`, `inspect_job`, `start_judge`, `request_worker_changes`, `retry_infrastructure`, `guarded_merge`, `verify_integration`, and evidence-gated `mark_not_required`.
@@ -21,6 +40,7 @@ Repair accounting is persisted per failure class and material diff/commit finger
 The WebSocket protocol carries snapshots and incremental updates for:
 
 - coordinator status and transcript
+- safe coordinator context usage, automatic-compaction state, and compaction lifecycle
 - worker metadata, transcript, structured handoff, report and diff
 - every concise lifecycle transition and its owner in the main transcript
 - errors

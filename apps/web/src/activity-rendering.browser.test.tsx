@@ -63,6 +63,7 @@ function snapshot(coordinatorStatus: AppSnapshot["coordinator"]["status"], jobs:
       settings: { variant: "build", thinkingLevel: "off", availableVariants: ["build"], availableThinkingLevels: [] },
       model: null,
       models: [],
+      context: { autoCompactionEnabled: true, manualCompactionAvailable: coordinatorStatus === "idle" },
     },
     jobs,
     maintenance: { state: "idle" },

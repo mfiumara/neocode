@@ -36,7 +36,7 @@ function coordinatorSnapshot(messages: TranscriptMessage[], job: AgentJob): AppS
       status: "idle", activityHistory: [], messages,
       transcriptPage: { oldestCursor: messages[0]?.id, hasOlder: true },
       settings: { variant: "build", thinkingLevel: "off", availableVariants: ["build"], availableThinkingLevels: [] },
-      model: null, models: [],
+      model: null, models: [], context: { autoCompactionEnabled: true, manualCompactionAvailable: true },
     }, jobs: [job], maintenance: { state: "idle" },
   };
 }

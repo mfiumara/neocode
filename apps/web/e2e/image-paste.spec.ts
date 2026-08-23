@@ -93,7 +93,7 @@ test("integrated app pastes, opens, sends, validates, and restores image attachm
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: `http://127.0.0.1:${webPort}` });
   await page.goto("/");
   await expect(page.locator("textarea")).toBeVisible();
-  await expect(page.getByRole("status")).toHaveText(/local/);
+  await expect(page.getByRole("status").filter({ hasText: "local" })).toHaveText(/local/);
 
   const servedSource = await page.evaluate(() => fetch("/src/App.tsx").then((response) => response.text()));
   if (verifyCurrentBundle) {

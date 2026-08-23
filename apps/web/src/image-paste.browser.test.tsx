@@ -37,6 +37,7 @@ function snapshot(): AppSnapshot {
       settings: { variant: "build", thinkingLevel: "off", availableVariants: ["build"], availableThinkingLevels: [] },
       model: null,
       models: [],
+      context: { autoCompactionEnabled: true, manualCompactionAvailable: true },
     },
     jobs: [],
     maintenance: { state: "idle" },

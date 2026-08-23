@@ -21,6 +21,8 @@ import {
   type AgentStatus,
   type AgentVariant,
   type AppSnapshot,
+  type CoordinatorCompactionStatus,
+  type CoordinatorContextState,
   type ImageAttachment,
   type JudgeEvidence,
   type ModelChoice,
@@ -206,6 +208,10 @@ export class Orchestrator {
   private coordinatorVariant: AgentVariant = "build";
   private coordinatorAborting = false;
   private modelChangeInProgress = false;
+  private coordinatorCompacting = false;
+  private coordinatorContextUnknownAfterCompaction = false;
+  private coordinatorCompaction?: CoordinatorCompactionStatus;
+  private disposing = false;
   private modelRuntime!: ModelRuntime;
   private coordinator!: AgentSession;
   private completionPipeline!: CompletionPipeline;
@@ -522,6 +528,7 @@ export class Orchestrator {
         settings: this.settings(),
         model: this.currentModel(),
         models: this.modelChoices(),
+        context: this.coordinatorContextState(),
       },
       jobs: this.listJobs().map((job) => this.transportJob(job)),
       maintenance: { ...this.maintenance },
@@ -564,6 +571,7 @@ export class Orchestrator {
     this.pendingCoordinatorPrompts.push(pending);
     this.acceptingCoordinatorPromptIds.add(messageId);
     this.persist();
+    this.publishCoordinatorContext();
     try {
       // Queue acknowledgement is acceptance truth, so it must never race the
       // atomic durable write that makes this prompt recoverable.
@@ -573,6 +581,7 @@ export class Orchestrator {
       this.pendingCoordinatorPrompts.splice(this.pendingCoordinatorPrompts.indexOf(pending), 1);
       this.coordinatorMessages.splice(this.coordinatorMessages.indexOf(userMessage), 1);
       this.persist();
+      this.publishCoordinatorContext();
       throw error;
     }
     this.acceptingCoordinatorPromptIds.delete(messageId);
@@ -581,12 +590,14 @@ export class Orchestrator {
   }
 
   private schedulePromptDrain(): void {
-    if (this.promptDrain || this.coordinatorPromptDrainBlocked || !this.coordinator) return;
+    if (this.promptDrain || this.coordinatorPromptDrainBlocked || !this.coordinator
+      || this.coordinatorTurnInFlight || this.coordinatorCompacting || this.modelChangeInProgress || this.disposing) return;
     this.promptDrain = this.drainCoordinatorPrompts().finally(() => {
       this.promptDrain = undefined;
       const head = this.pendingCoordinatorPrompts[0];
       if (head && !this.coordinatorPromptDrainBlocked && !this.acceptingCoordinatorPromptIds.has(head.messageId)
-        && !this.coordinatorTurnInFlight && this.coordinatorStatus !== "running" && this.coordinator.isIdle) this.schedulePromptDrain();
+        && !this.coordinatorTurnInFlight && !this.coordinatorCompacting && !this.modelChangeInProgress && !this.disposing
+        && this.coordinatorStatus !== "running" && this.coordinator.isIdle) this.schedulePromptDrain();
     });
   }
 
@@ -594,6 +605,7 @@ export class Orchestrator {
     while (this.pendingCoordinatorPrompts.length
       && !this.acceptingCoordinatorPromptIds.has(this.pendingCoordinatorPrompts[0]!.messageId)
       && !this.coordinatorTurnInFlight
+      && !this.coordinatorCompacting && !this.modelChangeInProgress && !this.disposing
       && this.coordinatorStatus !== "running" && this.coordinator.isIdle) {
       const pending = this.pendingCoordinatorPrompts[0]!;
       const message = this.coordinatorMessages.find((entry) => entry.id === pending.messageId);
@@ -631,11 +643,13 @@ export class Orchestrator {
         this.recordPromptSettlement(message);
         this.activeCoordinatorPromptId = undefined;
         this.promptResponseCheckpoint = undefined;
+        this.publishCoordinatorContext();
         this.persist();
         this.emit({ type: "coordinator_message_updated", message: { ...message } });
       } catch (error) {
         this.pendingCoordinatorPrompts.shift();
         this.activeCoordinatorPromptId = undefined;
+        this.publishCoordinatorContext();
         this.promptResponseCheckpoint = undefined;
         const promptError = error instanceof Error ? error.message : String(error);
         settlePrompt(message, promptError);
@@ -701,8 +715,99 @@ export class Orchestrator {
     return this.publishSettings();
   }
 
+  private manualCompactionAvailable(): boolean {
+    return !!this.coordinator
+      && !this.disposing
+      && !this.coordinatorTurnInFlight
+      && !this.coordinatorCompacting
+      && !this.modelChangeInProgress
+      && !this.coordinatorAborting
+      && this.coordinatorStatus === "idle"
+      && this.coordinator.isIdle
+      && !this.activeCoordinatorPromptId
+      && this.pendingCoordinatorPrompts.length === 0
+      && this.acceptingCoordinatorPromptIds.size === 0;
+  }
+
+  private coordinatorContextState(): CoordinatorContextState {
+    const raw = this.coordinator?.getContextUsage?.();
+    const contextWindow = raw?.contextWindow && Number.isFinite(raw.contextWindow) && raw.contextWindow > 0
+      ? raw.contextWindow
+      : undefined;
+    const trustworthyTokens = !this.coordinatorContextUnknownAfterCompaction
+      && raw?.tokens !== null && raw?.tokens !== undefined && Number.isFinite(raw.tokens) && raw.tokens >= 0
+      ? raw.tokens
+      : null;
+    const usage = contextWindow ? {
+      tokens: trustworthyTokens,
+      contextWindow,
+      percent: trustworthyTokens === null
+        ? null
+        : (raw?.percent !== null && raw?.percent !== undefined && Number.isFinite(raw.percent)
+          ? raw.percent
+          : trustworthyTokens / contextWindow * 100),
+      updatedAt: Date.now(),
+    } : undefined;
+    return {
+      usage,
+      autoCompactionEnabled: this.coordinator?.autoCompactionEnabled ?? true,
+      manualCompactionAvailable: this.manualCompactionAvailable(),
+      compaction: this.coordinatorCompaction ? { ...this.coordinatorCompaction } : undefined,
+    };
+  }
+
+  private publishCoordinatorContext(): void {
+    if (!this.coordinator) return;
+    this.emit({ type: "coordinator_context", context: this.coordinatorContextState() });
+  }
+
+  /** Compact only the coordinator's active SDK model context; durable Neocode messages are untouched. */
+  async compactCoordinator(): Promise<void> {
+    if (!this.manualCompactionAvailable()) {
+      if (this.disposing) throw new Error("The coordinator is shutting down.");
+      if (this.coordinatorTurnInFlight) throw new Error("Wait for the current coordinator turn to settle before compacting context.");
+      if (this.modelChangeInProgress) throw new Error("Wait for the coordinator model change to finish before compacting context.");
+      if (this.coordinatorCompacting) throw new Error("Coordinator context compaction is already in progress.");
+      if (this.pendingCoordinatorPrompts.length || this.activeCoordinatorPromptId || this.acceptingCoordinatorPromptIds.size) {
+        throw new Error("Wait for all queued coordinator prompts to finish before compacting context.");
+      }
+      throw new Error("Manual context compaction is available only while the coordinator is idle.");
+    }
+    // Claim the gate before entering SDK code so another command cannot race it.
+    this.coordinatorCompacting = true;
+    this.publishCoordinatorContext();
+    let compactError: unknown;
+    try {
+      await this.coordinator.compact();
+    } catch (error) {
+      compactError = error;
+      throw error;
+    } finally {
+      // The SDK normally emits compaction_end. Fail closed if an exceptional
+      // implementation returns or throws without a terminal event.
+      if (this.coordinatorCompacting) {
+        this.coordinatorCompacting = false;
+        const now = Date.now();
+        this.coordinatorCompaction = {
+          state: "failed",
+          reason: "manual",
+          startedAt: this.coordinatorCompaction?.startedAt ?? now,
+          completedAt: now,
+          error: compactError instanceof Error
+            ? compactError.message
+            : "Context compaction ended without a terminal SDK event.",
+        };
+        this.publishCoordinatorContext();
+      }
+      this.schedulePromptDrain();
+    }
+  }
+
   async setModel(selection: ModelRef): Promise<void> {
+    if (this.disposing) throw new Error("The coordinator is shutting down.");
+    if (this.coordinatorTurnInFlight) throw new Error("Wait for the current coordinator turn to settle before changing models.");
     if (this.modelChangeInProgress) throw new Error("A coordinator model change is already in progress.");
+    if (this.coordinatorCompacting) throw new Error("Wait for coordinator context compaction to finish before changing models.");
     if (!this.coordinator.isIdle) throw new Error("Wait for the coordinator response to finish (or abort it) before changing models.");
     const model = this.modelRuntime.getAvailableSnapshot().find(
       (candidate) => candidate.provider === selection.provider && candidate.id === selection.id,
@@ -710,17 +815,24 @@ export class Orchestrator {
     if (!model) throw new Error(`Model is not configured or available: ${selection.provider}/${selection.id}`);
     if (this.coordinator.model?.provider === model.provider && this.coordinator.model.id === model.id) return;
     this.modelChangeInProgress = true;
+    this.publishCoordinatorContext();
     try {
       await this.coordinator.setModel(model);
       this.emit({ type: "coordinator_model_updated", model: { provider: model.provider, id: model.id } });
       this.publishSettings();
+      this.publishCoordinatorContext();
       this.persist();
     } finally {
       this.modelChangeInProgress = false;
+      this.publishCoordinatorContext();
+      this.schedulePromptDrain();
     }
   }
 
   async dispose(): Promise<void> {
+    this.disposing = true;
+    this.publishCoordinatorContext();
+    if (this.coordinatorCompacting) this.coordinator.abortCompaction();
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
     if (this.janitorTimer) clearInterval(this.janitorTimer);
@@ -915,6 +1027,7 @@ export class Orchestrator {
       if (event.type === "agent_start") {
         lastAssistantMessageId = undefined;
         this.coordinatorStatus = "running";
+        this.publishCoordinatorContext();
         this.persist();
         this.emit({ type: "coordinator_status", status: "running" });
         this.setCoordinatorActivity(activity("starting", "Starting"));
@@ -961,17 +1074,50 @@ export class Orchestrator {
         this.persist();
         streaming = undefined;
         emitted = false;
+      } else if (event.type === "compaction_start") {
+        this.coordinatorCompacting = true;
+        this.coordinatorCompaction = {
+          state: "active",
+          reason: event.reason,
+          startedAt: Date.now(),
+        };
+        this.publishCoordinatorContext();
+      } else if (event.type === "compaction_end") {
+        this.coordinatorCompacting = false;
+        const completedAt = Date.now();
+        const state = event.aborted ? "aborted" : event.errorMessage || !event.result ? "failed" : "completed";
+        if (state === "completed") this.coordinatorContextUnknownAfterCompaction = true;
+        this.coordinatorCompaction = {
+          state,
+          reason: event.reason,
+          startedAt: this.coordinatorCompaction?.state === "active"
+            ? this.coordinatorCompaction.startedAt
+            : completedAt,
+          completedAt,
+          tokensBefore: event.result?.tokensBefore,
+          estimatedTokensAfter: event.result?.estimatedTokensAfter,
+          error: event.errorMessage,
+        };
+        this.publishCoordinatorContext();
+        if (this.pendingCoordinatorPrompts.length) this.schedulePromptDrain();
+        else this.coordinatorNotifications?.settled();
       } else if (event.type === "agent_settled") {
+        const refreshedUsage = this.coordinator.getContextUsage?.();
+        if (refreshedUsage?.tokens !== null && refreshedUsage?.tokens !== undefined) {
+          this.coordinatorContextUnknownAfterCompaction = false;
+        }
         if (this.coordinatorStatus !== "error") {
           this.coordinatorStatus = "idle";
           this.emit({ type: "coordinator_status", status: "idle" });
         }
         this.setCoordinatorActivity(undefined, this.coordinatorAborting ? "aborted" : "completed");
         // Finalize any durable system wake on the authoritative Pi settlement,
-        // even when user-prompt bookkeeping is also present.
+        // even when user-prompt bookkeeping is also present, then transport the
+        // newly trustworthy post-response context usage.
         this.coordinatorNotifications?.agentSettled();
+        this.publishCoordinatorContext();
         const pending = this.pendingCoordinatorPrompts[0];
-        if (!this.coordinatorAborting && pending?.messageId === this.activeCoordinatorPromptId && pending.state === "processing") {
+        if (!this.coordinatorAborting && pending && pending.messageId === this.activeCoordinatorPromptId && pending.state === "processing") {
           // Only agent settlement proves the assistant/tool loop is complete;
           // intermediate assistant message_end events may merely request tools.
           checkpointPromptResponse(pending, lastAssistantMessageId);
@@ -1642,9 +1788,10 @@ export class Orchestrator {
       append: (event) => this.appendCoordinatorWorkerEvent(event),
       persist: () => { this.persist(); return this.stateStore.flush(); },
       currentJob: (jobId) => this.jobs.get(jobId),
-      isIdle: () => this.coordinatorStatus === "idle" && this.coordinator.isIdle,
+      isIdle: () => this.coordinatorStatus === "idle" && this.coordinator.isIdle
+        && !this.coordinatorCompacting && !this.modelChangeInProgress && !this.disposing,
       reserveTurn: (event) => {
-        if (this.coordinatorTurnInFlight) return undefined;
+        if (this.coordinatorTurnInFlight || this.coordinatorCompacting || this.modelChangeInProgress || this.disposing) return undefined;
         const activeLanes = this.activeReviewLaneIds();
         if (!activeLanes.has(event.jobId) && activeLanes.size >= this.maintenanceConfig.reviewConcurrency) return undefined;
         this.coordinatorTurnInFlight = true;
