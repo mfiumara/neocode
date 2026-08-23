@@ -73,6 +73,26 @@ test("runtime state atomically round-trips all job and session metadata", async 
   }
 });
 
+test("durable transcripts preserve image data used by restored clickable threads", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-state-images-"));
+  try {
+    const state = fixture(root);
+    state.coordinator.messages[0]!.attachments = [{
+      id: "image-1",
+      mimeType: "image/png",
+      data: "iVBORw0KGgo=",
+      size: 8,
+      name: "restored.png",
+    }];
+    const store = new RuntimeStateStore(root);
+    store.save(state);
+    await store.flush();
+    assert.deepEqual((await store.load())?.coordinator.messages[0]?.attachments, state.coordinator.messages[0]?.attachments);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("streaming saves coalesce to the latest complete snapshot", async () => {
   const root = await mkdtemp(join(tmpdir(), "neocode-state-"));
   try {

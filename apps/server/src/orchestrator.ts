@@ -32,6 +32,8 @@ import {
 } from "@neocode/protocol";
 import { activity, toolActivity } from "./activity.js";
 import { CompletionPipeline, LocalReviewAdapter, readWorktreeDiff } from "./completion-pipeline.js";
+import { imagesForPi } from "./image-attachments.js";
+
 import { resolveIsolationMode } from "./isolation.js";
 import {
   canAutomaticallyResume,
@@ -344,7 +346,7 @@ export class Orchestrator {
 
     try {
       await this.coordinator.prompt(content, {
-        ...(attachments.length ? { images: attachments.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })) } : {}),
+        ...(attachments.length ? { images: imagesForPi(attachments) } : {}),
         ...(this.coordinator.isStreaming ? { streamingBehavior: "steer" as const } : {}),
       });
     } catch (error) {
@@ -668,7 +670,8 @@ export class Orchestrator {
       this.bindWorker(job, session, attempt.generation, attempt.token);
       const prompt = attempt.resume ? continuationPrompt(job, reopened) : job.prompt;
       await session.prompt(prompt, attachments.length ? {
-        images: attachments.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })),
+        images: imagesForPi(attachments),
+
       } : undefined);
 
       const activeWorker = this.workers.get(job.id);

@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ClientMessage, ServerMessage } from "@neocode/protocol";
 import { Orchestrator } from "./orchestrator.js";
-import { validateImageAttachments } from "./image-attachments.js";
+import { MAX_WEBSOCKET_PAYLOAD_BYTES, validateImageAttachments } from "./image-attachments.js";
 
 const execFileAsync = promisify(execFile);
 const port = Number(process.env.NEOCODE_PORT || 4318);
@@ -49,7 +49,7 @@ const server = createServer((request, response) => {
 
 // Four 8 MiB images expand to roughly 43 MiB as base64. Bound the complete
 // WebSocket frame as a second line of defense against memory exhaustion.
-const websocket = new WebSocketServer({ server, path: "/ws", maxPayload: 48 * 1024 * 1024 });
+const websocket = new WebSocketServer({ server, path: "/ws", maxPayload: MAX_WEBSOCKET_PAYLOAD_BYTES });
 websocket.on("connection", (client) => {
   clients.add(client);
   send(client, { type: "snapshot", snapshot: orchestrator.snapshot() });

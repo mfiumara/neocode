@@ -14,10 +14,10 @@ import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcript
 import { isDoneJob, jobLifecycleLabel } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 
+import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
+
 import {
   MAX_IMAGE_ATTACHMENTS,
-  MAX_IMAGE_BYTES,
-  SUPPORTED_IMAGE_MIME_TYPES,
   type AgentActivity,
   type AgentJob,
   type AppSnapshot,
@@ -38,16 +38,6 @@ interface BrowserWorkspaceState {
   jobTab: JobTab;
   prompt: string;
   context: ContextEntry[];
-}
-const supportedImageTypes = new Set<string>(SUPPORTED_IMAGE_MIME_TYPES);
-
-function fileAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error || new Error("Could not read the pasted image."));
-    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
-    reader.readAsDataURL(file);
-  });
 }
 function imageSource(image: ImageAttachment): string { return `data:${image.mimeType};base64,${image.data}`; }
 function modelKey(model: { provider: string; id: string }): string { return `${model.provider}/${model.id}`; }
@@ -139,13 +129,19 @@ export function App() {
   // older-message reader back into a live-output follower.
   const followTranscriptRef = useRef(true);
 
-  const send = (message: ClientMessage) => {
+  const send = (message: ClientMessage): boolean => {
     const socket = socketRef.current;
     if (socket?.readyState !== WebSocket.OPEN) {
-      setError("The Neocode backend is not connected.");
-      return;
+      setError("The Neocode backend is not connected. Your prompt and images were kept so you can retry.");
+      return false;
     }
-    socket.send(JSON.stringify(message));
+    try {
+      socket.send(JSON.stringify(message));
+      return true;
+    } catch (sendError) {
+      setError(`Could not send the prompt: ${sendError instanceof Error ? sendError.message : String(sendError)}. Your prompt and images were kept.`);
+      return false;
+    }
   };
 
   useEffect(() => { imagesRef.current = images; }, [images]);
@@ -522,33 +518,42 @@ export function App() {
     setImages((current) => {
       const removed = current.find((image) => image.id === imageId);
       if (removed) URL.revokeObjectURL(removed.previewUrl);
-      return current.filter((image) => image.id !== imageId);
+      const next = current.filter((image) => image.id !== imageId);
+      imagesRef.current = next;
+      return next;
     });
   };
 
   const addPastedImages = async (files: File[]) => {
-    const available = MAX_IMAGE_ATTACHMENTS - imagesRef.current.length;
-    if (available <= 0) return setError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`);
-    const accepted = files.slice(0, available);
-    if (files.length > available) setError(`Only the first ${available} image${available === 1 ? "" : "s"} were attached.`);
     const additions: ComposerImage[] = [];
-    for (const file of accepted) {
-      if (!supportedImageTypes.has(file.type)) { setError(`Unsupported image type: ${file.type || "unknown"}.`); continue; }
-      if (file.size > MAX_IMAGE_BYTES) { setError(`${file.name || "Image"} is larger than ${MAX_IMAGE_BYTES / 1024 / 1024} MB.`); continue; }
-      const previewUrl = URL.createObjectURL(file);
+    const failures: string[] = [];
+    const candidates = files.slice(0, MAX_IMAGE_ATTACHMENTS);
+    if (files.length > candidates.length) failures.push(`Only the first ${MAX_IMAGE_ATTACHMENTS} clipboard files were inspected (attachment limit ${MAX_IMAGE_ATTACHMENTS}).`);
+    for (const file of candidates) {
       try {
-        additions.push({ id: crypto.randomUUID(), mimeType: file.type as ImageAttachment["mimeType"], data: await fileAsBase64(file), size: file.size, name: file.name || "clipboard image", previewUrl });
+        const { blob, ...attachment } = await prepareImage(file);
+        additions.push({ ...attachment, previewUrl: URL.createObjectURL(blob) });
       } catch (readError) {
-        URL.revokeObjectURL(previewUrl);
-        setError(readError instanceof Error ? readError.message : String(readError));
+        failures.push(readError instanceof Error ? readError.message : String(readError));
       }
     }
-    if (!mountedRef.current) additions.forEach((image) => URL.revokeObjectURL(image.previewUrl));
-    else if (additions.length) setImages((current) => {
-      const kept = additions.slice(0, Math.max(0, MAX_IMAGE_ATTACHMENTS - current.length));
+    if (!mountedRef.current) {
+      additions.forEach((image) => URL.revokeObjectURL(image.previewUrl));
+      return;
+    }
+    if (additions.length) {
+      const current = imagesRef.current;
+      const available = Math.max(0, MAX_IMAGE_ATTACHMENTS - current.length);
+      const kept = additions.slice(0, available);
       additions.slice(kept.length).forEach((image) => URL.revokeObjectURL(image.previewUrl));
-      return [...current, ...kept];
-    });
+      if (additions.length > available) failures.push(available
+        ? `Only the first ${available} image${available === 1 ? " was" : "s were"} attached (limit ${MAX_IMAGE_ATTACHMENTS}).`
+        : `No additional images were attached because the limit is ${MAX_IMAGE_ATTACHMENTS}.`);
+      const next = [...current, ...kept];
+      imagesRef.current = next;
+      setImages(next);
+    }
+    if (failures.length) setError(failures.join(" "));
   };
 
   const settings = snapshot?.coordinator.settings;
@@ -567,8 +572,11 @@ export function App() {
     if (!text && !images.length) return;
     const attachments = images.map(({ previewUrl: _previewUrl, ...image }) => image);
     followTranscriptRef.current = true;
-    send({ type: "prompt", text, attachments, context: context.map((entry) => `${entry.label}\n${entry.text}`) });
+    const sent = send({ type: "prompt", text, attachments, context: context.map((entry) => `${entry.label}\n${entry.text}`) });
+    if (!sent) return;
+
     images.forEach((image) => URL.revokeObjectURL(image.previewUrl));
+    imagesRef.current = [];
     setImages([]);
     setPrompt("");
     setContext([]);
@@ -776,12 +784,15 @@ export function App() {
               onFocus={() => setMode("INSERT")}
               onChange={(event) => setPrompt(event.target.value)}
               onPaste={(event) => {
-                const files = [...event.clipboardData.items]
-                  .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-                  .map((item) => item.getAsFile()).filter((file): file is File => Boolean(file));
+                const { files, unreadableFileItems } = filesFromClipboard(event.clipboardData);
                 if (files.length) {
-                  if (!event.clipboardData.getData("text/plain")) event.preventDefault();
+                  // Let the browser insert accompanying text while adding the
+                  // image. For an image-only paste, suppress a filename/object
+                  // replacement character from appearing in the textarea.
+                  if (!clipboardPlainText(event.clipboardData)) event.preventDefault();
                   void addPastedImages(files);
+                } else if (unreadableFileItems) {
+                  setError("The browser reported a clipboard image but did not make its bytes available. Try copying the image again or save it as PNG and paste the file.");
                 }
               }}
               onKeyDown={(event) => {
