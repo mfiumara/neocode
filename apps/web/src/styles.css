@@ -62,7 +62,8 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .view-controls { display: flex; align-items: center; gap: 10px; }
 .view-controls > code { color: var(--dim); font-size: 9px; }
 .view-tabs { display: flex; }
-.view-tabs button, .cancel-button { padding: 5px 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 9px; }
+.view-tabs button, .cancel-button, .review-button { padding: 5px 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 9px; }
+.review-button { border-color: #647247; color: var(--accent); }
 .view-tabs button + button { border-left: 0; }
 .view-tabs button.active { background: #1b1d21; color: var(--text); }
 .cancel-button { color: var(--red); }
@@ -169,6 +170,26 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .diff-empty { padding: 30px; color: var(--muted); text-align: center; }
 .diff-empty h2 { font-size: 13px; font-weight: 400; }
 .diff-empty p { font-size: 10px; }
+
+.review-view { min-height: 0; overflow: auto; padding: 20px max(24px, calc((100% - 900px) / 2)) 70px; font-size: 11px; line-height: 1.5; }
+.review-view > header { display: flex; gap: 12px; align-items: center; color: var(--muted); }
+.review-view h2 { margin: 24px 0 8px; color: var(--text); font-size: 11px; font-weight: 500; text-transform: uppercase; }
+.review-status { padding: 3px 6px; border: 1px solid var(--line); color: var(--accent); text-transform: uppercase; }
+.review-status.rejected, .review-status.ci_failed, .review-status.post_ci_failed, .review-status.failed, .review-status.conflict { color: var(--red); }
+.review-error { padding: 9px; border: 1px solid #663b40; background: #251719; color: #e2a0a5; white-space: pre-wrap; }
+.check-list details { margin-bottom: 5px; border: 1px solid var(--line); }
+.check-list details.pass summary, .judge-evidence .pass b { color: var(--green); }
+.check-list details.fail summary, .judge-evidence .fail b { color: var(--red); }
+.check-list summary { padding: 7px; cursor: pointer; }
+.check-list summary span { float: right; color: var(--dim); }
+.check-list pre { max-height: 280px; margin: 0; padding: 9px; overflow: auto; border-top: 1px solid var(--line); background: #0d0f12; color: #aaaeb6; white-space: pre-wrap; }
+.judge-evidence code { color: var(--dim); font-size: 9px; }
+.judge-evidence ul { padding: 0; list-style: none; }
+.judge-evidence li { display: grid; gap: 3px; margin: 6px 0; padding: 7px; border-left: 2px solid var(--line); }
+.judge-evidence li span { color: var(--muted); }
+.transition-log { padding: 0; list-style: none; }
+.transition-log li { display: grid; grid-template-columns: 75px 120px 1fr; gap: 8px; padding: 4px 0; border-bottom: 1px solid #181a1e; }
+.transition-log time, .transition-log span { color: var(--dim); }
 
 .palette-backdrop { position: fixed; inset: 0; z-index: 20; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; background: rgba(0,0,0,.7); }
 .palette { width: min(600px, calc(100vw - 30px)); border: 1px solid #3a3d44; background: #111317; }
