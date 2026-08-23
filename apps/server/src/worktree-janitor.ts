@@ -66,6 +66,9 @@ export class WorktreeJanitor {
 
   async review(job: AgentJob): Promise<boolean> {
     const checkedAt = this.now();
+    if (job.staleCandidate?.state === "pending") {
+      return refusal(job, "not_completed", "Stale candidate awaits explicit confirmation; all files are retained.", checkedAt);
+    }
     if (job.status !== "completed") return refusal(job, "not_completed", `Job status is ${job.status}.`, checkedAt);
     if (!job.completion?.head || !job.completion.finishedAt || !job.worktreeIdentity) {
       return refusal(job, "missing_durable_identity", "Completion head or worktree identity is missing.", checkedAt);
@@ -105,6 +108,9 @@ export class WorktreeJanitor {
 
     const targetHead = await this.git(["rev-parse", this.options.targetRef], this.workspaceRoot);
     const superseded = integration === "superseded";
+    if (superseded && job.staleCandidate?.confirmation === "confirmed_superseded" && !job.staleCandidate.archive) {
+      return refusal(job, "missing_durable_identity", "Confirmed stale work has no durable evidence archive.", checkedAt);
+    }
     let mergeMethod: CleanupEvidence["mergeMethod"] = superseded
       ? "superseded-branch-retained" : commits.length ? "commit-ancestry" : "no-changes";
     // Superseded work remains committed on its retained branch, so removing the

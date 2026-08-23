@@ -80,6 +80,26 @@ test("runtime state atomically round-trips all job and session metadata", async 
   }
 });
 
+test("pending stale nomination and exact audit survive restart persistence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-state-stale-"));
+  try {
+    const state = fixture(root);
+    const job = state.jobs[0]!.job;
+    job.integration = { status: "unmerged" };
+    delete job.cleanup;
+    job.staleCandidate = {
+      state: "pending", nominatedAt: 5, nominatedBy: "manifest-migration", reason: "Semantic audit identifies a likely historical duplicate.",
+      evidenceSource: "docs/audit.json", confirmation: "pending", resumeState: { status: "interrupted", recoverable: true },
+      audit: { path: job.isolation.path, branch: job.branch, head: "def456", dirty: true, porcelain: " M file\n?? local" },
+    };
+    const store = new RuntimeStateStore(root);
+    store.save(state); await store.flush();
+    const restored = await store.load();
+    assert.equal(restored?.jobs[0]?.job.staleCandidate?.state, "pending");
+    assert.equal(restored?.jobs[0]?.job.staleCandidate?.audit.porcelain, " M file\n?? local");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("durable coordinator queue survives refresh with context and transcript lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "neocode-state-prompts-"));
   try {

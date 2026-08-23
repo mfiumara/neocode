@@ -31,6 +31,7 @@ export function isClearlyReadOnlyRoot(job: AgentJob): boolean {
 }
 
 export function canAutomaticallyResume(job: AgentJob): boolean {
+  if (job.staleCandidate?.state === "pending") return false;
   if (job.status !== "interrupted" || !job.recoverable || job.recoveryIssue) return false;
   return job.isolation.mode === "worktree" || isClearlyReadOnlyRoot(job);
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentJob } from "@neocode/protocol";
-import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
+import { isDoneJob, isStaleCandidate, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
 
 function job(status: AgentJob["status"], integration?: AgentJob["integration"]): AgentJob {
   return {
@@ -18,6 +18,21 @@ test("completed unmerged, review, conflict, and interrupted jobs remain actionab
   ]) assert.equal(isDoneJob(value), false);
   assert.equal(jobLifecycleLabel(job("completed", { status: "unmerged" })), "Completed · unmerged");
   assert.equal(jobLifecycleLabel(job("completed", { status: "conflicted" })), "Conflict · needs attention");
+});
+
+test("pending stale candidates are a distinct non-Done group and terminal disposition has precedence", () => {
+  const pending = job("interrupted");
+  pending.staleCandidate = {
+    state: "pending", nominatedAt: 1, nominatedBy: "coordinator", reason: "Specific historical replacement evidence.",
+    evidenceSource: "audit.json", confirmation: "pending", resumeState: { status: "interrupted" },
+    audit: { path: "/worktree", branch: "worker", head: "abc", dirty: true, porcelain: " M file" },
+  };
+  assert.equal(isStaleCandidate(pending), true);
+  assert.equal(isDoneJob(pending), false);
+  assert.equal(jobLifecycleLabel(pending), "Needs decision · dirty files retained");
+  pending.integration = { status: "merged" };
+  assert.equal(isStaleCandidate(pending), false, "terminal integration remains authoritative");
+  assert.equal(isDoneJob(pending), true);
 });
 
 test("verified integration, supersession, and non-actionable terminal failures are Done", () => {

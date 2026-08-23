@@ -275,6 +275,34 @@ export interface JobCompletion {
   finishedAt: number;
 }
 
+export interface StaleCandidateArchive {
+  archivedAt: number;
+  /** Workspace-relative paths; archive files never enter transcripts or public URLs. */
+  patchPath: string;
+  evidencePath: string;
+  diffSha256: string;
+  porcelainSha256: string;
+  dirty: boolean;
+  untrackedFiles: Array<{ path: string; sha256: string; bytes: number }>;
+}
+
+/** Nonterminal, coordinator-owned inventory state awaiting an explicit decision. */
+export interface StaleCandidate {
+  state: "pending" | "kept" | "superseded";
+  nominatedAt: number;
+  nominatedBy: "coordinator" | "manifest-migration";
+  reason: string;
+  suspectedReplacementJobId?: string;
+  suspectedReplacementCommit?: string;
+  evidenceSource: string;
+  confirmation: "pending" | "still_wanted" | "confirmed_superseded";
+  resolvedAt?: number;
+  /** State restored by Still wanted; this does not bypass normal lifecycle gates. */
+  resumeState: { status: JobStatus; recoverable?: boolean; recoveryIssue?: string };
+  audit: { path: string; branch: string; head: string; dirty: boolean; porcelain: string };
+  archive?: StaleCandidateArchive;
+}
+
 export interface JobIntegration {
   status: IntegrationStatus;
   targetRef?: string;
@@ -363,6 +391,8 @@ export interface AgentJob {
   /** `completed` means the worker stopped; only `merged` means Git verified integration. */
   integration?: JobIntegration;
   cleanup?: JobCleanup;
+  /** Provisional only. Terminal integration disposition always takes precedence. */
+  staleCandidate?: StaleCandidate;
 }
 
 export interface MaintenanceStatus {
@@ -401,6 +431,7 @@ export type ClientMessage =
   | { type: "delegate"; text: string; isolation?: RequestedIsolationMode; attachments?: ImageAttachment[] }
   | { type: "cancel_job"; jobId: string }
   | { type: "resume_job"; jobId: string }
+  | { type: "decide_stale_candidate"; jobId: string; decision: "confirm_superseded" | "still_wanted" }
   | { type: "cycle_variant" }
   | { type: "cycle_thinking" }
   | { type: "set_model"; model: ModelRef }

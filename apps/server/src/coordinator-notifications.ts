@@ -30,6 +30,8 @@ interface WorkerSignal {
 }
 
 function signalFor(job: AgentJob): WorkerSignal | undefined {
+  // A nomination is a human decision queue, never an autonomous wake source.
+  if (job.staleCandidate?.state === "pending") return undefined;
   const remediation = job.review?.remediation;
   const action = remediation?.actions.find((entry) => entry.id === remediation.currentActionId);
   if (action && (action.state === "pending" || action.state === "exhausted")) {
@@ -161,6 +163,7 @@ export class CoordinatorNotificationQueue {
   /** Queue one durable autonomous review for a stable backlog state. */
   requestBacklogSweep(snapshot: AgentJob): boolean {
     const job = this.hooks.currentJob?.(snapshot.id) || snapshot;
+    if (job.staleCandidate?.state === "pending") return false;
     const signature = backlogSignature(job);
     const key = `backlog:${job.id}`;
     if (this.state.lastSignals[key] === signature) return false;

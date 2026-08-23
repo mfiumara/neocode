@@ -11,7 +11,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
-import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
+import { isDoneJob, isStaleCandidate, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
 import { latestHistoricalJudgeEvidence, latestJudgeEvidence, reviewPipeline } from "./reviewPipeline";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
@@ -171,6 +171,7 @@ export function App() {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [modelPaletteOpen, setModelPaletteOpen] = useState(false);
   const [doneOpen, setDoneOpen] = useState(true);
+  const [staleOpen, setStaleOpen] = useState(true);
 
   const [activitySynced, setActivitySynced] = useState(false);
   const [pendingModel, setPendingModel] = useState<string>();
@@ -472,7 +473,8 @@ export function App() {
   }, [workspaceStorageKey, snapshot?.cwd, active, jobTab, prompt, context]);
 
   const activeJob = active.kind === "job" ? snapshot?.jobs.find((job) => job.id === active.id) : undefined;
-  const actionableJobs = useMemo(() => (snapshot?.jobs || []).filter((job) => !isDoneJob(job)), [snapshot?.jobs]);
+  const staleJobs = useMemo(() => (snapshot?.jobs || []).filter(isStaleCandidate), [snapshot?.jobs]);
+  const actionableJobs = useMemo(() => (snapshot?.jobs || []).filter((job) => !isDoneJob(job) && !isStaleCandidate(job)), [snapshot?.jobs]);
   const doneJobs = useMemo(() => (snapshot?.jobs || []).filter(isDoneJob), [snapshot?.jobs]);
   const messages = active.kind === "coordinator"
     ? snapshot?.coordinator.messages || []
@@ -906,6 +908,16 @@ export function App() {
             {!actionableJobs.length && <p className="empty-copy">No active or actionable workers.</p>}
           </div>
 
+          <button className="section-label stale-label" aria-expanded={staleOpen} onClick={() => setStaleOpen((value) => !value)}>
+            <span><b>{staleOpen ? "▾" : "▸"}</b> Needs decision · Stale</span><span>{staleJobs.length}</span>
+          </button>
+          {staleOpen && <div className="jobs-list stale-jobs" aria-label="Stale candidates needing a decision">
+            {staleJobs.map((job) => (
+              <JobSidebarRow key={job.id} job={job} active={active.kind === "job" && active.id === job.id} activityReady={activityReady} onOpen={() => openJob(job)} />
+            ))}
+            {!staleJobs.length && <p className="empty-copy">No provisional stale candidates.</p>}
+          </div>}
+
           <button className="section-label done-label" aria-expanded={doneOpen} onClick={() => setDoneOpen((value) => !value)}>
             <span><b>{doneOpen ? "▾" : "▸"}</b> Done</span><span>{doneJobs.length}</span>
           </button>
@@ -980,7 +992,8 @@ export function App() {
                   </TabsList>
                 </Tabs>
                 {activeJob.review && <Badge variant="secondary">Coordinator-owned review</Badge>}
-                {(activeJob.status === "interrupted" || activeJob.status === "needs_attention") && activeJob.recoverable && (
+                {isStaleCandidate(activeJob) && <StaleDecisionControls job={activeJob} send={send} />}
+                {(activeJob.status === "interrupted" || activeJob.status === "needs_attention") && activeJob.recoverable && !isStaleCandidate(activeJob) && (
                   <Button variant="outline" size="sm" className="resume-button" onClick={() => send({ type: "resume_job", jobId: activeJob.id })}>Resume</Button>
                 )}
                 {activeJob.status === "running" && <Button variant="destructive" size="sm" className="cancel-button" onClick={() => send({ type: "cancel_job", jobId: activeJob.id })}>Cancel</Button>}
@@ -1009,6 +1022,7 @@ export function App() {
               }}
             >
               <div className="transcript-content" ref={transcriptContentRef}>
+              {activeJob && isStaleCandidate(activeJob) && <StaleEvidence job={activeJob} />}
               {activeJob && <ReviewStatusPanel job={activeJob} activityReady={activityReady} />}
               {activeJob?.recoveryIssue && <div className="recovery-notice">Recovery needs coordinator attention. Open technical review evidence for exact diagnostics.</div>}
               {!rows.length && (
@@ -1271,6 +1285,40 @@ export function TranscriptMessageBody({ message, jobs }: { message: TranscriptMe
     {presentation.primary ? <Markdown>{presentation.primary}</Markdown> : (!message.attachments?.length && <span className="stream-caret">▋</span>)}
     {presentation.secondary && <small className="identifier-reference">{presentation.secondary}</small>}
     {presentation.technical && <TechnicalEvidence>{presentation.technical}</TechnicalEvidence>}
+  </div>;
+}
+
+export function StaleEvidence({ job }: { job: AgentJob }) {
+  const stale = job.staleCandidate;
+  if (!stale || stale.state !== "pending") return null;
+  const replacement = [
+    stale.suspectedReplacementJobId ? `job ${stale.suspectedReplacementJobId}` : "",
+    stale.suspectedReplacementCommit ? `commit ${stale.suspectedReplacementCommit}` : "",
+  ].filter(Boolean).join(" · ");
+  const exact = JSON.stringify({
+    jobId: job.id, branch: stale.audit.branch, path: stale.audit.path, head: stale.audit.head,
+    dirty: stale.audit.dirty, porcelain: stale.audit.porcelain, evidenceSource: stale.evidenceSource,
+  }, null, 2);
+  return <section className="stale-evidence" aria-labelledby={`stale-title-${job.id}`}>
+    <h2 id={`stale-title-${job.id}`}>Needs decision — checkout retained</h2>
+    <p>{stale.reason}</p>
+    {replacement && <p><strong>Suspected replacement:</strong> {replacement}</p>}
+    <p className="retention-warning">{stale.audit.dirty ? "Dirty files are retained in the worktree. Nothing was cleaned or deleted." : "The branch and worktree are retained. Nothing was cleaned or deleted."}</p>
+    <details><summary>Exact audit evidence</summary><pre>{exact}</pre><button type="button" onClick={() => void navigator.clipboard?.writeText(exact)}>Copy exact evidence</button></details>
+  </section>;
+}
+
+export function StaleDecisionControls({ job, send }: { job: AgentJob; send: (message: ClientMessage) => boolean }) {
+  if (!isStaleCandidate(job)) return null;
+  const decide = (decision: "confirm_superseded" | "still_wanted") => {
+    const warning = decision === "confirm_superseded"
+      ? "Confirm this work is superseded? Dirty diff evidence will be archived first. The checkout will remain retained."
+      : "Confirm this work is still wanted? It will return to normal resume/rebase/review, CI, and judge requirements.";
+    if (window.confirm(warning)) send({ type: "decide_stale_candidate", jobId: job.id, decision });
+  };
+  return <div className="stale-controls" role="group" aria-label="Stale candidate decision">
+    <Button variant="outline" size="sm" onClick={() => decide("still_wanted")}>Still wanted</Button>
+    <Button variant="destructive" size="sm" onClick={() => decide("confirm_superseded")}>Confirm superseded</Button>
   </div>;
 }
 

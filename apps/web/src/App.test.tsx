@@ -3,7 +3,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentJob } from "@neocode/protocol";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { App, ContextIndicator, JobSidebarRow, ReviewStatusPanel, ReviewView } from "./App";
+import { App, ContextIndicator, JobSidebarRow, ReviewStatusPanel, ReviewView, StaleDecisionControls, StaleEvidence } from "./App";
 
 test("the composer exposes send and an accessible image-picker fallback without a keyboard mode badge", () => {
   const markup = renderToStaticMarkup(<App />);
@@ -233,6 +233,29 @@ test("compact panel does not show an active marker for stale review metadata", (
   assert.match(markup, /Review status recorded/);
   assert.match(markup, /live activity is not confirmed/);
   assert.doesNotMatch(markup, /aria-current="step"/);
+});
+
+test("stale evidence is accessible, exact evidence is collapsed/copyable, and decisions are explicit", () => {
+  const stale = sidebarJob("blocked", "interrupted", "unmerged");
+  stale.id = "stale-id";
+  stale.staleCandidate = {
+    state: "pending", nominatedAt: 1, nominatedBy: "manifest-migration",
+    reason: "Dirty historical implementation appears replaced by the current model picker.",
+    suspectedReplacementJobId: "replacement-job", suspectedReplacementCommit: "abcdef123456",
+    evidenceSource: "docs/audit.json", confirmation: "pending", resumeState: { status: "interrupted", recoverable: true },
+    audit: { path: "/safe/.worktrees/stale", branch: "neocode/stale", head: "012345", dirty: true, porcelain: " M secret-name.txt" },
+  };
+  const evidence = renderToStaticMarkup(<StaleEvidence job={stale} />);
+  assert.match(evidence, /Needs decision — checkout retained/);
+  assert.match(evidence, /Nothing was cleaned or deleted/);
+  assert.match(evidence, /Suspected replacement:/);
+  assert.match(evidence, /<details><summary>Exact audit evidence<\/summary>/);
+  assert.match(evidence, /Copy exact evidence/);
+  for (const exact of ["stale-id", "abcdef123456", "/safe/.worktrees/stale", "secret-name.txt"]) assert.ok(evidence.includes(exact));
+  const controls = renderToStaticMarkup(<StaleDecisionControls job={stale} send={() => true} />);
+  assert.match(controls, /role="group" aria-label="Stale candidate decision"/);
+  assert.match(controls, />Still wanted<|>Still wanted<\/button>/);
+  assert.match(controls, />Confirm superseded<|>Confirm superseded<\/button>/);
 });
 
 test("review renders the complete handoff and owned lifecycle evidence", () => {

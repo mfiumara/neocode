@@ -61,6 +61,7 @@ import {
   type DurableRuntimeState,
 } from "./runtime-state.js";
 import { OperationLock, WorktreeJanitor } from "./worktree-janitor.js";
+import { decideStaleCandidate, migrateStaleManifest, nominateStaleCandidate } from "./stale-candidates.js";
 import { transcriptPage } from "./transcript-pagination.js";
 import { integrationComplexityScore } from "./integration-priority.js";
 
@@ -87,7 +88,7 @@ export interface MaintenanceConfig {
   startup?: boolean;
 }
 
-const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "verify_integration", "mark_not_required", "reconcile_jobs", "clean_worktrees"];
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "verify_integration", "nominate_stale_candidate", "decide_stale_candidate", "migrate_stale_manifest", "mark_not_required", "reconcile_jobs", "clean_worktrees"];
 const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
 const VARIANTS: AgentVariant[] = ["build", "plan"];
 
@@ -304,13 +305,23 @@ export class Orchestrator {
       await this.reconcileRestoredJobs();
     }
 
+    // Import only provisional classifications. Ambiguous/moved entries fail
+    // closed inside the importer and never alter execution history.
+    const manifestPath = join(this.cwd, "docs", "worktree-backlog-manifest-20260823.json");
+    if (await this.pathExists(manifestPath)) {
+      await migrateStaleManifest(manifestPath, this.jobs, {
+        workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()),
+      }).catch(() => undefined);
+      for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") this.suppressStaleWakes(job.id);
+    }
+
     this.modelRuntime = await ModelRuntime.create();
     await this.modelRuntime.getAvailable();
 
     const loader = new DefaultResourceLoader({
       cwd: this.cwd,
       agentDir: getAgentDir(),
-      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, and only after final approval call guarded_merge. guarded_merge is a compatibility name: the server first rebases the worker onto current main, judges and validates that exact rebased head, and advances main with --ff-only; never create merge commits. Every action_required event must be inspected for the exact command/output. For source, test, judge, conflict, or post-merge failures, quote specific diagnostics with request_worker_changes so the SAME worktree is resumed; await its new handoff, rerun CI, and launch a fresh judge. For a genuinely transient failure use retry_infrastructure. Never bypass bounded repair rounds; needs_attention requires reporting all evidence. Judges report to you and never merge. Conflicts must return to the same worker, be handed off, and be re-judged. Never ask a worker to mutate root/main. After a guarded merge, call reconcile_jobs so externally or previously integrated workers move to Done, then clean_worktrees to safely remove only clean, Git-verified worktrees. While idle, durable backlog sweep events continuously fill a bounded set of review/remediation lanes, prioritized by deterministic diff size, file overlap, and aging; final main integration remains serialized. Act on each sweep rather than merely summarizing it: inspect the job and take the next safe lifecycle action. When committed work is demonstrably replaced by a job or commit already verified on main, use mark_not_required with specific evidence instead of reviewing obsolete work; never supersede dirty, active, or merely inconvenient work. Resume an interrupted recoverable worker with resume_worker; never resume a branch whose durable safety checks reject it. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
+      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, and only after final approval call guarded_merge. guarded_merge is a compatibility name: the server first rebases the worker onto current main, judges and validates that exact rebased head, and advances main with --ff-only; never create merge commits. Every action_required event must be inspected for the exact command/output. For source, test, judge, conflict, or post-merge failures, quote specific diagnostics with request_worker_changes so the SAME worktree is resumed; await its new handoff, rerun CI, and launch a fresh judge. For a genuinely transient failure use retry_infrastructure. Never bypass bounded repair rounds; needs_attention requires reporting all evidence. Judges report to you and never merge. Conflicts must return to the same worker, be handed off, and be re-judged. Never ask a worker to mutate root/main. After a guarded merge, call reconcile_jobs so externally or previously integrated workers move to Done, then clean_worktrees to safely remove only clean, Git-verified worktrees. While idle, durable backlog sweep events continuously fill a bounded set of review/remediation lanes, prioritized by deterministic diff size, file overlap, and aging; final main integration remains serialized. Act on each sweep rather than merely summarizing it: inspect the job and take the next safe lifecycle action. When committed work is demonstrably replaced by a job or commit already verified on main, use mark_not_required with specific evidence instead of reviewing obsolete work; never supersede dirty, active, or merely inconvenient work. For inactive historical or dirty work that only appears obsolete, use nominate_stale_candidate; it is nonterminal and requires an explicit user/coordinator decide_stale_candidate call. Never autonomously finalize either stale decision. Resume an interrupted recoverable worker with resume_worker; never resume a branch whose durable safety checks reject it. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
 
     });
     await loader.reload();
@@ -375,7 +386,7 @@ export class Orchestrator {
       {
         name: "start_judge", label: "Start independent judge", description: "Coordinator-owned exact-diff CI and fresh independent judge review.",
         parameters: Type.Object({ jobId: Type.String() }),
-        execute: async (_callId: string, params: { jobId: string }) => { this.completionPipeline.startJudge(this.requireJob(params.jobId)); return { content: [{ type: "text" as const, text: `Judge started for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
+        execute: async (_callId: string, params: { jobId: string }) => { const job = this.requireLifecycleJob(params.jobId); this.completionPipeline.startJudge(job); return { content: [{ type: "text" as const, text: `Judge started for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
       },
       {
         name: "request_worker_changes", label: "Request worker changes", description: "Send specific judge/coordinator feedback and resume the same worktree.",
@@ -386,7 +397,7 @@ export class Orchestrator {
         name: "retry_infrastructure", label: "Retry infrastructure", description: "Coordinator-owned bounded retry for a diagnosed transient CI/infrastructure failure.",
         parameters: Type.Object({ jobId: Type.String(), reason: Type.String() }),
         execute: async (_callId: string, params: { jobId: string; reason: string }) => {
-          this.completionPipeline.retryInfrastructure(this.requireJob(params.jobId), params.reason);
+          this.completionPipeline.retryInfrastructure(this.requireLifecycleJob(params.jobId), params.reason);
           return { content: [{ type: "text" as const, text: `Bounded infrastructure retry scheduled for ${params.jobId}.` }], details: { jobId: params.jobId } };
         },
       },
@@ -394,7 +405,7 @@ export class Orchestrator {
         name: "guarded_merge", label: "Guarded fast-forward", description: "Authorize serialized integration of the exact rebased diff with --ff-only after fresh judge approval.",
         parameters: Type.Object({ jobId: Type.String() }),
         execute: async (_callId: string, params: { jobId: string }) => executeCoordinatorGuardedMerge(
-          this.completionPipeline, this.#coordinatorMergeCapability, (jobId) => this.requireJob(jobId), params.jobId,
+          this.completionPipeline, this.#coordinatorMergeCapability, (jobId) => this.requireLifecycleJob(jobId), params.jobId,
         ),
       },
       {
@@ -414,6 +425,33 @@ export class Orchestrator {
             checks: job.review?.postMergeCi || [],
           };
           return { content: [{ type: "text" as const, text: `Verified ${job.id} on ${evidence.targetRef || "main"} at ${evidence.targetHead || "unknown head"}.` }], details: evidence };
+        },
+      },
+      {
+        name: "nominate_stale_candidate", label: "Nominate stale candidate", description: "Place an inactive worktree, including a dirty one, into the nonterminal Needs decision queue. Retains every file and stops autonomous lifecycle work.",
+        parameters: Type.Object({
+          jobId: Type.String(), reason: Type.String(), evidenceSource: Type.String(),
+          suspectedReplacementJobId: Type.Optional(Type.String()), suspectedReplacementCommit: Type.Optional(Type.String()),
+        }),
+        execute: async (_callId: string, params: { jobId: string; reason: string; evidenceSource: string; suspectedReplacementJobId?: string; suspectedReplacementCommit?: string }) => {
+          const job = await this.nominateStale(params.jobId, params);
+          return { content: [{ type: "text" as const, text: `Nominated ${job.id} as a stale candidate. Its checkout is retained and needs an explicit decision.` }], details: { jobId: job.id, staleCandidate: job.staleCandidate } };
+        },
+      },
+      {
+        name: "decide_stale_candidate", label: "Decide stale candidate", description: "Record an explicit user/coordinator decision: archive evidence then confirm superseded, or keep the work for normal safe lifecycle processing.",
+        parameters: Type.Object({ jobId: Type.String(), decision: Type.Union([Type.Literal("confirm_superseded"), Type.Literal("still_wanted")]) }),
+        execute: async (_callId: string, params: { jobId: string; decision: "confirm_superseded" | "still_wanted" }) => {
+          const job = await this.decideStale(params.jobId, params.decision);
+          return { content: [{ type: "text" as const, text: params.decision === "still_wanted" ? `${job.id} is still wanted and returned to normal lifecycle gates.` : `${job.id} was explicitly confirmed superseded after durable evidence archival.` }], details: { jobId: job.id, staleCandidate: job.staleCandidate, integration: job.integration } };
+        },
+      },
+      {
+        name: "migrate_stale_manifest", label: "Import stale audit", description: "Idempotently import the checked-in semantic audit as provisional decisions only; ambiguity fails closed.",
+        parameters: Type.Object({}),
+        execute: async () => {
+          const result = await this.migrateStaleAudit();
+          return { content: [{ type: "text" as const, text: `Stale audit import: ${result.nominated} nominated, ${result.synthetic} inventory records, ${result.unchanged} unchanged, ${result.ambiguous.length} ambiguous.` }], details: result };
         },
       },
       {
@@ -488,7 +526,7 @@ export class Orchestrator {
       if (job.status !== "completed" || job.handoff || job.review?.status !== "queued") continue;
       await this.refreshDiff(job).then(() => this.completionPipeline.migrateLegacyHandoff(job)).catch(() => undefined);
     }
-    this.completionPipeline.recover(this.listJobs());
+    this.completionPipeline.recover(this.listJobs().filter((job) => job.staleCandidate?.state !== "pending"));
     await this.resumeClaimedRemediations();
     // Observe current durable states after queue construction so startup
     // recovery is visible without replaying side effects.
@@ -985,11 +1023,17 @@ export class Orchestrator {
     return job;
   }
 
+  private requireLifecycleJob(jobId: string): AgentJob {
+    const job = this.requireJob(jobId);
+    if (job.staleCandidate?.state === "pending") throw new Error("This job needs an explicit stale-candidate decision first.");
+    return job;
+  }
+
   private async resumeClaimedRemediations(): Promise<void> {
     for (const job of this.jobs.values()) {
       const remediation = job.review?.remediation;
       const action = remediation?.actions.find((entry) => entry.id === remediation.currentActionId);
-      if (job.status !== "completed" || action?.state !== "repairing" || action.failureClass === "infrastructure" || this.workers.has(job.id)) continue;
+      if (job.staleCandidate?.state === "pending" || job.status !== "completed" || action?.state !== "repairing" || action.failureClass === "infrastructure" || this.workers.has(job.id)) continue;
       // The coordinator's durable repair claim happened before the previous
       // process died. Resume that exact same worktree without consuming another
       // round or inventing new feedback.
@@ -1000,7 +1044,7 @@ export class Orchestrator {
   }
 
   async requestWorkerChanges(jobId: string, feedback: string): Promise<void> {
-    const job = this.requireJob(jobId);
+    const job = this.requireLifecycleJob(jobId);
     if (job.status !== "completed") throw new Error(`Worker ${jobId} is not awaiting review.`);
     if (job.isolation.mode !== "worktree") throw new Error("Review iterations require an isolated worktree worker.");
     this.completionPipeline.requestChanges(job, feedback);
@@ -1013,6 +1057,7 @@ export class Orchestrator {
   async resumeJob(jobId: string): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
+    if (job.staleCandidate?.state === "pending") throw new Error("Resolve the stale-candidate decision before resuming.");
     if (job.status !== "interrupted" && job.status !== "needs_attention") {
       throw new Error(`Job ${jobId} cannot be resumed from ${job.status}.`);
     }
@@ -1027,6 +1072,45 @@ export class Orchestrator {
     if (this.workers.has(jobId)) throw new Error(`Job ${jobId} already has an active worker.`);
     if (!job.recoverable || job.recoveryIssue) throw new Error(job.recoveryIssue || "The recorded checkout is not recoverable.");
     await this.startRecoveryAttempt(job, "manual_resume");
+  }
+
+  async nominateStale(jobId: string, input: { reason: string; evidenceSource: string; suspectedReplacementJobId?: string; suspectedReplacementCommit?: string }): Promise<AgentJob> {
+    const job = this.requireJob(jobId);
+    await nominateStaleCandidate(job, input, { workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()) });
+    this.sweepJobIds.delete(job.id);
+    this.suppressStaleWakes(job.id);
+    this.publishJob(job);
+    await this.stateStore.flush();
+    return job;
+  }
+
+  async decideStale(jobId: string, decision: "confirm_superseded" | "still_wanted"): Promise<AgentJob> {
+    const job = this.requireJob(jobId);
+    await decideStaleCandidate(job, decision, { workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()) });
+    this.publishJob(job);
+    await this.stateStore.flush();
+    if (decision === "still_wanted") this.scheduleBacklogSweep();
+    return job;
+  }
+
+  private suppressStaleWakes(jobId: string): void {
+    const now = Date.now();
+    for (const event of this.notificationState.events) {
+      if (event.jobId !== jobId || !event.wakeRequested || event.wakeState === "delivered") continue;
+      event.wakeState = "delivered";
+      event.wakeDeliveredAt = now;
+    }
+  }
+
+  async migrateStaleAudit() {
+    const result = await migrateStaleManifest(join(this.cwd, "docs", "worktree-backlog-manifest-20260823.json"), this.jobs, {
+      workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()),
+    });
+    for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") this.suppressStaleWakes(job.id);
+    this.persist();
+    await this.stateStore.flush();
+    for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") this.emit({ type: "job_updated", job: this.transportJob(job) });
+    return result;
   }
 
   async cancelJob(jobId: string): Promise<void> {
@@ -1434,6 +1518,7 @@ export class Orchestrator {
       || job.status === "running" || job.status === "queued") {
       throw new Error("Only an inactive worktree job can be marked not required.");
     }
+    if (job.staleCandidate?.state === "pending") throw new Error("Resolve the stale-candidate decision first.");
     if (job.integration?.status === "merged") throw new Error("Integrated work is already Done.");
     if (params.reason.trim().length < 20) throw new Error("Specific supersession evidence is required.");
 
@@ -1486,6 +1571,7 @@ export class Orchestrator {
 
     for (const job of this.jobs.values()) {
       if (job.status !== "completed" || job.isolation.mode !== "worktree"
+        || job.staleCandidate?.state === "pending"
         || job.integration?.status === "superseded"
         || (job.integration?.status === "merged" && job.worktreeIdentity)
         || this.workers.has(job.id)) continue;
@@ -1736,6 +1822,7 @@ export class Orchestrator {
     if (!queue || this.coordinatorStatus !== "idle" || !this.coordinator.isIdle || queue.hasPendingWake()) return;
 
     const eligible = (job: AgentJob): boolean => {
+      if (job.staleCandidate?.state === "pending") return false;
       if (job.isolation.mode !== "worktree" || job.integration?.status === "merged" || job.integration?.status === "superseded") return false;
       if (job.status === "interrupted") return job.recoverable === true;
       if (job.status === "needs_attention") return true;

@@ -53,6 +53,11 @@ export function jobActiveState(job: AgentJob, activityReady = true): JobActiveSt
   return undefined;
 }
 
+export function isStaleCandidate(job: AgentJob): boolean {
+  return job.staleCandidate?.state === "pending"
+    && job.integration?.status !== "merged" && job.integration?.status !== "superseded";
+}
+
 export function isDoneJob(job: AgentJob): boolean {
   if (job.integration?.status === "merged" || job.integration?.status === "superseded") return true;
   if (job.status === "failed" || job.status === "cancelled") return true;
@@ -61,6 +66,7 @@ export function isDoneJob(job: AgentJob): boolean {
 
 export function jobLifecycleLabel(job: AgentJob): string {
   const integration = job.integration?.status;
+  if (isStaleCandidate(job)) return job.staleCandidate?.audit.dirty ? "Needs decision · dirty files retained" : "Needs decision · retained";
   const review = job.review?.status;
   // Verified integration and explicit supersession are terminal authority even
   // when legacy snapshots retain a stale worker/remediation disposition.

@@ -77,10 +77,12 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .job-glyph.conflicted, .job-glyph.failed { color: var(--red); }
 .jobs-list { min-height: 0; overflow-y: auto; }
 .actionable-jobs { flex: 1 1 auto; }
+.stale-jobs { flex: 0 1 28%; border-bottom: 1px solid var(--line); }
 .done-jobs { flex: 0 1 32%; border-bottom: 1px solid var(--line); }
-.done-label { width: 100%; margin-top: 8px; border: 0; border-top: 1px solid var(--line); background: transparent; text-align: left; }
-.done-label:hover { color: var(--muted); }
-.done-label b { color: var(--accent); font-weight: 400; }
+.done-label, .stale-label { width: 100%; margin-top: 8px; border: 0; border-top: 1px solid var(--line); background: transparent; text-align: left; }
+.done-label:hover, .stale-label:hover { color: var(--muted); }
+.done-label b, .stale-label b { color: var(--accent); font-weight: 400; }
+.stale-label { color: #d7bd78; }
 .clean-now { margin: 7px 5px; padding: 5px; border: 1px solid var(--line); background: transparent; color: var(--dim); font-size: 8px; }
 .clean-now:hover:not(:disabled) { color: var(--text); }
 .clean-now:disabled { cursor: default; opacity: .5; }
@@ -105,6 +107,14 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .cancel-button { color: var(--red); }
 .resume-button { color: var(--green); }
 .recovery-notice { margin: 10px 0; padding: 9px 11px; border: 1px solid var(--accent); color: var(--accent); font-size: 11px; }
+.stale-controls { display: flex; gap: 6px; }
+.stale-evidence { margin: 12px 18px; padding: 12px; border: 1px solid #6d5d37; background: #191711; color: var(--text); font-size: 11px; }
+.stale-evidence h2 { margin: 0 0 7px; color: #d7bd78; font-size: 12px; }
+.stale-evidence p { margin: 5px 0; }
+.stale-evidence .retention-warning { color: #e6cb88; font-weight: 600; }
+.stale-evidence details { margin-top: 8px; color: var(--muted); }
+.stale-evidence pre { max-height: 220px; overflow: auto; padding: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); user-select: text; white-space: pre-wrap; word-break: break-all; }
+.stale-evidence button { padding: 4px 7px; border: 1px solid var(--line); background: transparent; color: var(--muted); }
 
 .transcript {
   min-width: 0;

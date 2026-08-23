@@ -107,6 +107,10 @@ websocket.on("connection", (client) => {
           await orchestrator.delegate(message.text, undefined, message.isolation ?? "auto", validateImageAttachments(message.attachments));
         } else if (message.type === "cancel_job") await orchestrator.cancelJob(message.jobId);
         else if (message.type === "resume_job") await orchestrator.resumeJob(message.jobId);
+        else if (message.type === "decide_stale_candidate") {
+          if (message.decision !== "confirm_superseded" && message.decision !== "still_wanted") throw new Error("Invalid stale-candidate decision.");
+          await orchestrator.decideStale(message.jobId, message.decision);
+        }
         else if (message.type === "cycle_variant") orchestrator.cycleVariant();
         else if (message.type === "cycle_thinking") orchestrator.cycleThinking();
         else if (message.type === "set_model") await orchestrator.setModel(message.model);

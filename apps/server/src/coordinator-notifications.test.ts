@@ -59,6 +59,26 @@ test("a meaningful transition appends once and duplicate broadcasts do not wake 
   assert.ok(durable.events[0]!.wakeDeliveredAt);
 });
 
+test("pending stale candidates never create autonomous lifecycle or backlog wakes", async () => {
+  const durable = state();
+  const wakes: string[] = [];
+  const queue = new CoordinatorNotificationQueue(durable, {
+    append: () => undefined, persist: () => undefined, isIdle: () => true,
+    wake: async (event) => { wakes.push(event.id); },
+  });
+  const value = job();
+  value.staleCandidate = {
+    state: "pending", nominatedAt: 1, nominatedBy: "coordinator", reason: "Historical replacement requires an explicit user decision.",
+    evidenceSource: "audit.json", confirmation: "pending", resumeState: { status: "completed" },
+    audit: { path: value.isolation.path, branch: value.branch, head: "abc", dirty: true, porcelain: " M file" },
+  };
+  assert.equal(queue.observe(value), false);
+  assert.equal(queue.requestBacklogSweep(value), false);
+  await tick();
+  assert.deepEqual(wakes, []);
+  assert.deepEqual(durable.events, []);
+});
+
 test("busy coordinator queues durably and restart delivers the pending id exactly once", async () => {
   const durable = state();
   const appended: string[] = [];
