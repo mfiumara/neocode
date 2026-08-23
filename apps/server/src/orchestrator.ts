@@ -964,6 +964,9 @@ export class Orchestrator {
           this.emit({ type: "coordinator_status", status: "idle" });
         }
         this.setCoordinatorActivity(undefined, this.coordinatorAborting ? "aborted" : "completed");
+        // Finalize any durable system wake on the authoritative Pi settlement,
+        // even when user-prompt bookkeeping is also present.
+        this.coordinatorNotifications?.agentSettled();
         const pending = this.pendingCoordinatorPrompts[0];
         if (!this.coordinatorAborting && pending?.messageId === this.activeCoordinatorPromptId && pending.state === "processing") {
           // Only agent settlement proves the assistant/tool loop is complete;
@@ -974,7 +977,6 @@ export class Orchestrator {
         } else this.persist();
         if (this.pendingCoordinatorPrompts.length) this.schedulePromptDrain();
         else {
-          this.coordinatorNotifications?.agentSettled();
           this.scheduleBacklogSweep();
         }
       }
