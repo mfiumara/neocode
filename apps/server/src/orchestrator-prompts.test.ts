@@ -72,7 +72,7 @@ test("concurrent prompt acceptances share failed durability and acknowledge none
     assert.deepEqual(outcomes.map((outcome) => outcome.status), ["rejected", "rejected"]);
     for (const outcome of outcomes) if (outcome.status === "rejected") assert.equal(outcome.reason, injected);
     assert.equal(events.some((event) => event.type === "coordinator_message"), false);
-    assert.deepEqual(harness.pendingCoordinatorPrompts, []);
+    assert.equal(harness.pendingCoordinatorPrompts.length, 0);
     await harness.stateStore.flush();
 
     await orchestrator.prompt("retry", [], [], "accept-retry");
