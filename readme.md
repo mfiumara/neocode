@@ -10,6 +10,7 @@ The current vertical slice includes:
 - background Pi workers with configurable worktree/root isolation
 - durable coordinator/job transcripts plus workspace-scoped browser state
 - live coordinator/worker activity, cancellation and diff inspection
+- event-driven CI, independent structured Pi review, and serialized safe merging
 - configurable worker isolation and per-thread cursor/viewport restoration
 - safe GFM Markdown and bounded clipboard image attachments (4 × 8 MiB)
 - visible Pi model, Build/Plan mode and reasoning-effort controls
@@ -55,6 +56,8 @@ Open <http://127.0.0.1:4317>. If `NEOCODE_CWD` is omitted, the directory where t
 
 Use **Hand off** to start a worker directly, or ask the coordinator to implement something and let its `delegate_task` tool create the worker. The handoff control exposes the same isolation policy as the tool API.
 
+When a worktree worker succeeds, the backend automatically runs detected local CI, launches a fresh independent Pi judge context, and only serializes a merge after a structured approval tied to the task and exact diff. The worker Review tab shows transition history, bounded CI output, judge evidence, merge commit, retry, and manual reconciliation controls. Configure the policy with `NEOCODE_JUDGE_MODEL=provider/model-id`, `NEOCODE_MERGE_BRANCH` (default `main`), `NEOCODE_CI_COMMAND`, and `NEOCODE_CI_TIMEOUT_MS`. Root workers are never auto-merged, and dirty or wrong-branch root checkouts are never overwritten.
+
 ### Worker isolation
 
 Every delegated job records both its requested mode and effective mode/path, which are visible in worker rows and headers:
@@ -74,7 +77,8 @@ Neocode orchestration server
    ├─ Pi coordinator session
    ├─ Pi worker session → git worktree A
    ├─ Pi worker session → git worktree B or root checkout
-   └─ workspace/job state
+   ├─ fresh Pi judge sessions → serialized reconciliation queue
+   └─ durable workspace/job/review state
 ```
 
 - `apps/web` — graphical, keyboard-first frontend
@@ -86,7 +90,7 @@ The frontend intentionally has no Node dependency. The intended desktop packagin
 
 ## Next milestones
 
-1. Add worker review, merge, discard and conflict-resolution actions.
+1. Add discard and interactive conflict-resolution actions.
 2. Add file, git-log, search-result and terminal buffer types.
 3. Generalize the picker across files, symbols, commits, messages and diff hunks.
 4. Make context entries structured references instead of copied text.

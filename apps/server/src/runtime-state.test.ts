@@ -27,6 +27,11 @@ function fixture(root: string, title = "durable"): DurableRuntimeState {
     summary: "summary",
     diff: "+change",
     recoverable: true,
+    review: {
+      hookToken: "hook-1", status: "ci_failed", attempt: 1, targetBranch: "main", updatedAt: 2,
+      transitions: [{ status: "queued", at: 1 }, { status: "ci_failed", at: 2, detail: "test failed" }],
+      ci: [{ command: "npm test", ok: false, exitCode: 1, durationMs: 20, output: "failure" }],
+    },
   };
   return {
     version: RUNTIME_STATE_VERSION,
@@ -49,6 +54,8 @@ test("runtime state atomically round-trips all job and session metadata", async 
     const restored = await store.load();
     assert.equal(restored?.jobs[0]?.job.summary, "summary");
     assert.equal(restored?.jobs[0]?.job.diff, "+change");
+    assert.equal(restored?.jobs[0]?.job.review?.transitions.length, 2);
+    assert.equal(restored?.jobs[0]?.job.review?.ci?.[0]?.output, "failure");
     assert.match(restored?.coordinator.piSessionFile || "", /pi-sessions/);
     assert.match(runtimeStatePath(root), /\.neocode\/runtime\/server-v1\/state\.json$/);
     assert.doesNotMatch(runtimeStatePath(root), /\.neocode\/sessions/);
