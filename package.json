@@ -8,6 +8,7 @@
     "packages/*"
   ],
   "scripts": {
+    "test": "npm run test --workspaces --if-present",
     "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @neocode/server\" \"npm run dev -w @neocode/web\"",
     "dev:server": "npm run dev -w @neocode/server",
     "dev:web": "npm run dev -w @neocode/web",
