@@ -66,6 +66,24 @@ test("busy coordinator queues durably and restart delivers the pending id exactl
   assert.deepEqual(wakes, [durable.events[0]!.id]);
 });
 
+test("agent settlement completes a claimed wake even when prompt promise remains unresolved", async () => {
+  const durable = state();
+  let finishWake!: () => void;
+  const wakePending = new Promise<void>((resolve) => { finishWake = resolve; });
+  const queue = new CoordinatorNotificationQueue(durable, {
+    append: () => undefined, persist: () => undefined, isIdle: () => true,
+    wake: async () => wakePending,
+  });
+  queue.observe(job());
+  await tick();
+  assert.equal(durable.events[0]?.wakeState, "claimed");
+  queue.agentSettled();
+  assert.equal(durable.events[0]?.wakeState, "delivered");
+  assert.ok(durable.events[0]?.wakeDeliveredAt);
+  finishWake(); await tick();
+  assert.equal(durable.events[0]?.wakeState, "delivered", "late prompt resolution cannot reopen the event");
+});
+
 test("restart redelivers the same event id after a crash between persisted claim and wake", async () => {
   const durable = state();
   let idle = false;

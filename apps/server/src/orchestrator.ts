@@ -974,7 +974,7 @@ export class Orchestrator {
         } else this.persist();
         if (this.pendingCoordinatorPrompts.length) this.schedulePromptDrain();
         else {
-          this.coordinatorNotifications?.settled();
+          this.coordinatorNotifications?.agentSettled();
           this.scheduleBacklogSweep();
         }
       }

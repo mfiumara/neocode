@@ -145,6 +145,21 @@ export class CoordinatorNotificationQueue {
       && entry.wakeState !== "delivered" && entry.wakeDeliveredAt === undefined);
   }
 
+  /** Called only from Pi's agent_settled event, never as a startup poll. */
+  agentSettled(): void {
+    // Pi can emit agent_settled before prompt() resolves (or even reject that
+    // promise after producing the response). This event proves that a claimed
+    // wake was handled; startup polling must not make the same assumption.
+    const claimed = this.state.events.find((entry) => entry.wakeState === "claimed" && entry.wakeDeliveredAt === undefined);
+    if (claimed && this.hooks.isIdle()) {
+      claimed.wakeState = "delivered";
+      claimed.wakeDeliveredAt = Date.now();
+      this.hooks.persist();
+      this.draining = false;
+    }
+    void this.drain();
+  }
+
   settled(): void { void this.drain(); }
 
   private async drain(): Promise<void> {
@@ -167,9 +182,12 @@ export class CoordinatorNotificationQueue {
       this.hooks.persist();
       delivered = true;
     } catch {
-      event.wakeState = "pending";
-      delete event.wakeClaimedAt;
-      this.hooks.persist();
+      // agent_settled may already have authoritatively completed this claim.
+      if (event.wakeState !== "delivered" && event.wakeDeliveredAt === undefined) {
+        event.wakeState = "pending";
+        delete event.wakeClaimedAt;
+        this.hooks.persist();
+      }
     } finally {
       this.draining = false;
       if (delivered && this.hooks.isIdle()) void this.drain();
