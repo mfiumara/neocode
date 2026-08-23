@@ -38,10 +38,21 @@ export function summarizeToolArgs(args: unknown): string | undefined {
   return summary.length > 110 ? `${summary.slice(0, 109)}…` : summary;
 }
 
+export interface ActivityClock {
+  wallNow(): number;
+  monotonicNow(): number;
+}
+
+export const systemActivityClock: ActivityClock = {
+  wallNow: () => Date.now(),
+  monotonicNow: () => performance.now(),
+};
+
 export function activity(
   phase: AgentActivity["phase"],
   description: string,
   toolName?: string,
+  now = Date.now(),
 ): AgentActivity {
   const normalized = description.replace(/\s+/g, " ").trim();
   return {
@@ -50,8 +61,64 @@ export function activity(
       ? `${normalized.slice(0, MAX_DESCRIPTION - 1)}…`
       : normalized,
     toolName,
-    updatedAt: Date.now(),
+    startedAt: now,
+    updatedAt: now,
   };
+}
+
+/** Owns one activity step. Duplicate streaming deltas do not restart its clock. */
+export class ActivityTimeline {
+  current?: AgentActivity;
+  readonly history: AgentActivity[];
+  private monotonicStartedAt?: number;
+
+  constructor(
+    current?: AgentActivity,
+    history: AgentActivity[] = [],
+    private readonly clock: ActivityClock = systemActivityClock,
+    private readonly historyLimit = 12,
+  ) {
+    this.current = current;
+    this.history = history;
+    if (current) this.monotonicStartedAt = clock.monotonicNow();
+  }
+
+  set(next?: AgentActivity): boolean {
+    if (this.current?.phase === next?.phase
+      && this.current?.description === next?.description
+      && this.current?.toolName === next?.toolName) return false;
+    this.completeCurrent();
+    this.current = next;
+    this.monotonicStartedAt = next ? this.clock.monotonicNow() : undefined;
+    return true;
+  }
+
+  finish(outcome: NonNullable<AgentActivity["outcome"]> = "completed"): boolean {
+    if (!this.current) return false;
+    this.completeCurrent(outcome);
+    return true;
+  }
+
+  /** Finish restored/in-process work truthfully on interruption. */
+  completeCurrent(outcome: NonNullable<AgentActivity["outcome"]> = "completed"): AgentActivity | undefined {
+    if (!this.current) return undefined;
+    const completedAt = this.clock.wallNow();
+    const elapsed = this.monotonicStartedAt === undefined
+      ? completedAt - this.current.startedAt
+      : this.clock.monotonicNow() - this.monotonicStartedAt;
+    const completed = {
+      ...this.current,
+      completedAt,
+      durationMs: Math.max(0, Math.round(elapsed)),
+      outcome,
+      updatedAt: completedAt,
+    };
+    this.history.unshift(completed);
+    if (this.history.length > this.historyLimit) this.history.length = this.historyLimit;
+    this.current = undefined;
+    this.monotonicStartedAt = undefined;
+    return completed;
+  }
 }
 
 export function toolActivity(
