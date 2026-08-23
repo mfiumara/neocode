@@ -73,11 +73,12 @@ interface WorkerConfig {
 export interface MaintenanceConfig {
   graceMs?: number;
   intervalMs?: number;
+  sweepIntervalMs?: number;
   targetRef?: string;
   startup?: boolean;
 }
 
-const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "reconcile_jobs", "clean_worktrees"];
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "reconcile_jobs", "clean_worktrees"];
 const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
 const VARIANTS: AgentVariant[] = ["build", "plan"];
 
@@ -176,6 +177,9 @@ export class Orchestrator {
   private maintenance: MaintenanceStatus = { state: "idle" };
   private janitorTimer?: NodeJS.Timeout;
   private janitorRun?: Promise<void>;
+  private sweepTimer?: NodeJS.Timeout;
+  private sweepScheduled = false;
+  private sweepJobId?: string;
   private readonly maintenanceConfig: Required<MaintenanceConfig>;
 
 
@@ -194,6 +198,7 @@ export class Orchestrator {
     this.maintenanceConfig = {
       graceMs: maintenanceConfig.graceMs ?? 7 * 24 * 60 * 60 * 1000,
       intervalMs: maintenanceConfig.intervalMs ?? 6 * 60 * 60 * 1000,
+      sweepIntervalMs: maintenanceConfig.sweepIntervalMs ?? 30_000,
       targetRef: maintenanceConfig.targetRef ?? "main",
       startup: maintenanceConfig.startup ?? true,
     };
@@ -244,7 +249,7 @@ export class Orchestrator {
     const loader = new DefaultResourceLoader({
       cwd: this.cwd,
       agentDir: getAgentDir(),
-      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, and only after final approval call guarded_merge. Every action_required event must be inspected for the exact command/output. For source, test, judge, conflict, or post-merge failures, quote specific diagnostics with request_worker_changes so the SAME worktree is resumed; await its new handoff, rerun CI, and launch a fresh judge. For a genuinely transient failure use retry_infrastructure. Never bypass bounded repair rounds; needs_attention requires reporting all evidence. Judges report to you and never merge. Conflicts must return to the same worker, be handed off, and be re-judged. Never ask a worker to mutate root/main. After a guarded merge, call reconcile_jobs so externally or previously integrated workers move to Done, then clean_worktrees to safely remove only clean, Git-verified worktrees. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
+      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, and only after final approval call guarded_merge. Every action_required event must be inspected for the exact command/output. For source, test, judge, conflict, or post-merge failures, quote specific diagnostics with request_worker_changes so the SAME worktree is resumed; await its new handoff, rerun CI, and launch a fresh judge. For a genuinely transient failure use retry_infrastructure. Never bypass bounded repair rounds; needs_attention requires reporting all evidence. Judges report to you and never merge. Conflicts must return to the same worker, be handed off, and be re-judged. Never ask a worker to mutate root/main. After a guarded merge, call reconcile_jobs so externally or previously integrated workers move to Done, then clean_worktrees to safely remove only clean, Git-verified worktrees. While idle, durable backlog sweep events will continuously offer one unresolved job at a time. Act on each sweep rather than merely summarizing it: inspect the job and take the next safe lifecycle action. Resume an interrupted recoverable worker with resume_worker; never resume a branch whose durable safety checks reject it. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
 
     });
     await loader.reload();
@@ -296,6 +301,14 @@ export class Orchestrator {
             job.summary ? `\nReport:\n${job.summary}` : "", job.diff ? `\nDiff:\n${job.diff.slice(0, 40_000)}` : "\nNo diff yet.",
             job.review ? `\nLifecycle:\n${JSON.stringify(job.review, null, 2)}` : "", job.error ? `\nError:\n${job.error}` : ""].join("");
           return { content: [{ type: "text" as const, text: output }], details: { jobId: job.id } };
+        },
+      },
+      {
+        name: "resume_worker", label: "Resume worker", description: "Resume an interrupted recoverable worker in its verified existing checkout.",
+        parameters: Type.Object({ jobId: Type.String() }),
+        execute: async (_callId: string, params: { jobId: string }) => {
+          await this.resumeJob(params.jobId);
+          return { content: [{ type: "text" as const, text: `Worker ${params.jobId} resumed in its existing checkout.` }], details: { jobId: params.jobId } };
         },
       },
       {
@@ -377,7 +390,9 @@ export class Orchestrator {
       persist: () => this.persist(),
       isIdle: () => this.coordinatorStatus === "idle" && this.coordinator.isIdle,
       wake: (event) => this.coordinator.prompt(
-        `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\nResume coordinator-owned reconciliation now: inspect the handoff, start an independent judge when appropriate, and report each decision concisely. Never merge without a fresh exact-diff approval.`,
+        `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\n${event.kind === "backlog_sweep"
+          ? "Autonomous backlog sweep: inspect this exact job and take its next safe lifecycle action now. Do not merely summarize it. Resume a verified interrupted worker, start a fresh judge for a completed handoff, remediate exact failures in the same worktree, or guarded-merge only a fresh approval. Process only this job."
+          : "Resume coordinator-owned reconciliation now: inspect the handoff, start an independent judge when appropriate, and report each decision concisely. Never merge without a fresh exact-diff approval."}`,
       ),
     });
     this.completionPipeline.recover(this.listJobs());
@@ -392,6 +407,11 @@ export class Orchestrator {
     if (this.maintenanceConfig.intervalMs > 0) {
       this.janitorTimer = setInterval(() => this.startCleanup("scheduled"), this.maintenanceConfig.intervalMs);
       this.janitorTimer.unref();
+    }
+    if (this.maintenanceConfig.sweepIntervalMs > 0) {
+      this.sweepTimer = setInterval(() => this.scheduleBacklogSweep(), this.maintenanceConfig.sweepIntervalMs);
+      this.sweepTimer.unref();
+      this.scheduleBacklogSweep();
     }
 
   }
@@ -485,6 +505,7 @@ export class Orchestrator {
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
     if (this.janitorTimer) clearInterval(this.janitorTimer);
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
     await this.janitorRun;
 
     this.setCoordinatorActivity(undefined, "interrupted");
@@ -725,6 +746,7 @@ export class Orchestrator {
         this.setCoordinatorActivity(undefined, this.coordinatorAborting ? "aborted" : "completed");
         this.persist();
         this.coordinatorNotifications?.settled();
+        this.scheduleBacklogSweep();
       }
     });
   }
@@ -1161,10 +1183,54 @@ export class Orchestrator {
     job.durationMs = Math.max(0, completedAt - (job.startedAt ?? job.createdAt));
   }
 
+  private scheduleBacklogSweep(): void {
+    if (this.sweepScheduled) return;
+    this.sweepScheduled = true;
+    queueMicrotask(() => {
+      this.sweepScheduled = false;
+      this.runBacklogSweep();
+    });
+  }
+
+  private runBacklogSweep(): void {
+    const queue = this.coordinatorNotifications;
+    if (!queue || this.coordinatorStatus !== "idle" || !this.coordinator.isIdle || queue.hasPendingWake()) return;
+
+    const eligible = (job: AgentJob): boolean => {
+      if (job.isolation.mode !== "worktree" || this.workers.has(job.id) || job.integration?.status === "merged") return false;
+      if (job.status === "interrupted") return job.recoverable === true;
+      if (job.status === "needs_attention") return true;
+      if (job.status !== "completed") return false;
+      return job.review?.status !== "merged";
+    };
+    const activeReview = new Set(["ci_running", "judging", "merge_queued", "merging", "post_merge_ci"]);
+
+    if (this.sweepJobId) {
+      const current = this.jobs.get(this.sweepJobId);
+      // Keep one autonomous lifecycle in flight. User-delegated jobs may still
+      // run concurrently, but a sweep never fans stale CI/remediation out.
+      if (current && (this.workers.has(current.id)
+        || (current.review && activeReview.has(current.review.status)))) return;
+      if (current && eligible(current) && queue.requestBacklogSweep(current)) return;
+      this.sweepJobId = undefined;
+    }
+
+    const candidates = this.listJobs()
+      .filter(eligible)
+      .filter((job) => !(job.review && activeReview.has(job.review.status)))
+      .sort((left, right) => left.updatedAt - right.updatedAt);
+    for (const job of candidates) {
+      if (!queue.requestBacklogSweep(job)) continue;
+      this.sweepJobId = job.id;
+      return;
+    }
+  }
+
   private publishJob(job: AgentJob): void {
     this.persist();
     this.emit({ type: "job_updated", job: structuredClone(job) });
     this.coordinatorNotifications?.observe(job);
+    this.scheduleBacklogSweep();
   }
 
   private appendCoordinatorWorkerEvent(event: CoordinatorWorkerEvent): void {

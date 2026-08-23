@@ -119,6 +119,30 @@ test("action-required diagnostics stay exact while a user prompt is busy and wak
   assert.equal(wakes.length, 1);
 });
 
+test("backlog sweeps wake once per stable job state and survive a busy coordinator", async () => {
+  const durable = state();
+  const wakes: string[] = [];
+  let idle = false;
+  const queue = new CoordinatorNotificationQueue(durable, {
+    append: () => undefined, persist: () => undefined, isIdle: () => idle,
+    wake: async (event) => { wakes.push(event.id); },
+  });
+  const value = job();
+  assert.equal(queue.requestBacklogSweep(value), true);
+  assert.equal(queue.requestBacklogSweep(value), false);
+  assert.equal(queue.hasPendingWake(), true);
+  await tick();
+  assert.equal(wakes.length, 0);
+  idle = true;
+  queue.settled(); await tick();
+  assert.equal(wakes.length, 1);
+  assert.equal(queue.hasPendingWake(), false);
+  value.updatedAt += 1;
+  assert.equal(queue.requestBacklogSweep(value), true, "a lifecycle change makes the job eligible again");
+  await tick();
+  assert.equal(wakes.length, 2);
+});
+
 test("every lifecycle transition is appended without extra model chatter", async () => {
   const durable = state();
   let wakes = 0;

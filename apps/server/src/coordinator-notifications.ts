@@ -96,6 +96,49 @@ export class CoordinatorNotificationQueue {
     return true;
   }
 
+  /** Queue one durable autonomous review for a stable backlog state. */
+  requestBacklogSweep(job: AgentJob): boolean {
+    const action = job.review?.remediation?.actions.find((entry) => entry.id === job.review?.remediation?.currentActionId);
+    const signature = [job.status, job.updatedAt, job.completion?.head, job.review?.status,
+      job.review?.transitions.at(-1)?.at, action?.id, action?.state, job.integration?.status].join(":");
+    const key = `backlog:${job.id}`;
+    if (this.state.lastSignals[key] === signature) return false;
+    this.state.lastSignals[key] = signature;
+    const eventId = randomUUID();
+    const payload = {
+      eventId,
+      jobId: job.id,
+      title: job.title,
+      state: "backlog_sweep",
+      detail: `status=${job.status} review=${job.review?.status || "none"} integration=${job.integration?.status || "none"} branch=${job.branch} worktree=${job.isolation.path}`,
+    };
+    const event: CoordinatorWorkerEvent = {
+      id: eventId,
+      jobId: job.id,
+      kind: "backlog_sweep",
+      text: `[worker_status] ${JSON.stringify(payload)}`,
+      createdAt: Date.now(),
+      messageId: randomUUID(),
+      wakeRequested: true,
+      wakeState: "pending",
+    };
+    this.state.events.push(event);
+    while (this.state.events.length > 500) {
+      const removable = this.state.events.findIndex((entry) => !entry.wakeRequested || entry.wakeState === "delivered" || entry.wakeDeliveredAt !== undefined);
+      if (removable < 0) break;
+      this.state.events.splice(removable, 1);
+    }
+    this.hooks.append(event);
+    this.hooks.persist();
+    void this.drain();
+    return true;
+  }
+
+  hasPendingWake(): boolean {
+    return this.state.events.some((entry) => entry.wakeRequested
+      && entry.wakeState !== "delivered" && entry.wakeDeliveredAt === undefined);
+  }
+
   settled(): void { void this.drain(); }
 
   private async drain(): Promise<void> {
