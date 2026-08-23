@@ -52,6 +52,7 @@ type NavigableRow =
 function statusGlyph(status: AgentJob["status"]): string {
   if (status === "running") return "●";
   if (status === "interrupted") return "↻";
+  if (status === "needs_attention") return "⚠";
   if (status === "completed") return "✓";
   if (status === "failed") return "!";
   if (status === "cancelled") return "×";
@@ -588,7 +589,7 @@ export function App() {
             {snapshot?.jobs.map((job) => (
               <button key={job.id} className={`job-row ${active.kind === "job" && active.id === job.id ? "active" : ""}`} onClick={() => openJob(job)}>
                 <span className={`job-glyph ${activityReady || (job.status !== "queued" && job.status !== "running") ? job.status : "disconnected"}`}>{statusGlyph(job.status)}</span>
-                <span><strong>{job.title}</strong><small>{activityReady && (job.status === "queued" || job.status === "running") ? job.activity?.description || "Working" : `${isolationLabel(job)} · ${shortPath(job.isolation.path)}`}</small></span>
+                <span><strong>{job.title}</strong><small>{activityReady && (job.status === "queued" || job.status === "running") ? job.activity?.description || "Working" : `${job.attempts?.length ? `attempt ${job.attempts.length} · ` : ""}${isolationLabel(job)} · ${shortPath(job.isolation.path)}`}</small></span>
               </button>
             ))}
             {!snapshot?.jobs.length && <p className="empty-copy">Implementation workers will appear here.</p>}
@@ -651,6 +652,9 @@ export function App() {
                 {activeJob.review?.judge?.approved && ["approved", "blocked", "conflict", "post_ci_failed"].includes(activeJob.review.status) && (
                   <button className="review-button" onClick={() => send({ type: "merge_review", jobId: activeJob.id })}>Reconcile</button>
                 )}
+                {(activeJob.status === "interrupted" || activeJob.status === "needs_attention") && activeJob.recoverable && (
+                  <button className="resume-button" onClick={() => send({ type: "resume_job", jobId: activeJob.id })}>Resume</button>
+                )}
                 {activeJob.status === "running" && <button className="cancel-button" onClick={() => send({ type: "cancel_job", jobId: activeJob.id })}>Cancel</button>}
               </div>
             )}
@@ -670,6 +674,7 @@ export function App() {
               }}
             >
               <div className="transcript-content" ref={transcriptContentRef}>
+              {activeJob?.recoveryIssue && <div className="recovery-notice">{activeJob.recoveryIssue}</div>}
               {!rows.length && (
                 <div className="empty-view">
                   {active.kind === "coordinator" ? "Type a prompt to start." : "Worker is starting."}
@@ -701,7 +706,7 @@ export function App() {
                   onDoubleClick={() => openJob(row.job)}
                 >
                   <span className="worker-arrow">→</span>
-                  <span className="worker-status">{row.job.status}</span>
+                  <span className="worker-status">{row.job.status}{row.job.attempts?.length ? ` · attempt ${row.job.attempts.length}` : ""}</span>
                   <span className="worker-title">{row.job.title}</span>
                   <code>{row.job.id}</code>
                   <span className="worker-open">l</span>
