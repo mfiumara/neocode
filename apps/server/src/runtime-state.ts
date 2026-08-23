@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { AgentActivity, AgentJob, MaintenanceStatus, TranscriptMessage } from "@neocode/protocol";
 
 
-export const RUNTIME_STATE_VERSION = 1;
+export const RUNTIME_STATE_VERSION = 2;
 
 export interface DurableJob {
   job: AgentJob;
@@ -60,7 +60,7 @@ export function runtimeStatePath(workspaceRoot: string): string {
 function isRuntimeState(value: unknown, workspaceRoot: string): value is DurableRuntimeState {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DurableRuntimeState>;
-  return candidate.version === RUNTIME_STATE_VERSION
+  return ((candidate as { version?: number }).version === 1 || candidate.version === RUNTIME_STATE_VERSION)
     && candidate.workspaceRoot === workspaceRoot
     && !!candidate.coordinator
     && Array.isArray(candidate.coordinator.messages)
@@ -80,6 +80,24 @@ function isRuntimeState(value: unknown, workspaceRoot: string): value is Durable
     });
 }
 
+/** Schema-only migration. Git-derived outcomes are deliberately handled later by TerminalReconciler. */
+export function migrateRuntimeState(state: DurableRuntimeState): DurableRuntimeState {
+  const migrated = structuredClone(state);
+  migrated.version = RUNTIME_STATE_VERSION;
+  for (const { job } of migrated.jobs) {
+    if (job.terminalDisposition) continue;
+    if (job.status === "cancelled") job.terminalDisposition = {
+      kind: "cancelled", recordedAt: job.updatedAt,
+      evidence: { method: "explicit-cancellation", detail: "Migrated persisted explicit cancellation." },
+    };
+    else if (job.status === "failed") job.terminalDisposition = {
+      kind: "failed_terminal", recordedAt: job.updatedAt,
+      evidence: { method: "process-failure", detail: job.error || "Migrated persisted terminal process failure." },
+    };
+  }
+  return migrated;
+}
+
 export class RuntimeStateStore {
   readonly root: string;
   readonly path: string;
@@ -95,7 +113,7 @@ export class RuntimeStateStore {
   async load(): Promise<DurableRuntimeState | undefined> {
     try {
       const parsed: unknown = JSON.parse(await readFile(this.path, "utf8"));
-      return isRuntimeState(parsed, this.workspaceRoot) ? parsed : undefined;
+      return isRuntimeState(parsed, this.workspaceRoot) ? migrateRuntimeState(parsed) : undefined;
     } catch {
       // Missing, truncated, or from another workspace: start clean. Atomic
       // writes mean corruption should only be possible through external edits.

@@ -66,7 +66,9 @@ export class WorktreeJanitor {
 
   async review(job: AgentJob): Promise<boolean> {
     const checkedAt = this.now();
-    if (job.status !== "completed") return refusal(job, "not_completed", `Job status is ${job.status}.`, checkedAt);
+    if (job.status !== "completed" && job.terminalDisposition?.kind !== "merged_verified") {
+      return refusal(job, "not_completed", `Job status is ${job.status} without a verified merged disposition.`, checkedAt);
+    }
     if (!job.completion?.head || !job.completion.finishedAt || !job.worktreeIdentity) {
       return refusal(job, "missing_durable_identity", "Completion head or worktree identity is missing.", checkedAt);
     }
@@ -157,6 +159,14 @@ export class WorktreeJanitor {
       verifiedAt: checkedAt,
       targetHead,
       completionHead: job.completion.head,
+    };
+    job.terminalDisposition ??= {
+      kind: "merged_verified", recordedAt: checkedAt,
+      evidence: {
+        method: mergeMethod === "patch-equivalent" ? "patch-equivalence" : mergeMethod,
+        detail: `Janitor independently verified ${mergeMethod} before cleanup.`,
+        sourceCommit: job.completion.head, targetRef: this.options.targetRef, targetCommit: targetHead,
+      },
     };
 
     await this.git(["worktree", "remove", "--", identity.path], this.workspaceRoot);

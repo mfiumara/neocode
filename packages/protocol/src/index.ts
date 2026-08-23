@@ -1,6 +1,27 @@
 export type AgentStatus = "idle" | "running" | "error";
 export type JobStatus = "queued" | "running" | "interrupted" | "needs_attention" | "completed" | "failed" | "cancelled";
 export type IntegrationStatus = "unmerged" | "reviewing" | "integrating" | "conflicted" | "merged";
+export type TerminalDispositionKind = "merged_verified" | "superseded" | "cancelled" | "failed_terminal" | "archived";
+export type TerminalEvidenceMethod =
+  | "reviewed-integration" | "commit-ancestry" | "patch-equivalence" | "identical-content" | "no-changes"
+  | "migration-manifest" | "explicit-cancellation" | "process-failure" | "manual-archive";
+
+/** Durable lifecycle outcome. This is intentionally independent from worker process status and checkout cleanup. */
+export interface JobTerminalDisposition {
+  kind: TerminalDispositionKind;
+  recordedAt: number;
+  evidence: {
+    method: TerminalEvidenceMethod;
+    detail: string;
+    sourceCommit?: string;
+    targetRef?: string;
+    targetCommit?: string;
+    manifestPath?: string;
+  };
+  /** Required when a duplicate/obsolete job was replaced by another job. */
+  supersededBy?: string;
+}
+
 export type CleanupRefusalReason =
   | "not_completed" | "missing_durable_identity" | "grace_period" | "integration_active" | "conflicted"
   | "identity_mismatch" | "not_registered" | "branch_mismatch" | "head_mismatch" | "dirty"
@@ -274,6 +295,8 @@ export interface AgentJob {
   completion?: JobCompletion;
   /** `completed` means the worker stopped; only `merged` means Git verified integration. */
   integration?: JobIntegration;
+  /** Authoritative history/actionability classification; process status alone is never proof of Done. */
+  terminalDisposition?: JobTerminalDisposition;
   cleanup?: JobCleanup;
 }
 

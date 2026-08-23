@@ -23,6 +23,7 @@ import {
   type AppSnapshot,
   type ImageAttachment,
   type JudgeEvidence,
+  type JobTerminalDisposition,
   type ModelChoice,
   type ModelRef,
   type MaintenanceStatus,
@@ -54,6 +55,7 @@ import {
   type CoordinatorWorkerEvent,
   type DurableRuntimeState,
 } from "./runtime-state.js";
+import { cleanupCandidates, TerminalReconciler } from "./terminal-reconciliation.js";
 import { OperationLock, WorktreeJanitor } from "./worktree-janitor.js";
 
 const execFileAsync = promisify(execFile);
@@ -174,6 +176,9 @@ export class Orchestrator {
   private completionPipeline!: CompletionPipeline;
   private readonly operationLock = new OperationLock();
   private readonly janitor: WorktreeJanitor;
+  private readonly terminalReconciler: TerminalReconciler;
+  /** Startup reconciliation is metadata-only; janitor cannot consume these records in the same startup pass. */
+  private readonly startupCleanupHold = new Set<string>();
   private maintenance: MaintenanceStatus = { state: "idle" };
   private janitorTimer?: NodeJS.Timeout;
   private janitorRun?: Promise<void>;
@@ -206,6 +211,7 @@ export class Orchestrator {
       graceMs: this.maintenanceConfig.graceMs,
       targetRef: this.maintenanceConfig.targetRef,
     });
+    this.terminalReconciler = new TerminalReconciler(cwd, this.maintenanceConfig.targetRef);
 
   }
 
@@ -339,7 +345,12 @@ export class Orchestrator {
         parameters: Type.Object({}),
         execute: async () => {
           const result = await this.reconcileIntegratedJobs();
-          return { content: [{ type: "text" as const, text: `Reconciled ${result.integrated} integrated and ${result.noOp} no-op jobs; ${result.pending} still have unique work.` }], details: result };
+          const dispositions = await this.terminalReconciler.reconcile(this.listJobs());
+          if (dispositions) {
+            this.persist();
+            for (const job of this.listJobs()) this.emit({ type: "job_updated", job: structuredClone(job) });
+          }
+          return { content: [{ type: "text" as const, text: `Reconciled ${result.integrated} integrated and ${result.noOp} no-op jobs; ${result.pending} still have unique work.` }], details: { ...result, dispositions } };
         },
       },
       {
@@ -384,7 +395,15 @@ export class Orchestrator {
       judge: (job, diff, diffSha256) => this.runJudge(job, diff, diffSha256),
     });
     this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock);
+    const beforeStartupReconciliation = new Map(this.listJobs().map((job) => [job.id,
+      `${job.integration?.status || "none"}:${job.terminalDisposition?.kind || "none"}`]));
     await this.reconcileIntegratedJobs(targetBranch);
+    await this.terminalReconciler.reconcile(this.listJobs());
+    for (const job of this.listJobs()) {
+      const after = `${job.integration?.status || "none"}:${job.terminalDisposition?.kind || "none"}`;
+      if (beforeStartupReconciliation.get(job.id) !== after) this.startupCleanupHold.add(job.id);
+    }
+    this.persist();
     this.coordinatorNotifications = new CoordinatorNotificationQueue(this.notificationState, {
       append: (event) => this.appendCoordinatorWorkerEvent(event),
       persist: () => this.persist(),
@@ -678,6 +697,10 @@ export class Orchestrator {
       await worker.session.abort();
     }
     job.status = "cancelled";
+    job.terminalDisposition = {
+      kind: "cancelled", recordedAt: Date.now(),
+      evidence: { method: "explicit-cancellation", detail: "User explicitly cancelled this job." },
+    };
     job.activity = undefined;
     job.recoverable = false;
     job.recoveryIssue = "Cancelled intentionally; automatic recovery is disabled.";
@@ -841,6 +864,10 @@ export class Orchestrator {
       job.status = "failed";
       this.finishWorker(job);
       job.error = error instanceof Error ? error.message : String(error);
+      job.terminalDisposition = {
+        kind: "failed_terminal", recordedAt: Date.now(),
+        evidence: { method: "process-failure", detail: job.error },
+      };
       job.updatedAt = Date.now();
       this.finishAttempt(job, job.error);
       this.publishJob(job);
@@ -1022,7 +1049,9 @@ export class Orchestrator {
         const commits = (await this.git(["rev-list", "--reverse", `${job.baseRef}..${actualHead}`]))
           .split("\n").filter(Boolean);
         let integrated = commits.length === 0;
+        let evidenceMethod: JobTerminalDisposition["evidence"]["method"] = "no-changes";
         if (!integrated) {
+          evidenceMethod = "commit-ancestry";
           const cherry = await this.git(["cherry", targetRef, actualHead]).catch(() => "");
           const equivalent = new Set(cherry.split("\n")
             .filter((line) => line.startsWith("- "))
@@ -1032,6 +1061,7 @@ export class Orchestrator {
             const ancestor = await execFileAsync("git", ["merge-base", "--is-ancestor", commit, targetHead], { cwd: this.cwd })
               .then(() => true, () => false);
             if (!ancestor && !equivalent.has(commit)) { integrated = false; break; }
+            if (!ancestor) evidenceMethod = "patch-equivalence";
           }
         }
         if (!integrated) { result.pending += 1; continue; }
@@ -1050,6 +1080,16 @@ export class Orchestrator {
         job.integration = {
           status: "merged", targetRef, verifiedAt: now,
           targetHead, completionHead: actualHead,
+        };
+        job.terminalDisposition = {
+          kind: "merged_verified", recordedAt: now,
+          evidence: {
+            method: evidenceMethod,
+            detail: commits.length
+              ? "Git reconciliation proved every worker commit is integrated or patch-equivalent."
+              : "Git reconciliation proved this clean wrapper job contains no unique commits.",
+            sourceCommit: actualHead, targetRef, targetCommit: targetHead,
+          },
         };
         if (job.review) {
           job.review.status = "merged";
@@ -1086,10 +1126,22 @@ export class Orchestrator {
       this.maintenance = { state: "running", source };
       this.emit({ type: "maintenance_updated", maintenance: { ...this.maintenance } });
       try {
+        // Reconciliation updates history only. A newly classified record is
+        // never handed to janitor in the same maintenance pass, especially at
+        // startup; cleanup remains a later, independently guarded operation.
+        const terminalBefore = new Set(this.listJobs().filter((job) => job.terminalDisposition).map((job) => job.id));
+        const reconciled = await this.terminalReconciler.reconcile(this.listJobs());
+        const newlyReconciled = new Set(this.listJobs()
+          .filter((job) => job.terminalDisposition && !terminalBefore.has(job.id)).map((job) => job.id));
+        if (reconciled) {
+          this.persist();
+          for (const job of this.listJobs()) this.emit({ type: "job_updated", job: structuredClone(job) });
+        }
         const janitor = ignoreGrace
           ? new WorktreeJanitor(this.cwd, { graceMs: 0, targetRef: this.maintenanceConfig.targetRef })
           : this.janitor;
-        const result = await janitor.run(this.listJobs(), (job) => this.publishJob(job));
+        const cleanupJobs = cleanupCandidates(this.listJobs(), newlyReconciled, this.startupCleanupHold, source === "startup");
+        const result = await janitor.run(cleanupJobs, (job) => this.publishJob(job));
         this.maintenance = { state: "idle", source, lastRunAt: Date.now(), ...result };
       } catch (error) {
         this.maintenance = {
@@ -1099,7 +1151,10 @@ export class Orchestrator {
       }
       this.persist();
       this.emit({ type: "maintenance_updated", maintenance: { ...this.maintenance } });
-    }).finally(() => { this.janitorRun = undefined; });
+    }).finally(() => {
+      if (source === "startup") this.startupCleanupHold.clear();
+      this.janitorRun = undefined;
+    });
   }
 
   private async ensureLocalExcludes(): Promise<void> {

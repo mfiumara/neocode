@@ -16,6 +16,8 @@ Review is coordinator-owned: the coordinator explicitly starts a fresh independe
 
 Repair accounting is persisted per failure class and material diff/commit fingerprint (default three rounds). Nondeterministic diagnostic text cannot reset the budget; only a materially changed diff or commit can. Exhaustion marks the job `needs_attention` while retaining every diagnostic. A post-integration failure therefore never becomes Done. Only `guarded_merge` (retained as a compatibility tool name) records coordinator authorization. The server serializes the authorized root operation, validates the exact judged rebased commit in an isolated checkout, refuses target-head races, and advances main with `git merge --ff-only`; it never creates merge commits. Workers and judges have no integration capability. Startup may resume an already claimed worker repair or safe infrastructure retry, but never invents a fix, verdict, integration authorization, or duplicate attempt.
 
+Durable terminal dispositions (`merged_verified`, `superseded`, `cancelled`, `failed_terminal`, and `archived`) are independent of process status and checkout existence. Only those dispositions enter Done. Startup and maintenance may backfill historical records from a clean checkout plus Git ancestry, reviewed source mappings, or safe patch-id equivalence; `completed`, prose, dirty work, and unknown evidence never suffice. Janitor cleanup remains a separate guarded operation, so history survives a cleaned checkout and reconciliation itself never deletes anything. Newly migrated records are withheld from janitor inputs in the same reconciliation pass, including startup.
+
 ## Application state
 
 The WebSocket protocol carries snapshots and incremental updates for:

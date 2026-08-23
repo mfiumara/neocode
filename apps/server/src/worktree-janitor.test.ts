@@ -60,6 +60,8 @@ test("removes a merged clean registered worktree and retains its branch", async 
     assert.equal(await janitor(root).review(job), true);
     assert.equal(job.cleanup?.status, "removed");
     assert.equal(job.integration?.status, "merged");
+    assert.equal(job.terminalDisposition?.kind, "merged_verified", "history survives physical checkout cleanup");
+    assert.equal(job.isolation.path, worktree, "history retains the cleaned checkout path");
     assert.equal(await readFile(join(root, "work.txt"), "utf8"), "intended\n");
     await assert.rejects(readFile(join(worktree, "work.txt"), "utf8"));
     assert.equal(await git(root, ["show-ref", "--verify", "refs/heads/neocode/test-job"]).then(() => true), true);

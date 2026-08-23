@@ -107,6 +107,8 @@ test("fresh judge and guarded merge require distinct coordinator actions", async
   pipeline.requestMerge(value);
   await pipeline.idle();
   assert.equal(value.review?.status, "merged");
+  assert.equal(value.terminalDisposition?.kind, "merged_verified");
+  assert.equal(value.terminalDisposition?.evidence.method, "reviewed-integration");
   assert.ok(value.review?.coordinatorAuthorizedAt);
   assert.equal(adapter.reconcileCalls, 1);
   assert.deepEqual(value.review?.transitions.map((entry) => entry.owner), ["worker", "coordinator", "server", "coordinator", "judge", "coordinator", "coordinator", "server", "server"]);

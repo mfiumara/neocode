@@ -7,6 +7,7 @@ import type { AgentJob } from "@neocode/protocol";
 import {
   RUNTIME_STATE_VERSION,
   RuntimeStateStore,
+  migrateRuntimeState,
   runtimeStatePath,
   type DurableRuntimeState,
 } from "./runtime-state.js";
@@ -105,6 +106,23 @@ test("streaming saves coalesce to the latest complete snapshot", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("migrates known pre-integration cancelled/failed shapes without trusting completed labels", () => {
+  const root = "/repo";
+  const state = fixture(root);
+  (state as { version: number }).version = 1;
+  const original = state.jobs[0]!.job;
+  original.status = "completed";
+  original.integration = undefined;
+  const cancelled = structuredClone(original); cancelled.id = "cancelled"; cancelled.status = "cancelled";
+  const failed = structuredClone(original); failed.id = "failed"; failed.status = "failed"; failed.error = "old process failed";
+  state.jobs.push({ job: cancelled }, { job: failed });
+  const migrated = migrateRuntimeState(state);
+  assert.equal(migrated.version, RUNTIME_STATE_VERSION);
+  assert.equal(migrated.jobs[0]!.job.terminalDisposition, undefined, "completed alone is not Done evidence");
+  assert.equal(migrated.jobs[1]!.job.terminalDisposition?.kind, "cancelled");
+  assert.equal(migrated.jobs[2]!.job.terminalDisposition?.kind, "failed_terminal");
 });
 
 test("invalid or cross-workspace state is ignored", async () => {

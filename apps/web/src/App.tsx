@@ -10,7 +10,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
-import { isDoneJob, jobLifecycleLabel } from "./jobLifecycle";
+import { isDoneJob, jobLifecycleLabel, splitJobs } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
@@ -292,8 +292,9 @@ export function App() {
   }, [workspaceStorageKey, snapshot?.cwd, active, jobTab, prompt, context]);
 
   const activeJob = active.kind === "job" ? snapshot?.jobs.find((job) => job.id === active.id) : undefined;
-  const actionableJobs = useMemo(() => (snapshot?.jobs || []).filter((job) => !isDoneJob(job)), [snapshot?.jobs]);
-  const doneJobs = useMemo(() => (snapshot?.jobs || []).filter(isDoneJob), [snapshot?.jobs]);
+  const groupedJobs = useMemo(() => splitJobs(snapshot?.jobs || []), [snapshot?.jobs]);
+  const actionableJobs = groupedJobs.actionable;
+  const doneJobs = groupedJobs.done;
   const messages = active.kind === "coordinator"
     ? snapshot?.coordinator.messages || []
     : activeJob?.messages || [];
@@ -627,7 +628,7 @@ export function App() {
             {doneJobs.map((job) => (
               <JobSidebarRow key={job.id} job={job} active={active.kind === "job" && active.id === job.id} activityReady={activityReady} onOpen={() => openJob(job)} />
             ))}
-            {!doneJobs.length && <p className="empty-copy">Verified merges and terminal jobs appear here.</p>}
+            {!doneJobs.length && <p className="empty-copy">Verified merges, superseded work, cancellations, and terminal failures appear here.</p>}
           </div>}
           <button className="clean-now" disabled={!connected || snapshot?.maintenance.state === "running"} onClick={() => send({ type: "clean_now" })}>
             {snapshot?.maintenance.state === "running" ? "Cleaning…" : "Clean merged worktrees now"}

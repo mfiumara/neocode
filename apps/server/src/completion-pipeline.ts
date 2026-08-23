@@ -432,7 +432,16 @@ export class CompletionPipeline {
     if (["queued", "ci_running", "judging", "approved", "feedback_sent", "worker_resumed", "handoff_received"].includes(status)) job.integration = { ...job.integration, status: "reviewing", targetRef: review.targetBranch };
     else if (["merge_queued", "merging", "post_merge_ci"].includes(status)) job.integration = { ...job.integration, status: "integrating", targetRef: review.targetBranch };
     else if (["rejected", "blocked", "conflict", "ci_failed", "post_ci_failed", "failed"].includes(status)) job.integration = { ...job.integration, status: "conflicted", targetRef: review.targetBranch };
-    else if (status === "merged") job.integration = { status: "merged", targetRef: review.targetBranch, verifiedAt: Date.now(), targetHead: review.mergeCommit, completionHead: job.completion?.head };
+    else if (status === "merged") {
+      job.integration = { status: "merged", targetRef: review.targetBranch, verifiedAt: Date.now(), targetHead: review.mergeCommit, completionHead: job.completion?.head };
+      job.terminalDisposition = {
+        kind: "merged_verified", recordedAt: Date.now(),
+        evidence: {
+          method: "reviewed-integration", detail: detail || "Guarded integration and verification completed.",
+          sourceCommit: job.completion?.head, targetRef: review.targetBranch, targetCommit: review.mergeCommit,
+        },
+      };
+    }
     if (["blocked", "conflict", "failed", "ci_failed", "post_ci_failed"].includes(status)) review.error = detail; else delete review.error;
     review.transitions.push({ status, at: review.updatedAt, detail, owner }); this.publish(job);
   }
