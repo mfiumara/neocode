@@ -221,7 +221,7 @@ export interface CleanupEvidence {
   targetHead: string;
   completionHead: string;
   intendedCommits: string[];
-  mergeMethod: "commit-ancestry" | "identical-content" | "no-changes";
+  mergeMethod: "commit-ancestry" | "patch-equivalent" | "identical-content" | "no-changes";
   cleanPorcelain: true;
   registeredPath: string;
   registeredBranch: string;

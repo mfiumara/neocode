@@ -66,6 +66,19 @@ test("removes a merged clean registered worktree and retains its branch", async 
   });
 });
 
+test("removes a clean worktree whose commits were integrated with rewritten hashes", async () => {
+  await withFixture({ commit: true }, async ({ root, worktree, job }) => {
+    await writeFile(join(root, "main-only.txt"), "advance main\n");
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "advance main"]);
+    await git(root, ["cherry-pick", job.completion!.head]);
+    assert.equal(await janitor(root).review(job), true);
+    assert.equal(job.cleanup?.status, "removed");
+    if (job.cleanup?.status === "removed") assert.equal(job.cleanup.evidence.mergeMethod, "patch-equivalent");
+    assert.equal(await stat(worktree).then(() => true, () => false), false);
+  });
+});
+
 test("refuses completed but unmerged work", async () => {
   await withFixture({}, async ({ root, job }) => {
     assert.equal(await janitor(root).review(job), false);

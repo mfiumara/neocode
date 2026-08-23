@@ -116,6 +116,24 @@ export class WorktreeJanitor {
       }
       merged = true;
     }
+    if (!merged) {
+      const cherry = await this.git(["cherry", this.options.targetRef, job.completion.head], this.workspaceRoot).catch(() => "");
+      const equivalent = new Set(cherry.split("\n")
+        .filter((line) => line.startsWith("- "))
+        .map((line) => line.slice(2).trim()));
+      let allIntegrated = true;
+      for (const commit of commits) {
+        if (equivalent.has(commit)) continue;
+        if (!await this.gitSuccess(["merge-base", "--is-ancestor", commit, targetHead], this.workspaceRoot)) {
+          allIntegrated = false;
+          break;
+        }
+      }
+      if (allIntegrated) {
+        merged = true;
+        mergeMethod = "patch-equivalent";
+      }
+    }
     if (!merged && await this.gitSuccess(["diff", "--quiet", job.completion.head, targetHead, "--"], this.workspaceRoot)) {
       merged = true;
       mergeMethod = "identical-content";
