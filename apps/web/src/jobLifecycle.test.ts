@@ -45,6 +45,20 @@ test("active state covers worker repair, checks, judging, integration, and norma
   assert.deepEqual(jobActiveState(job("running")), { kind: "worker", label: "Worker working" });
 });
 
+test("a recovered running worker wins over preserved settled review evidence", () => {
+  const recovered = reviewed("blocked", "running");
+  assert.deepEqual(jobActiveState(recovered), { kind: "worker", label: "Worker repairing" });
+});
+
+test("a recovered running worker wins over preserved conflicted integration evidence", () => {
+  const recovered = reviewed("rejected", "running");
+  recovered.integration = { status: "conflicted" };
+  assert.deepEqual(jobActiveState(recovered), { kind: "worker", label: "Worker repairing" });
+
+  const withoutReview = job("running", { status: "conflicted" });
+  assert.deepEqual(jobActiveState(withoutReview), { kind: "worker", label: "Worker working" });
+});
+
 test("settled and disconnected lifecycle state never appears active", () => {
   for (const value of [
     reviewed("blocked"), reviewed("failed"), reviewed("approved"), reviewed("rejected"),

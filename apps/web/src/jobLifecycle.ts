@@ -18,20 +18,23 @@ export function jobActiveState(job: AgentJob, activityReady = true): JobActiveSt
     return undefined;
   }
 
-  if (["merged", "superseded", "conflicted"].includes(job.integration?.status || "")) return undefined;
+  if (["merged", "superseded"].includes(job.integration?.status || "")) return undefined;
 
   const review = job.review?.status;
+  // startRecoveryAttempt is the live execution authority: it sets running but
+  // intentionally preserves the prior review diagnosis and conflicted
+  // integration evidence. A fresh connected snapshot therefore lets current
+  // worker execution win over that settled metadata.
+  if (job.status === "running") {
+    return { kind: "worker", label: job.review ? "Worker repairing" : "Worker working" };
+  }
   if (review === "worker_resumed") return { kind: "worker", label: "Worker repairing" };
   if (review === "ci_running" || review === "post_merge_ci") return { kind: "checks", label: "Running checks" };
   if (review === "judging") return { kind: "review", label: "Under review" };
   if (review === "merge_queued" || review === "merging") return { kind: "integration", label: "Integrating" };
 
-  // Any other current review status is settled or awaiting a decision. This
-  // guard also prevents a mismatched stale worker status from winning. An
-  // integration flag without its review action is not enough evidence of a
-  // live process after restart.
-  if (job.review) return undefined;
-  if (job.status === "running") return { kind: "worker", label: "Worker working" };
+  // Other current review statuses are settled or awaiting a decision. An
+  // integration flag alone is likewise not evidence of a live process.
   return undefined;
 }
 
