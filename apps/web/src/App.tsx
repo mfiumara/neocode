@@ -10,11 +10,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
-import { anchoredScrollTop, isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
+import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
 import { isDoneJob, jobLifecycleLabel } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
-import { appendUnique, prependPage, reconcileTail } from "./transcript";
+import { appendUnique, prependPage, reconcileWindow } from "./transcript";
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
 
@@ -36,6 +36,7 @@ type JobTab = "conversation" | "diff" | "review";
 interface ContextEntry { id: string; label: string; text: string }
 interface PaletteEntry { id: string; label: string; detail: string; action: () => void }
 interface ComposerImage extends ImageAttachment { previewUrl: string }
+interface RowAnchor { threadKey: string; visibleKey?: string; pixelOffset: number; selectedKey?: string }
 interface BrowserWorkspaceState {
   version: 1;
   active: ActiveView;
@@ -45,6 +46,18 @@ interface BrowserWorkspaceState {
 }
 function imageSource(image: ImageAttachment): string { return `data:${image.mimeType};base64,${image.data}`; }
 function modelKey(model: { provider: string; id: string }): string { return `${model.provider}/${model.id}`; }
+function visibleRowAnchor(viewport: HTMLElement): { key: string; offset: number } | undefined {
+  const viewportRect = viewport.getBoundingClientRect();
+  const viewportTop = viewportRect.top;
+  const visible = [...viewport.querySelectorAll<HTMLElement>("[data-row-key]")]
+    .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+    .filter(({ rect }) => rect.bottom > viewportTop && rect.top < viewportRect.bottom)
+    .sort((left, right) => left.rect.top - right.rect.top)[0];
+  return visible?.element.dataset.rowKey
+    ? { key: visible.element.dataset.rowKey, offset: visible.rect.top - viewportTop }
+    : undefined;
+}
+
 function roleLabel(role: TranscriptMessage["role"]): string {
   return role === "user" ? "YOU" : role === "assistant" ? "AGENT" : role.toUpperCase();
 }
@@ -127,6 +140,7 @@ export function App() {
   const transcriptRef = useRef<HTMLDivElement>(null);
   const transcriptContentRef = useRef<HTMLDivElement>(null);
   const scrollPositionsRef = useRef<Record<string, number>>({});
+  const scrollAnchorsRef = useRef<Record<string, { key: string; offset: number }>>({});
   const imagesRef = useRef<ComposerImage[]>([]);
   const mountedRef = useRef(true);
   // Content may grow between scroll events. A render must not turn an
@@ -134,7 +148,10 @@ export function App() {
   const followTranscriptRef = useRef(true);
   const pendingPagesRef = useRef(new Set<string>());
   const currentThreadRef = useRef("coordinator");
-  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | undefined>(undefined);
+  const rowsRef = useRef<NavigableRow[]>([]);
+  const selectedRowRef = useRef(0);
+  const selectionScrollSuppressionRef = useRef(0);
+  const prependAnchorRef = useRef<RowAnchor | undefined>(undefined);
 
   const send = (message: ClientMessage): boolean => {
     const socket = socketRef.current;
@@ -180,17 +197,22 @@ export function App() {
             ...message.snapshot,
             coordinator: {
               ...message.snapshot.coordinator,
-              messages: reconcileTail(current.coordinator.messages, message.snapshot.coordinator.messages),
-              transcriptPage: current.coordinator.messages.length > message.snapshot.coordinator.messages.length
-                ? current.coordinator.transcriptPage : message.snapshot.coordinator.transcriptPage,
+              ...(() => {
+                const reconciled = reconcileWindow(
+                  { messages: current.coordinator.messages, page: current.coordinator.transcriptPage },
+                  { messages: message.snapshot.coordinator.messages, page: message.snapshot.coordinator.transcriptPage },
+                );
+                return { messages: reconciled.messages, transcriptPage: reconciled.page };
+              })(),
             },
             jobs: message.snapshot.jobs.map((job) => {
               const old = currentJobs.get(job.id);
-              return old ? {
-                ...job,
-                messages: reconcileTail(old.messages, job.messages),
-                transcriptPage: old.messages.length > job.messages.length ? old.transcriptPage : job.transcriptPage,
-              } : job;
+              if (!old) return job;
+              const reconciled = reconcileWindow(
+                { messages: old.messages, page: old.transcriptPage },
+                { messages: job.messages, page: job.transcriptPage },
+              );
+              return { ...job, messages: reconciled.messages, transcriptPage: reconciled.page };
             }),
           };
         });
@@ -258,11 +280,11 @@ export function App() {
         setSnapshot((current) => {
           if (!current) return current;
           const old = current.jobs.find((job) => job.id === message.job.id);
-          const job = old ? {
-            ...message.job,
-            messages: reconcileTail(old.messages, message.job.messages),
-            transcriptPage: old.messages.length > message.job.messages.length ? old.transcriptPage : message.job.transcriptPage,
-          } : message.job;
+          const reconciled = old ? reconcileWindow(
+            { messages: old.messages, page: old.transcriptPage },
+            { messages: message.job.messages, page: message.job.transcriptPage },
+          ) : undefined;
+          const job = reconciled ? { ...message.job, messages: reconciled.messages, transcriptPage: reconciled.page } : message.job;
           return { ...current, jobs: [job, ...current.jobs.filter((entry) => entry.id !== job.id)]
             .sort((a, b) => b.createdAt - a.createdAt) };
         });
@@ -270,11 +292,16 @@ export function App() {
         const key = message.thread.kind === "coordinator" ? "coordinator" : `job:${message.thread.jobId}`;
         pendingPagesRef.current.delete(key);
         const viewport = transcriptRef.current;
-        if (viewport && currentThreadRef.current === key) prependAnchorRef.current = { scrollHeight: viewport.scrollHeight, scrollTop: viewport.scrollTop };
-        if (message.messages.length) setNavigation((current) => {
-          const saved = current[key];
-          return saved ? { ...current, [key]: { ...saved, selectedRow: saved.selectedRow + message.messages.length } } : current;
-        });
+        if (viewport && currentThreadRef.current === key) {
+          const visible = visibleRowAnchor(viewport);
+          selectionScrollSuppressionRef.current = 2;
+          prependAnchorRef.current = {
+            threadKey: key,
+            visibleKey: visible?.key,
+            pixelOffset: visible?.offset || 0,
+            selectedKey: rowsRef.current[selectedRowRef.current]?.key,
+          };
+        }
         setSnapshot((current) => {
           if (!current) return current;
           if (message.thread.kind === "coordinator") return {
@@ -397,11 +424,13 @@ export function App() {
   const measuredVirtualRows = rowVirtualizer.getVirtualItems();
   // Radix refs and ResizeObserver attach after the first commit. Keep that
   // bootstrap commit useful (and bounded) in SSR/jsdom as well as browsers.
-  const virtualRows = measuredVirtualRows.length ? measuredVirtualRows : rows.slice(-25).map((_, offset) => {
-    const index = Math.max(0, rows.length - 25) + offset;
+  const virtualRows = measuredVirtualRows.length || rows.length > 25 ? measuredVirtualRows : rows.map((_, offset) => {
+    const index = offset;
     return { index, start: index * 110 };
   });
   const selectedRow = navigationForView(navigation, activeThreadKey, rows.length).selectedRow;
+  rowsRef.current = rows;
+  selectedRowRef.current = selectedRow;
   const setSelectedRow = (next: number | ((current: number) => number)) => {
     setNavigation((current) => {
       const saved = navigationForView(current, activeThreadKey, rows.length);
@@ -423,12 +452,22 @@ export function App() {
     });
   }, [activeThreadKey, rows.length]);
 
+  const rememberCurrentViewport = () => {
+    const viewport = transcriptRef.current;
+    if (!viewport) return;
+    scrollPositionsRef.current[activeThreadKey] = viewport.scrollTop;
+    const visible = visibleRowAnchor(viewport);
+    if (visible) scrollAnchorsRef.current[activeThreadKey] = visible;
+  };
+
   const openCoordinator = () => {
+    rememberCurrentViewport();
     setActive({ kind: "coordinator" });
     setJobTab("conversation");
   };
 
   const openJob = (job: AgentJob) => {
+    rememberCurrentViewport();
     setActive({ kind: "job", id: job.id });
     setJobTab("conversation");
   };
@@ -554,11 +593,25 @@ export function App() {
     const transcript = transcriptRef.current;
     if (!transcript) return;
     const saved = scrollPositionsRef.current[activeThreadKey];
-    transcript.scrollTop = saved ?? transcript.scrollHeight;
+    const anchor = scrollAnchorsRef.current[activeThreadKey];
+    const anchorIndex = anchor ? rows.findIndex((row) => row.key === anchor.key) : -1;
+    if (anchorIndex >= 0) {
+      rowVirtualizer.scrollToIndex(anchorIndex, { align: "start" });
+      requestAnimationFrame(() => {
+        const viewport = transcriptRef.current;
+        const element = [...(viewport?.querySelectorAll<HTMLElement>("[data-row-key]") || [])]
+          .find((candidate) => candidate.dataset.rowKey === anchor.key);
+        if (viewport && element) viewport.scrollTop += element.getBoundingClientRect().top - viewport.getBoundingClientRect().top - anchor.offset;
+      });
+    } else transcript.scrollTop = saved ?? transcript.scrollHeight;
     followTranscriptRef.current = saved === undefined || isNearTranscriptBottom(transcript);
   }, [activeThreadKey, jobTab]);
 
   useLayoutEffect(() => {
+    if (selectionScrollSuppressionRef.current > 0) {
+      selectionScrollSuppressionRef.current -= 1;
+      return;
+    }
     const transcript = transcriptRef.current;
     const row = transcript?.querySelector<HTMLElement>(`[data-row-index="${selectedRow}"]`);
     if (!transcript) return;
@@ -580,11 +633,28 @@ export function App() {
   useLayoutEffect(() => {
     const anchor = prependAnchorRef.current;
     const transcript = transcriptRef.current;
-    if (!anchor || !transcript) return;
-    transcript.scrollTop = anchoredScrollTop(anchor.scrollTop, anchor.scrollHeight, transcript.scrollHeight);
-    scrollPositionsRef.current[activeThreadKey] = transcript.scrollTop;
+    if (!anchor || !transcript || anchor.threadKey !== activeThreadKey) return;
+    const selectedIndex = anchor.selectedKey ? rows.findIndex((row) => row.key === anchor.selectedKey) : -1;
+    if (selectedIndex >= 0) setNavigation((current) => ({
+      ...current,
+      [activeThreadKey]: { ...navigationForView(current, activeThreadKey, rows.length), selectedRow: selectedIndex },
+    }));
+    const visibleIndex = anchor.visibleKey ? rows.findIndex((row) => row.key === anchor.visibleKey) : -1;
     prependAnchorRef.current = undefined;
-  }, [rows.length, activeThreadKey]);
+    if (visibleIndex < 0) return;
+    requestAnimationFrame(() => {
+      rowVirtualizer.scrollToIndex(visibleIndex, { align: "start" });
+      requestAnimationFrame(() => {
+        const viewport = transcriptRef.current;
+        const element = [...(viewport?.querySelectorAll<HTMLElement>("[data-row-key]") || [])]
+          .find((candidate) => candidate.dataset.rowKey === anchor.visibleKey);
+        if (!viewport || !element) return;
+        const actualOffset = element.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
+        viewport.scrollTop += actualOffset - anchor.pixelOffset;
+        scrollPositionsRef.current[activeThreadKey] = viewport.scrollTop;
+      });
+    });
+  }, [rows, activeThreadKey, rowVirtualizer]);
 
   const lastRow = rows[rows.length - 1];
   const outputRevision = lastRow?.kind === "message"
@@ -800,8 +870,13 @@ export function App() {
               viewportClassName="transcript-viewport"
               onViewportScroll={(event) => {
                 scrollPositionsRef.current[activeThreadKey] = event.currentTarget.scrollTop;
+                const visible = visibleRowAnchor(event.currentTarget);
+                if (visible) scrollAnchorsRef.current[activeThreadKey] = visible;
                 followTranscriptRef.current = isNearTranscriptBottom(event.currentTarget);
-                if (event.currentTarget.scrollTop <= 80) requestOlder();
+                if (event.currentTarget.scrollTop <= 80) {
+                  const viewport = event.currentTarget;
+                  requestAnimationFrame(() => { if (viewport.scrollTop <= 80) requestOlder(); });
+                }
               }}
             >
               <div className="transcript-content" ref={transcriptContentRef}>
@@ -811,7 +886,9 @@ export function App() {
                   {active.kind === "coordinator" ? "Type a prompt to start." : "Worker is starting."}
                 </div>
               )}
-              {activePage?.hasOlder && <div className="transcript-older" role="status">Scroll up to load older history</div>}
+              <div className="transcript-older" role="status" aria-live="polite">
+                {activePage?.hasOlder ? "Scroll up to load older history" : "\u00a0"}
+              </div>
               <div className="transcript-window" style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
               {virtualRows.map((virtualRow) => {
                 const index = virtualRow.index;
@@ -819,6 +896,7 @@ export function App() {
                 return <div
                   key={row.key}
                   data-virtual-row=""
+                  data-row-key={row.key}
                   data-index={index}
                   ref={rowVirtualizer.measureElement}
                   style={{ position: "absolute", width: "100%", transform: `translateY(${virtualRow.start}px)` }}

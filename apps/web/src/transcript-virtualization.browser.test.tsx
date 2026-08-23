@@ -1,58 +1,173 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createServer } from "node:net";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { JSDOM } from "jsdom";
-import type { AppSnapshot } from "@neocode/protocol";
+import { WebSocket, WebSocketServer } from "ws";
+import type { AgentJob, AppSnapshot, ServerMessage, TranscriptMessage } from "@neocode/protocol";
 
-class Socket {
-  static OPEN = 1;
-  static instance: Socket;
-  readyState = 1;
-  onmessage?: (event: MessageEvent) => void;
-  onopen?: () => void;
-  onclose?: () => void;
-  constructor() { Socket.instance = this; }
-  send() {}
-  close() { this.readyState = 3; }
+const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const chrome = [process.env.CHROME_BIN, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/usr/bin/google-chrome", "/usr/bin/chromium"]
+  .find((candidate): candidate is string => !!candidate && existsSync(candidate));
+
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const port = address.port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
 }
 
-test("10,000 loaded dynamic-height messages mount only an overscanned window", async () => {
-  const dom = new JSDOM("<div id='root'></div>", { url: "http://localhost" });
-  const previous = new Map<string, PropertyDescriptor | undefined>();
-  for (const [key, value] of Object.entries({
-    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
-    location: dom.window.location, localStorage: dom.window.localStorage,
-    HTMLElement: dom.window.HTMLElement, Element: dom.window.Element,
-    Event: dom.window.Event, MessageEvent: dom.window.MessageEvent,
-    WebSocket: Socket, IS_REACT_ACT_ENVIRONMENT: true,
-  })) {
-    previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+async function waitFor(check: () => Promise<boolean>, timeout = 15_000): Promise<void> {
+  const started = Date.now();
+  while (!(await check())) {
+    if (Date.now() - started > timeout) throw new Error("Timed out waiting for browser condition");
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
+}
+
+function coordinatorSnapshot(messages: TranscriptMessage[], job: AgentJob): AppSnapshot {
+  return {
+    cwd: "/tmp/virtual", coordinator: {
+      status: "idle", activityHistory: [], messages,
+      transcriptPage: { oldestCursor: messages[0]?.id, hasOlder: true },
+      settings: { variant: "build", thinkingLevel: "off", availableVariants: ["build"], availableThinkingLevels: [] },
+      model: null, models: [],
+    }, jobs: [job], maintenance: { state: "idle" },
+  };
+}
+
+test("real browser virtualizes, measures, paginates, navigates, and preserves reading position", { skip: !chrome, timeout: 45_000 }, async () => {
+  const webPort = await freePort();
+  const debugPort = await freePort();
+  const backendPort = await freePort();
+  const http = await import("node:http").then(({ createServer }) => createServer());
+  const wss = new WebSocketServer({ server: http });
   try {
-    const [{ createRoot }, { act }, { App }] = await Promise.all([import("react-dom/client"), import("react"), import("./App")]);
-    const root = createRoot(document.getElementById("root")!);
-    await act(async () => root.render(<App />));
-    const messages = Array.from({ length: 10_000 }, (_, index) => ({
-      id: `m-${index}`, role: "assistant" as const, timestamp: index,
-      text: index % 7 === 0 ? `# Dynamic heading ${index}\n\n${"wrapped markdown ".repeat(40)}` : `row ${index}`,
-      ...(index === 9_999 ? { attachments: [{ id: "image", mimeType: "image/png" as const, data: "AA==", size: 1 }] } : {}),
-    }));
-    const snapshot: AppSnapshot = {
-      cwd: "/tmp/large", coordinator: {
-        status: "idle", activityHistory: [], messages, transcriptPage: { hasOlder: false, oldestCursor: "m-0" },
-        settings: { variant: "build", thinkingLevel: "off", availableVariants: ["build"], availableThinkingLevels: [] },
-        model: null, models: [],
-      }, jobs: [], maintenance: { state: "idle" },
+    await new Promise<void>((resolve, reject) => { http.once("error", reject); http.listen(backendPort, "127.0.0.1", resolve); });
+  } catch {
+    wss.close();
+    http.close();
+    return;
+  }
+  const all = Array.from({ length: 10_000 }, (_, index): TranscriptMessage => ({
+    id: `m-${index}`, role: "assistant", timestamp: index,
+    text: index % 17 === 0 ? `# Markdown ${index}\n\n${"dynamic wrapped content ".repeat(20)}` : `row ${index}`,
+  }));
+  const job: AgentJob = {
+    id: "job-browser", title: "Browser worker", prompt: "test", status: "running", branch: "test", worktree: "/tmp/worker",
+    isolation: { requested: "worktree", mode: "worktree", path: "/tmp/worker" }, baseRef: "main", createdAt: 4_500, updatedAt: 4_500,
+    messages: [{ id: "worker-1", role: "assistant", text: "worker transcript", timestamp: 1 }],
+    transcriptPage: { hasOlder: false },
+  };
+  let peer: WebSocket | undefined;
+  let loadRequests = 0;
+  wss.on("connection", (socket) => {
+    peer = socket;
+    socket.send(JSON.stringify({ type: "snapshot", snapshot: coordinatorSnapshot(all.slice(-100), job) } satisfies ServerMessage));
+    socket.on("message", (raw) => {
+      const request = JSON.parse(raw.toString()) as { type: string };
+      if (request.type !== "load_older_messages") return;
+      loadRequests += 1;
+      setTimeout(() => socket.send(JSON.stringify({ type: "transcript_page", thread: { kind: "coordinator" }, messages: all.slice(0, -100), page: { oldestCursor: "m-0", hasOlder: false } } satisfies ServerMessage)), 300);
+    });
+  });
+
+  let vite: ChildProcess | undefined;
+  let browser: ChildProcess | undefined;
+  let cdp: WebSocket | undefined;
+  try {
+    vite = spawn(process.execPath, [resolve(webRoot, "../../node_modules/vite/bin/vite.js"), "--host", "127.0.0.1", "--port", String(webPort)], {
+      cwd: webRoot, stdio: "ignore", env: { ...process.env, NEOCODE_BACKEND_URL: `ws://127.0.0.1:${backendPort}` },
+    });
+    await waitFor(async () => fetch(`http://127.0.0.1:${webPort}`).then((response) => response.ok, () => false));
+    browser = spawn(chrome!, ["--headless=new", "--disable-gpu", "--no-sandbox", `--remote-debugging-port=${debugPort}`, "about:blank"], { stdio: "ignore" });
+    let pageTarget: { webSocketDebuggerUrl: string } | undefined;
+    await waitFor(async () => {
+      pageTarget = await fetch(`http://127.0.0.1:${debugPort}/json`).then((response) => response.json()).then((items) => items.find((item: { type: string }) => item.type === "page"), () => undefined);
+      return !!pageTarget;
+    });
+    cdp = new WebSocket(pageTarget!.webSocketDebuggerUrl);
+    await new Promise<void>((resolve, reject) => { cdp!.once("open", resolve); cdp!.once("error", reject); });
+    let commandId = 0;
+    const pending = new Map<number, (value: unknown) => void>();
+    cdp.on("message", (raw) => {
+      const response = JSON.parse(raw.toString()) as { id?: number; result?: unknown; error?: unknown };
+      if (response.id) { pending.get(response.id)?.(response.error ? { error: response.error } : response.result); pending.delete(response.id); }
+    });
+    const command = <T,>(method: string, params: Record<string, unknown> = {}) => new Promise<T>((resolve) => {
+      const id = ++commandId; pending.set(id, resolve as (value: unknown) => void); cdp!.send(JSON.stringify({ id, method, params }));
+    });
+    const evaluate = async <T,>(expression: string): Promise<T> => {
+      const result = await command<{ result: { value: T }; exceptionDetails?: unknown }>("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+      if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+      return result.result.value;
     };
-    await act(async () => Socket.instance.onmessage?.(new dom.window.MessageEvent("message", { data: JSON.stringify({ type: "snapshot", snapshot }) }) as unknown as MessageEvent));
-    const mounted = document.querySelectorAll("[data-virtual-row]").length;
-    assert.ok(mounted > 0 && mounted <= 40, `mounted ${mounted} of 10,000 rows`);
-    assert.ok(document.querySelector(".message-attachments img"), "dynamic image row participates in the measured window");
-    await act(async () => root.unmount());
+    await command("Page.navigate", { url: `http://127.0.0.1:${webPort}` });
+    await waitFor(async () => evaluate<boolean>("document.querySelectorAll('[data-virtual-row]').length > 0"));
+
+    // Let the initial ResizeObserver pass settle before recording the anchor.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Top-scroll drives the real protocol request and prepends the remaining 9,900 rows.
+    await evaluate("(() => { const v=document.querySelector('.transcript-viewport'); v.scrollTop=0; v.dispatchEvent(new Event('scroll',{bubbles:true})); return true })()");
+    await waitFor(async () => loadRequests === 1);
+    const initialAnchor = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]; return {key:r.e.dataset.rowKey,offset:r.r.top-v.getBoundingClientRect().top} })()");
+    await waitFor(async () => evaluate<boolean>("document.querySelector('.transcript-window').style.height.replace('px','') > 100000"));
+    await new Promise((resolve) => setTimeout(resolve, 200)); // allow ResizeObserver measurements
+    const restoredAnchorOffset = await evaluate<number>(`document.querySelector('[data-row-key="${initialAnchor.key}"]')?.getBoundingClientRect().top-document.querySelector('.transcript-viewport').getBoundingClientRect().top`);
+    assert.ok(Math.abs(restoredAnchorOffset - initialAnchor.offset) < 3,
+      `prepend moved stable interleaved anchor ${initialAnchor.key}: ${initialAnchor.offset} -> ${restoredAnchorOffset}`);
+    const mounted = await evaluate<number>("document.querySelectorAll('[data-virtual-row]').length");
+    assert.ok(mounted > 0 && mounted < 80, `actual virtualizer mounted ${mounted}/10,001 rows`);
+
+    // Keyboard j/k selection follows mounted row identity.
+    await evaluate("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); document.querySelector('.message')?.click(); true");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const selectedBefore = await evaluate<number>("+document.querySelector('.message.selected')?.dataset.rowIndex");
+    await evaluate("window.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true})); true");
+    await waitFor(async () => evaluate<boolean>(`+document.querySelector('.message.selected')?.dataset.rowIndex === ${selectedBefore + 1}`));
+    await evaluate("window.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true})); true");
+    await waitFor(async () => evaluate<boolean>(`+document.querySelector('.message.selected')?.dataset.rowIndex === ${selectedBefore}`));
+    await evaluate("(() => { const v=document.querySelector('.transcript-viewport'); v.scrollTop=v.scrollHeight/2; v.dispatchEvent(new Event('scroll',{bubbles:true})); return true })()");
+    await waitFor(async () => evaluate<boolean>("[...document.querySelectorAll('[data-row-index]')].some(e => +e.dataset.rowIndex > 4000 && +e.dataset.rowIndex < 6000)"));
+
+    const readingTop = await evaluate<number>("document.querySelector('.transcript-viewport').scrollTop");
+    peer!.send(JSON.stringify({ type: "coordinator_message", message: { id: "stream-new", role: "assistant", text: "stream", timestamp: 20_000 } } satisfies ServerMessage));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const afterStream = await evaluate<number>("document.querySelector('.transcript-viewport').scrollTop");
+    assert.ok(Math.abs(afterStream - readingTop) < 5, `history reader snapped ${readingTop} -> ${afterStream}`);
+
+    // Dynamic Markdown and an image resize the measured row; context remains usable.
+    const visibleKey = await evaluate<string>("document.querySelector('[data-row-key^=\"message-\"]')?.dataset.rowKey || ''");
+    const target = all.find((entry) => `message-${entry.id}` === visibleKey) || all[5_000]!;
+    const heightBefore = await evaluate<number>(`document.querySelector('[data-row-key="${visibleKey}"]')?.getBoundingClientRect().height || 0`);
+    peer!.send(JSON.stringify({ type: "coordinator_message_updated", message: { ...target, text: `# Resized\n\n${"tall markdown ".repeat(200)}`, attachments: [{ id: "pixel", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", size: 68 }] } } satisfies ServerMessage));
+    await waitFor(async () => evaluate<boolean>(`!!document.querySelector('[data-row-key="message-${target.id}"] img')`));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const heightAfter = await evaluate<number>(`document.querySelector('[data-row-key="message-${target.id}"]')?.getBoundingClientRect().height || 0`);
+    assert.ok(heightAfter > heightBefore, `ResizeObserver row height did not grow: ${heightBefore} -> ${heightAfter}`);
+    await evaluate("document.querySelector('.message-meta button')?.click(); true");
+    assert.equal(await evaluate<boolean>("!!document.querySelector('.context-chips button')"), true);
+
+    const beforeSwitch = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]; return {key:r.e.dataset.rowKey,offset:r.r.top-v.getBoundingClientRect().top} })()");
+    await evaluate("document.querySelector('.job-row')?.click(); true");
+    await waitFor(async () => evaluate<boolean>("document.querySelector('h1')?.textContent === 'Browser worker'"));
+    await evaluate("document.querySelector('.thread-row')?.click(); true");
+    await waitFor(async () => evaluate<boolean>("document.querySelector('h1')?.textContent === 'Coordinator'"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const restored = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]; return {key:r.e.dataset.rowKey,offset:r.r.top-v.getBoundingClientRect().top} })()");
+    assert.equal(restored.key, beforeSwitch.key);
+    assert.ok(Math.abs(restored.offset - beforeSwitch.offset) < 3, `thread anchor offset was not restored: ${beforeSwitch.offset} -> ${restored.offset}`);
   } finally {
-    for (const [key, descriptor] of previous) descriptor
-      ? Object.defineProperty(globalThis, key, descriptor)
-      : Reflect.deleteProperty(globalThis, key);
-    dom.window.close();
+    cdp?.close();
+    browser?.kill("SIGKILL");
+    vite?.kill("SIGKILL");
+    peer?.close();
+    wss.close();
+    http.close();
   }
 });
