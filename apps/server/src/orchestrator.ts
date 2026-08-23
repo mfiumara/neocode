@@ -22,6 +22,7 @@ import {
   type AgentVariant,
   type AppSnapshot,
   type ImageAttachment,
+  type JudgeEvidence,
   type ModelChoice,
   type ModelRef,
   type RequestedIsolationMode,
@@ -29,6 +30,7 @@ import {
   type TranscriptMessage,
 } from "@neocode/protocol";
 import { activity, toolActivity } from "./activity.js";
+import { CompletionPipeline, LocalReviewAdapter, readWorktreeDiff } from "./completion-pipeline.js";
 import { resolveIsolationMode } from "./isolation.js";
 import {
   RUNTIME_STATE_VERSION,
@@ -129,6 +131,7 @@ export class Orchestrator {
   private modelChangeInProgress = false;
   private modelRuntime!: ModelRuntime;
   private coordinator!: AgentSession;
+  private completionPipeline!: CompletionPipeline;
 
   readonly cwd: string;
 
@@ -248,6 +251,14 @@ export class Orchestrator {
     this.coordinator = result.session;
     this.applyVariantTools();
     this.bindCoordinator();
+
+    const targetBranch = process.env.NEOCODE_MERGE_BRANCH || "main";
+    const reviewAdapter = new LocalReviewAdapter(this.cwd, {
+      targetBranch,
+      judge: (job, diff, diffSha256) => this.runJudge(job, diff, diffSha256),
+    });
+    this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd);
+    this.completionPipeline.recover(this.listJobs());
     this.persist();
   }
 
@@ -416,6 +427,18 @@ export class Orchestrator {
     return job;
   }
 
+  retryReview(jobId: string): void {
+    const job = this.jobs.get(jobId);
+    if (!job) throw new Error(`Unknown job: ${jobId}`);
+    this.completionPipeline.retry(job);
+  }
+
+  mergeReview(jobId: string): void {
+    const job = this.jobs.get(jobId);
+    if (!job) throw new Error(`Unknown job: ${jobId}`);
+    this.completionPipeline.requestMerge(job);
+  }
+
   async cancelJob(jobId: string): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
@@ -533,6 +556,9 @@ export class Orchestrator {
       await this.refreshDiff(job);
       job.updatedAt = Date.now();
       this.publishJob(job);
+      // This call is in the worker lifecycle itself: no coordinator prompt,
+      // list_jobs poll, or WebSocket request is needed to start review.
+      this.completionPipeline.enqueue(job);
     } catch (error) {
       if (this.workers.get(job.id)?.cancelled || job.status === "cancelled") return;
       job.status = "failed";
@@ -602,12 +628,78 @@ export class Orchestrator {
     });
   }
 
-  private async refreshDiff(job: AgentJob): Promise<void> {
-    const { stdout } = await execFileAsync("git", ["diff", "--no-ext-diff", job.baseRef], {
+  private async runJudge(job: AgentJob, diff: string, diffSha256: string): Promise<JudgeEvidence> {
+    const configured = process.env.NEOCODE_JUDGE_MODEL?.trim();
+    const available = this.modelRuntime.getAvailableSnapshot();
+    const separator = configured?.indexOf("/") ?? -1;
+    if (configured && (separator < 1 || separator === configured.length - 1)) {
+      throw new Error("NEOCODE_JUDGE_MODEL must be provider/model-id.");
+    }
+    const model = configured
+      ? available.find((candidate) => candidate.provider === configured.slice(0, separator) && candidate.id === configured.slice(separator + 1))
+      : this.coordinator.model;
+    if (!model) throw new Error(configured
+      ? `Configured judge model is unavailable: ${configured}`
+      : "No judge model is available. Configure NEOCODE_JUDGE_MODEL=provider/model-id.");
+
+    const judgeDir = join(this.stateStore.root, "pi-sessions", "judges", job.id, `${job.review?.attempt || 1}-${randomUUID()}`);
+    const manager = SessionManager.create(job.isolation.path, judgeDir);
+    const sessionFile = manager.getSessionFile();
+    const loader = new DefaultResourceLoader({
       cwd: job.isolation.path,
-      maxBuffer: 10 * 1024 * 1024,
+      agentDir: getAgentDir(),
+      systemPromptOverride: () => `# Neocode independent completion judge\nYou are a fresh, read-only review session. You did not implement the change. Evaluate only the supplied task requirements and exact diff. Do not trust the worker report or prose claims. You may inspect repository files with read-only tools. Return one JSON object and no markdown: {"approved":boolean,"summary":string,"diffSha256":string,"requirements":[{"requirement":string,"satisfied":boolean,"evidence":string}]}. Approval requires every material requirement to be represented, satisfied, and supported by concrete diff/CI evidence.`,
     });
-    job.diff = stdout;
+    await loader.reload();
+    let raw = "";
+    const result = await createAgentSession({
+      cwd: job.isolation.path,
+      model,
+      thinkingLevel: "high",
+      modelRuntime: this.modelRuntime,
+      resourceLoader: loader,
+      sessionManager: manager,
+      tools: ["read", "grep", "find", "ls"],
+    });
+    const session = result.session;
+    session.subscribe((event) => {
+      if (event.type === "message_end" && event.message.role === "assistant") raw = assistantText(event.message);
+    });
+    try {
+      await session.prompt(`TASK REQUIREMENTS:\n${job.prompt}\n\nCI EVIDENCE:\n${JSON.stringify(job.review?.ci || [])}\n\nEXACT DIFF SHA-256: ${diffSha256}\n\nEXACT DIFF:\n${diff || "(empty diff)"}`);
+    } finally {
+      session.dispose();
+    }
+
+    const jsonText = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+    let parsed: unknown;
+    try { parsed = JSON.parse(jsonText); } catch { throw new Error("Judge did not return valid structured JSON."); }
+    if (!parsed || typeof parsed !== "object") throw new Error("Judge verdict is not an object.");
+    const verdict = parsed as Record<string, unknown>;
+    if (typeof verdict.approved !== "boolean" || typeof verdict.summary !== "string" || verdict.diffSha256 !== diffSha256 || !Array.isArray(verdict.requirements)) {
+      throw new Error("Judge verdict is missing required structured fields or the exact diff hash.");
+    }
+    const requirements = verdict.requirements.map((entry) => {
+      if (!entry || typeof entry !== "object") throw new Error("Judge requirement evidence is invalid.");
+      const item = entry as Record<string, unknown>;
+      if (typeof item.requirement !== "string" || typeof item.satisfied !== "boolean" || typeof item.evidence !== "string") {
+        throw new Error("Judge requirement evidence is invalid.");
+      }
+      return { requirement: item.requirement, satisfied: item.satisfied, evidence: item.evidence };
+    });
+    return {
+      approved: verdict.approved,
+      summary: verdict.summary,
+      requirements,
+      model: { provider: model.provider, id: model.id },
+      diffSha256,
+      sessionFile,
+      raw,
+    };
+  }
+
+  private async refreshDiff(job: AgentJob): Promise<void> {
+    job.diff = await readWorktreeDiff(job.isolation.path, job.baseRef);
   }
 
   private async git(args: string[]): Promise<string> {

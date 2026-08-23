@@ -17,7 +17,7 @@ import {
 } from "@neocode/protocol";
 
 type ActiveView = { kind: "coordinator" } | { kind: "job"; id: string };
-type JobTab = "conversation" | "diff";
+type JobTab = "conversation" | "diff" | "review";
 interface ContextEntry { id: string; label: string; text: string }
 interface PaletteEntry { id: string; label: string; detail: string; action: () => void }
 interface ComposerImage extends ImageAttachment { previewUrl: string }
@@ -87,7 +87,7 @@ function loadBrowserState(cwd: string, jobs: AgentJob[]): BrowserWorkspaceState 
     return {
       version: 1,
       active,
-      jobTab: active.kind === "job" && state.jobTab === "diff" ? "diff" : "conversation",
+      jobTab: active.kind === "job" && (state.jobTab === "diff" || state.jobTab === "review") ? state.jobTab : "conversation",
       prompt: state.prompt.slice(0, 100_000),
       isolation,
       context: state.context.slice(0, 50).filter((entry): entry is ContextEntry =>
@@ -643,7 +643,14 @@ export function App() {
                 <div className="view-tabs">
                   <button className={jobTab === "conversation" ? "active" : ""} onClick={() => setJobTab("conversation")}>Conversation</button>
                   <button className={jobTab === "diff" ? "active" : ""} onClick={() => setJobTab("diff")}>Diff</button>
+                  <button className={jobTab === "review" ? "active" : ""} onClick={() => setJobTab("review")}>Review{activeJob.review ? ` · ${activeJob.review.status}` : ""}</button>
                 </div>
+                {activeJob.review && !["queued", "ci_running", "judging", "merge_queued", "merging", "post_merge_ci", "merged"].includes(activeJob.review.status) && (
+                  <button className="review-button" onClick={() => send({ type: "retry_review", jobId: activeJob.id })}>Retry review</button>
+                )}
+                {activeJob.review?.judge?.approved && ["approved", "blocked", "conflict", "post_ci_failed"].includes(activeJob.review.status) && (
+                  <button className="review-button" onClick={() => send({ type: "merge_review", jobId: activeJob.id })}>Reconcile</button>
+                )}
                 {activeJob.status === "running" && <button className="cancel-button" onClick={() => send({ type: "cancel_job", jobId: activeJob.id })}>Cancel</button>}
               </div>
             )}
@@ -651,6 +658,8 @@ export function App() {
 
           {jobTab === "diff" && activeJob ? (
             <DiffView diff={activeJob.diff || ""} />
+          ) : jobTab === "review" && activeJob ? (
+            <ReviewView job={activeJob} />
           ) : (
             <div
               className="transcript"
@@ -810,6 +819,37 @@ function WorkingIndicator({ activity: current, agentLabel }: { activity?: AgentA
     <span className="sr-only">{agentLabel} is working: </span>
     <span className="working-description">{current?.description || "Working"}</span>
   </div>;
+}
+
+function ReviewView({ job }: { job: AgentJob }) {
+  const review = job.review;
+  if (!review) return <div className="review-view"><h2>Awaiting successful completion</h2><p>The completion hook starts automatically when the worker succeeds.</p></div>;
+  return <div className="review-view">
+    <header><span className={`review-status ${review.status}`}>{review.status.replaceAll("_", " ")}</span><span>attempt {review.attempt} · target {review.targetBranch}</span></header>
+    {review.error && <pre className="review-error">{review.error}</pre>}
+    <h2>Local CI</h2>
+    <CheckList checks={review.ci} />
+    <h2>Independent Pi judge</h2>
+    {review.judge ? <section className="judge-evidence">
+      <p><strong>{review.judge.approved ? "APPROVED" : "REJECTED"}</strong> · {review.judge.model.provider}/{review.judge.model.id}</p>
+      <p>{review.judge.summary}</p>
+      <code>diff sha256 {review.judge.diffSha256}</code>
+      <ul>{review.judge.requirements.map((item, index) => <li key={index} className={item.satisfied ? "pass" : "fail"}><b>{item.satisfied ? "✓" : "×"} {item.requirement}</b><span>{item.evidence}</span></li>)}</ul>
+    </section> : <p className="muted">No structured verdict yet.</p>}
+    <h2>Reconciliation</h2>
+    <p>{review.mergeCommit ? `commit ${review.mergeCommit}` : "Not reconciled."}</p>
+    <CheckList checks={review.postMergeCi} empty="Post-merge checks have not run." />
+    <h2>Transition log</h2>
+    <ol className="transition-log">{review.transitions.map((entry, index) => <li key={index}><time>{new Date(entry.at).toLocaleTimeString()}</time><b>{entry.status}</b><span>{entry.detail}</span></li>)}</ol>
+  </div>;
+}
+
+function CheckList({ checks, empty = "No checks recorded." }: { checks?: NonNullable<AgentJob["review"]>["ci"]; empty?: string }) {
+  if (!checks?.length) return <p className="muted">{empty}</p>;
+  return <div className="check-list">{checks.map((check, index) => <details key={index} className={check.ok ? "pass" : "fail"}>
+    <summary>{check.ok ? "✓" : "×"} {check.command} <span>{check.durationMs}ms{check.timedOut ? " · timed out" : ""}{check.truncated ? " · truncated" : ""}</span></summary>
+    <pre>{check.output || "(no output)"}</pre>
+  </details>)}</div>;
 }
 
 function DiffView({ diff }: { diff: string }) {

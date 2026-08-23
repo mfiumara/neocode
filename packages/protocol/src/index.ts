@@ -4,6 +4,57 @@ export type RequestedIsolationMode = "auto" | "worktree" | "root";
 export type IsolationMode = Exclude<RequestedIsolationMode, "auto">;
 export type AgentVariant = "build" | "plan";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ReviewStatus =
+  | "queued" | "ci_running" | "ci_failed" | "judging" | "rejected"
+  | "approved" | "merge_queued" | "merging" | "post_merge_ci"
+  | "merged" | "post_ci_failed" | "blocked" | "conflict" | "failed";
+
+export interface CheckEvidence {
+  command: string;
+  ok: boolean;
+  exitCode: number | null;
+  durationMs: number;
+  output: string;
+  truncated?: boolean;
+  timedOut?: boolean;
+}
+
+export interface JudgeRequirementEvidence {
+  requirement: string;
+  satisfied: boolean;
+  evidence: string;
+}
+
+export interface JudgeEvidence {
+  approved: boolean;
+  summary: string;
+  requirements: JudgeRequirementEvidence[];
+  model: ModelRef;
+  diffSha256: string;
+  sessionFile?: string;
+  raw: string;
+}
+
+export interface ReviewTransition {
+  status: ReviewStatus;
+  at: number;
+  detail?: string;
+}
+
+export interface JobReview {
+  /** Stable completion-hook token. Its presence prevents duplicate automatic runs. */
+  hookToken: string;
+  status: ReviewStatus;
+  attempt: number;
+  targetBranch: string;
+  updatedAt: number;
+  transitions: ReviewTransition[];
+  ci?: CheckEvidence[];
+  postMergeCi?: CheckEvidence[];
+  judge?: JudgeEvidence;
+  mergeCommit?: string;
+  error?: string;
+}
 
 export interface AgentActivity {
   phase: "starting" | "thinking" | "responding" | "tool_pending" | "tool_running" | "tool_complete" | "tool_error";
@@ -71,6 +122,8 @@ export interface AgentJob {
   recoverable?: boolean;
   /** Set when durable metadata no longer agrees with the git checkout. */
   recoveryIssue?: string;
+  /** Durable automated CI, independent review, and reconciliation state. */
+  review?: JobReview;
 }
 
 export interface AppSnapshot {
@@ -91,6 +144,8 @@ export type ClientMessage =
   | { type: "abort" }
   | { type: "delegate"; text: string; isolation?: RequestedIsolationMode; attachments?: ImageAttachment[] }
   | { type: "cancel_job"; jobId: string }
+  | { type: "retry_review"; jobId: string }
+  | { type: "merge_review"; jobId: string }
   | { type: "cycle_variant" }
   | { type: "cycle_thinking" }
   | { type: "set_model"; model: ModelRef }
