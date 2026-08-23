@@ -155,7 +155,7 @@ test("terminal persistence failure fails closed without claiming a durable promp
   const root = await mkdtemp(join(tmpdir(), "neocode-orchestrator-failure-closed-"));
   const events: ServerMessage[] = [];
   const coordinator = { isIdle: true, async prompt() { throw new Error("backend failed"); } };
-  type Harness = { coordinator: typeof coordinator; stateStore: RuntimeStateStore };
+  type Harness = { coordinator: typeof coordinator; stateStore: RuntimeStateStore; coordinatorPromptDrainBlocked: boolean };
   try {
     const orchestrator = new Orchestrator(root, (event) => events.push(event), { startup: false, intervalMs: 0, sweepIntervalMs: 0 });
     const harness = orchestrator as unknown as Harness;
@@ -175,6 +175,7 @@ test("terminal persistence failure fails closed without claiming a durable promp
     await waitFor(() => events.some((event) => event.type === "error"));
     assert.equal(events.some((event) => event.type === "coordinator_prompt_failed"), false);
     assert.equal(events.some((event) => event.type === "coordinator_message_updated" && event.message.promptState === "failed"), false);
+    assert.equal(harness.coordinatorPromptDrainBlocked, true, "later FIFO progress remains blocked until restart");
     const restored = await new RuntimeStateStore(root).load();
     assert.equal(restored?.coordinator.messages.find((message) => message.id === "failure-closed")?.promptState, "queued");
     assert.equal(restored?.coordinator.pendingPrompts?.[0]?.messageId, "failure-closed");

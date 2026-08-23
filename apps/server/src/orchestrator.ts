@@ -183,6 +183,7 @@ export class Orchestrator {
   private readonly pendingCoordinatorPrompts: DurableCoordinatorPrompt[] = [];
   private readonly acceptingCoordinatorPromptIds = new Set<string>();
   private promptDrain?: Promise<void>;
+  private coordinatorPromptDrainBlocked = false;
   private activeCoordinatorPromptId?: string;
   private promptResponseCheckpoint?: { messageId: string; flushed: Promise<void> };
   private promptSettlement: PromptSettlementSnapshot = { throughTimestamp: 0, failures: [] };
@@ -576,11 +577,11 @@ export class Orchestrator {
   }
 
   private schedulePromptDrain(): void {
-    if (this.promptDrain || !this.coordinator) return;
+    if (this.promptDrain || this.coordinatorPromptDrainBlocked || !this.coordinator) return;
     this.promptDrain = this.drainCoordinatorPrompts().finally(() => {
       this.promptDrain = undefined;
       const head = this.pendingCoordinatorPrompts[0];
-      if (head && !this.acceptingCoordinatorPromptIds.has(head.messageId)
+      if (head && !this.coordinatorPromptDrainBlocked && !this.acceptingCoordinatorPromptIds.has(head.messageId)
         && this.coordinatorStatus !== "running" && this.coordinator.isIdle) this.schedulePromptDrain();
     });
   }
@@ -641,6 +642,7 @@ export class Orchestrator {
         } catch (persistenceError) {
           // Fail closed: expose neither terminal prompt events nor later FIFO
           // progress when the claimed durable failure did not commit.
+          this.coordinatorPromptDrainBlocked = true;
           if (!this.coordinatorAborting) this.fail(persistenceError);
           break;
         }
