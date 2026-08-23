@@ -117,6 +117,40 @@ function loadBrowserState(cwd: string, jobs: AgentJob[]): BrowserWorkspaceState 
   }
 }
 
+const CONNECTING_SOCKET_DISPOSAL_TIMEOUT_MS = 5_000;
+
+/**
+ * Do not abort an in-flight WebSocket upgrade during React cleanup. Once the
+ * handshake settles, send a normal close frame; a bounded fallback still
+ * releases a target that never completes its handshake.
+ */
+export function disposeWebSocket(
+  socket: WebSocket,
+  connectingTimeoutMs = CONNECTING_SOCKET_DISPOSAL_TIMEOUT_MS,
+): void {
+  if (socket.readyState !== WebSocket.CONNECTING) {
+    socket.close();
+    return;
+  }
+
+  const previousClose = socket.onclose;
+  const timeout = window.setTimeout(() => socket.close(), connectingTimeoutMs);
+  const clear = () => window.clearTimeout(timeout);
+  socket.onopen = () => {
+    clear();
+    socket.close();
+  };
+  socket.onerror = () => {
+    // A failed handshake will be followed by close. In particular, do not turn
+    // that failure into an eager close/write race while disposal is in flight.
+  };
+  socket.onmessage = null;
+  socket.onclose = (event) => {
+    clear();
+    previousClose?.call(socket, event);
+  };
+}
+
 export function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>();
   const [connected, setConnected] = useState(false);
@@ -415,9 +449,10 @@ export function App() {
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       const socket = socketRef.current;
       socketRef.current = undefined;
-      // An established connection gets a WebSocket close handshake. With the
-      // deferred initial open above, cleanup no longer has to abort CONNECTING.
-      socket?.close();
+      // Established sockets close immediately with a close handshake. If the
+      // zero-delay task has opened a CONNECTING socket, let its upgrade settle
+      // before closing rather than recreating the Vite downstream-write race.
+      if (socket) disposeWebSocket(socket);
     };
   }, []);
 

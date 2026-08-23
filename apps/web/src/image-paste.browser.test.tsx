@@ -84,7 +84,7 @@ test("the React composer preserves image prompts and deduplicates durable lifecy
   URL.revokeObjectURL = (value) => { revoked.push(String(value)); };
 
   try {
-    const [{ createRoot }, { act, StrictMode }, { App }] = await Promise.all([
+    const [{ createRoot }, { act, StrictMode }, { App, disposeWebSocket }] = await Promise.all([
       import("react-dom/client"), import("react"), import("./App"),
     ]);
     let root = createRoot(document.getElementById("root")!);
@@ -97,6 +97,17 @@ test("the React composer preserves image prompts and deduplicates durable lifecy
     // Continue the broader prompt/reconnect assertions without StrictMode's
     // unrelated duplicate image-effect probes affecting URL-revocation counts.
     await act(async () => root.unmount());
+    const disposedDuringUpgrade = MockSocket.instances[0]!;
+    assert.equal(disposedDuringUpgrade.closedWhileConnecting, false,
+      "cleanup must wait for a post-timer CONNECTING upgrade instead of aborting it");
+    disposedDuringUpgrade.open();
+    assert.equal(disposedDuringUpgrade.closedWhileConnecting, false,
+      "a disposed in-flight upgrade closes normally as soon as it opens");
+    assert.equal(disposedDuringUpgrade.readyState, 3);
+    const neverUpgrades = new MockSocket("ws://never-upgrades.test/ws");
+    disposeWebSocket(neverUpgrades as unknown as WebSocket, 1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(neverUpgrades.readyState, 3, "a handshake that never settles is released by the bounded fallback");
     MockSocket.instances = [];
     created.length = 0;
     revoked.length = 0;
