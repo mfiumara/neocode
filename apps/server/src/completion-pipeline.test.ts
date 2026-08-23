@@ -138,6 +138,41 @@ test("changed diff after approval blocks integration", async () => {
   assert.equal(adapter.reconcileCalls, 0);
 });
 
+test("candidate CI failure leaves main byte-for-byte unchanged", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "neocode-pipeline-gate-"));
+  const root = join(directory, "root");
+  const worker = join(directory, "worker");
+  try {
+    await execFileAsync("git", ["init", "-b", "main", root]);
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: root });
+    await writeFile(join(root, "base.txt"), "base\n");
+    await execFileAsync("git", ["add", "."], { cwd: root });
+    await execFileAsync("git", ["commit", "-m", "base"], { cwd: root });
+    const base = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    await execFileAsync("git", ["worktree", "add", "-b", "neocode/failing", worker, base], { cwd: root });
+    await writeFile(join(worker, "broken.txt"), "must not land\n");
+
+    const adapter = new LocalReviewAdapter(root, {
+      targetBranch: "main",
+      command: "false",
+      judge: async (_job, _diff, hash) => verdict(hash),
+    });
+    const value = job("failing");
+    value.branch = "neocode/failing";
+    value.baseRef = base;
+    value.isolation.path = worker;
+    value.worktree = worker;
+
+    await assert.rejects(adapter.reconcile(value), /Candidate CI failed before main changed/);
+    assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim(), base);
+    await assert.rejects(readFile(join(root, "broken.txt"), "utf8"));
+    assert.equal((await execFileAsync("git", ["status", "--porcelain"], { cwd: root })).stdout.trim(), "");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("local reconciliation includes untracked work before checking already-merged ancestry", async () => {
   const directory = await mkdtemp(join(tmpdir(), "neocode-pipeline-"));
   const root = join(directory, "root");

@@ -15,12 +15,41 @@ const cwd = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd: 
   .then(({ stdout }) => stdout.trim())
   .catch(() => requestedCwd);
 const clients = new Set<WebSocket>();
+const verbose = /^(1|true|yes)$/i.test(process.env.NEOCODE_VERBOSE || "");
+const jobLogState = new Map<string, string>();
+
+function verboseLog(event: string, details?: Record<string, unknown>): void {
+  if (!verbose) return;
+  console.log(`[neocode ${new Date().toISOString()}] ${event}${details ? ` ${JSON.stringify(details)}` : ""}`);
+}
 
 function send(client: WebSocket, message: ServerMessage): void {
   if (client.readyState === client.OPEN) client.send(JSON.stringify(message));
 }
 
 function broadcast(message: ServerMessage): void {
+  if (message.type === "coordinator_status") verboseLog("coordinator.status", { status: message.status });
+  else if (message.type === "coordinator_activity") verboseLog("coordinator.activity", {
+    phase: message.activity?.phase,
+    description: message.activity?.description,
+    tool: message.activity?.toolName,
+  });
+  else if (message.type === "coordinator_message" || message.type === "coordinator_message_updated") {
+    verboseLog("coordinator.message", { role: message.message.role, characters: message.message.text.length });
+  } else if (message.type === "job_updated") {
+    const signature = JSON.stringify({
+      status: message.job.status,
+      phase: message.job.activity?.phase,
+      tool: message.job.activity?.toolName,
+      review: message.job.review?.status,
+      integration: message.job.integration?.status,
+    });
+    if (jobLogState.get(message.job.id) !== signature) {
+      jobLogState.set(message.job.id, signature);
+      verboseLog("worker.update", { jobId: message.job.id, title: message.job.title, ...JSON.parse(signature) });
+    }
+  } else if (message.type === "maintenance_updated") verboseLog("maintenance.update", { ...message.maintenance });
+  else if (message.type === "error") verboseLog("server.error", { message: message.message });
   for (const client of clients) send(client, message);
 }
 
@@ -52,12 +81,19 @@ const server = createServer((request, response) => {
 const websocket = new WebSocketServer({ server, path: "/ws", maxPayload: MAX_WEBSOCKET_PAYLOAD_BYTES });
 websocket.on("connection", (client) => {
   clients.add(client);
+  verboseLog("client.connected", { clients: clients.size });
   send(client, { type: "snapshot", snapshot: orchestrator.snapshot() });
 
   client.on("message", (raw) => {
     void (async () => {
       try {
         const message = JSON.parse(raw.toString()) as ClientMessage;
+        verboseLog("client.command", {
+          type: message.type,
+          jobId: "jobId" in message ? message.jobId : undefined,
+          characters: "text" in message ? message.text.length : undefined,
+          attachments: "attachments" in message ? message.attachments?.length : undefined,
+        });
         if (message.type === "prompt") {
           if (typeof message.text !== "string" || (message.context !== undefined && !Array.isArray(message.context))) throw new Error("Invalid prompt.");
           await orchestrator.prompt(message.text, message.context, validateImageAttachments(message.attachments));
@@ -80,12 +116,16 @@ websocket.on("connection", (client) => {
     })();
   });
 
-  client.on("close", () => clients.delete(client));
+  client.on("close", () => {
+    clients.delete(client);
+    verboseLog("client.disconnected", { clients: clients.size });
+  });
 });
 
 server.listen(port, "127.0.0.1", () => {
   console.log(`neocode server listening on http://127.0.0.1:${port}`);
   console.log(`workspace: ${cwd}`);
+  if (verbose) console.log("verbose logging: enabled");
 });
 
 async function shutdown(): Promise<void> {

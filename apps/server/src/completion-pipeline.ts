@@ -1,6 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type {
   AgentJob,
@@ -17,7 +19,13 @@ export class PipelineError extends Error {
 
 const execFileAsync = promisify(execFile);
 
-export interface ReconcileResult { commit: string; completionCommit?: string; alreadyMerged?: boolean }
+export interface ReconcileResult {
+  commit: string;
+  completionCommit?: string;
+  alreadyMerged?: boolean;
+  /** CI run against an isolated checkout of the exact candidate merge tree. */
+  candidateCi?: CheckEvidence[];
+}
 export interface ReviewAdapter {
   runCi(cwd: string): Promise<CheckEvidence[]>;
   readDiff(job: AgentJob): Promise<string>;
@@ -162,8 +170,17 @@ export class CompletionPipeline {
           const result = await this.adapter.reconcile(job);
           job.review!.mergeCommit = result.commit;
           if (result.completionCommit && job.completion) job.completion.head = result.completionCommit;
-          this.transition(job, "post_merge_ci", result.alreadyMerged ? "Merge already present; rerunning CI" : "Reconciled; rerunning CI");
-          await this.runPostMergeCi(job);
+          if (result.candidateCi) {
+            job.review!.postMergeCi = result.candidateCi;
+            this.publish(job);
+            this.transition(job, "post_merge_ci", result.alreadyMerged
+              ? "Existing merge passed isolated candidate CI"
+              : "Exact candidate merge passed isolated CI before main changed");
+            this.transition(job, "merged", `Merged as ${job.review!.mergeCommit}`);
+          } else {
+            this.transition(job, "post_merge_ci", result.alreadyMerged ? "Merge already present; rerunning CI" : "Reconciled; rerunning CI");
+            await this.runPostMergeCi(job);
+          }
         });
       } else {
         await this.withMergeLock(() => this.runPostMergeCi(job));
@@ -274,17 +291,66 @@ export class LocalReviewAdapter implements ReviewAdapter {
     if (!await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.baseRef, job.branch])) {
       throw new PipelineError("blocked", "Worker branch no longer descends from its recorded base.");
     }
+
     const completionCommit = (await git(job.isolation.path, ["rev-parse", "HEAD"])).trim();
-    if (await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.branch, this.targetBranch])) {
-      return { commit: (await git(this.root, ["rev-parse", this.targetBranch])).trim(), completionCommit, alreadyMerged: true };
-    }
+    const targetHead = (await git(this.root, ["rev-parse", this.targetBranch])).trim();
+    const alreadyMerged = await gitSucceeds(this.root, ["merge-base", "--is-ancestor", job.branch, this.targetBranch]);
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "neocode-integration-"));
+    const candidate = join(temporaryRoot, "candidate");
+    let candidateAdded = false;
+
     try {
-      await git(this.root, ["merge", "--no-ff", "--no-edit", job.branch]);
-    } catch (error) {
-      await git(this.root, ["merge", "--abort"]).catch(() => undefined);
-      throw new PipelineError("conflict", `Merge conflict; root was restored without forcing: ${error instanceof Error ? error.message : String(error)}`);
+      // Main must not change until the exact prospective merge tree has passed
+      // CI in a clean checkout with its own dependency installation.
+      await git(this.root, ["worktree", "add", "--detach", candidate, targetHead]);
+      candidateAdded = true;
+      if (!alreadyMerged) {
+        try {
+          await git(candidate, ["merge", "--no-ff", "--no-edit", job.branch]);
+        } catch (error) {
+          throw new PipelineError("conflict", `Candidate merge conflicts; main was not changed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      const candidateCi = await this.runCi(candidate);
+      if (!candidateCi.length || candidateCi.some((check) => !check.ok)) {
+        const failed = candidateCi.find((check) => !check.ok);
+        throw new PipelineError("failed", failed
+          ? `Candidate CI failed before main changed: ${failed.command}`
+          : "No candidate CI checks were configured; refusing to change main.");
+      }
+      const candidateTree = (await git(candidate, ["rev-parse", "HEAD^{tree}"])).trim();
+
+      // Refuse races with humans or other processes after candidate validation.
+      const currentHead = (await git(this.root, ["rev-parse", "HEAD"])).trim();
+      if (currentHead !== targetHead || (await git(this.root, ["branch", "--show-current"])).trim() !== this.targetBranch) {
+        throw new PipelineError("blocked", "Main changed while candidate CI was running; review must be retried.");
+      }
+      if ((await git(this.root, ["status", "--porcelain", "--untracked-files=normal"])).trim()) {
+        throw new PipelineError("blocked", "Root became dirty while candidate CI was running; main was not changed.");
+      }
+
+      if (!alreadyMerged) {
+        try {
+          await git(this.root, ["merge", "--no-ff", "--no-edit", job.branch]);
+        } catch (error) {
+          await git(this.root, ["merge", "--abort"]).catch(() => undefined);
+          throw new PipelineError("conflict", `Merge conflict; root was restored without forcing: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      const commit = (await git(this.root, ["rev-parse", "HEAD"])).trim();
+      const integratedTree = (await git(this.root, ["rev-parse", "HEAD^{tree}"])).trim();
+      if (integratedTree !== candidateTree) {
+        // Root was proven clean and targetHead was captured immediately above,
+        // so this rollback cannot discard user work.
+        await git(this.root, ["reset", "--hard", targetHead]);
+        throw new PipelineError("failed", "Integrated tree differed from the CI-validated candidate; main was rolled back.");
+      }
+      return { commit, completionCommit, alreadyMerged: alreadyMerged || undefined, candidateCi };
+    } finally {
+      if (candidateAdded) await git(this.root, ["worktree", "remove", "--force", candidate]).catch(() => undefined);
+      await rm(temporaryRoot, { recursive: true, force: true });
     }
-    return { commit: (await git(this.root, ["rev-parse", "HEAD"])).trim(), completionCommit };
   }
 }
 
@@ -315,8 +381,18 @@ export async function readWorktreeDiff(cwd: string, baseRef: string): Promise<st
 
 async function detectedCommands(cwd: string): Promise<string[]> {
   try {
-    const value = JSON.parse(await readFile(`${cwd}/package.json`, "utf8")) as { scripts?: Record<string, string> };
-    return ["test", "check", "build"].filter((name) => value.scripts?.[name]).map((name) => `npm run ${name}`);
+    const value = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+    const commands: string[] = [];
+    try {
+      await readFile(join(cwd, "package-lock.json"));
+      commands.push("npm ci");
+    } catch {
+      // Without a lockfile we cannot prove a reproducible dependency graph.
+    }
+    commands.push(...["test", "check", "build"]
+      .filter((name) => value.scripts?.[name])
+      .map((name) => `npm run ${name}`));
+    return commands;
   } catch { return []; }
 }
 
