@@ -99,7 +99,7 @@ export class CoordinatorNotificationQueue {
   /** Queue one durable autonomous review for a stable backlog state. */
   requestBacklogSweep(job: AgentJob): boolean {
     const action = job.review?.remediation?.actions.find((entry) => entry.id === job.review?.remediation?.currentActionId);
-    const signature = [job.status, job.updatedAt, job.completion?.head, job.review?.status,
+    const signature = ["priority-v2", job.status, job.updatedAt, job.completion?.head, job.review?.status,
       job.review?.transitions.at(-1)?.at, action?.id, action?.state, job.integration?.status].join(":");
     const key = `backlog:${job.id}`;
     if (this.state.lastSignals[key] === signature) return false;
