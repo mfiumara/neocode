@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
+import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import {
   MAX_IMAGE_ATTACHMENTS,
   MAX_IMAGE_BYTES,
@@ -11,7 +12,6 @@ import {
   type AppSnapshot,
   type ClientMessage,
   type ImageAttachment,
-  type RequestedIsolationMode,
   type ServerMessage,
   type TranscriptMessage,
 } from "@neocode/protocol";
@@ -26,7 +26,6 @@ interface BrowserWorkspaceState {
   active: ActiveView;
   jobTab: JobTab;
   prompt: string;
-  isolation: RequestedIsolationMode;
   context: ContextEntry[];
 }
 const supportedImageTypes = new Set<string>(SUPPORTED_IMAGE_MIME_TYPES);
@@ -83,13 +82,11 @@ function loadBrowserState(cwd: string, jobs: AgentJob[]): BrowserWorkspaceState 
     const active: ActiveView = requestedActive?.kind === "job" && jobs.some((job) => job.id === requestedActive.id)
       ? requestedActive
       : { kind: "coordinator" };
-    const isolation = state.isolation === "root" || state.isolation === "worktree" ? state.isolation : "auto";
     return {
       version: 1,
       active,
       jobTab: active.kind === "job" && state.jobTab === "diff" ? "diff" : "conversation",
       prompt: state.prompt.slice(0, 100_000),
-      isolation,
       context: state.context.slice(0, 50).filter((entry): entry is ContextEntry =>
         !!entry && typeof entry.id === "string" && typeof entry.label === "string" && typeof entry.text === "string"),
     };
@@ -106,7 +103,6 @@ export function App() {
   const [jobTab, setJobTab] = useState<JobTab>("conversation");
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<ComposerImage[]>([]);
-  const [isolation, setIsolation] = useState<RequestedIsolationMode>("auto");
   const [mode, setMode] = useState<"NORMAL" | "INSERT">("INSERT");
   const [navigation, setNavigation] = useState<ThreadNavigationByView>({});
   const [context, setContext] = useState<ContextEntry[]>([]);
@@ -168,13 +164,11 @@ export function App() {
             setActive(restored.active);
             setJobTab(restored.jobTab);
             setPrompt(restored.prompt);
-            setIsolation(restored.isolation);
             setContext(restored.context);
           } else {
             setActive({ kind: "coordinator" });
             setJobTab("conversation");
             setPrompt("");
-            setIsolation("auto");
             setContext([]);
           }
           hydratedWorkspaceRef.current = message.snapshot.cwd;
@@ -274,14 +268,14 @@ export function App() {
 
   useEffect(() => {
     if (!workspaceStorageKey || !snapshot || hydratedWorkspaceRef.current !== snapshot.cwd) return;
-    const state: BrowserWorkspaceState = { version: 1, active, jobTab, prompt, isolation, context };
+    const state: BrowserWorkspaceState = { version: 1, active, jobTab, prompt, context };
     try {
       localStorage.setItem(workspaceStorageKey, JSON.stringify(state));
     } catch {
       // Storage can be disabled or full. Browser persistence is best effort and
       // must never prevent prompting or receiving live WebSocket updates.
     }
-  }, [workspaceStorageKey, snapshot?.cwd, active, jobTab, prompt, isolation, context]);
+  }, [workspaceStorageKey, snapshot?.cwd, active, jobTab, prompt, context]);
 
   const activeJob = active.kind === "job" ? snapshot?.jobs.find((job) => job.id === active.id) : undefined;
   const messages = active.kind === "coordinator"
@@ -388,7 +382,8 @@ export function App() {
     let prefix = "";
     const onKey = (event: KeyboardEvent) => {
       if (paletteOpen) {
-        if (event.key === "Escape") setPaletteOpen(false);
+        if (isCommandPaletteShortcut(event)) event.preventDefault();
+        else if (event.key === "Escape") setPaletteOpen(false);
         else if (event.key === "ArrowDown" || (event.key === "j" && !paletteQuery)) {
           event.preventDefault();
           setPaletteIndex((value) => Math.min(filteredPalette.length - 1, value + 1));
@@ -417,7 +412,7 @@ export function App() {
         send({ type: "cycle_thinking" });
         return;
       }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "p") {
+      if (isCommandPaletteShortcut(event)) {
         event.preventDefault();
         setPaletteOpen(true);
         setPaletteQuery("");
@@ -442,7 +437,7 @@ export function App() {
       else if (event.key === "h" || event.key === "ArrowLeft") openCoordinator();
       else if (event.key === "a") addSelectedToContext();
       else if (event.key === "q") openCoordinator();
-      else if (event.key === ":" || event.key === "`") {
+      else if (isNormalModeCommandPaletteShortcut(event.key)) {
         event.preventDefault();
         setPaletteOpen(true);
         setPaletteQuery("");
@@ -536,7 +531,6 @@ export function App() {
   };
 
   const settings = snapshot?.coordinator.settings;
-  const isPlan = settings?.variant === "plan";
   const thinkingSupported = (settings?.availableThinkingLevels.length || 0) > 0;
   const modelGroups = useMemo(() => {
     const groups = new Map<string, NonNullable<AppSnapshot["coordinator"]["models"]>>();
@@ -547,27 +541,25 @@ export function App() {
   const modelSelectDisabled = !connected || !snapshot?.coordinator.models.length
     || snapshot.coordinator.status === "running" || Boolean(pendingModel);
 
-  const submit = (delegate = false) => {
+  const submit = () => {
     const text = prompt.trim();
-    if ((!text && !images.length) || (delegate && isPlan)) return;
+    if (!text && !images.length) return;
     const attachments = images.map(({ previewUrl: _previewUrl, ...image }) => image);
     followTranscriptRef.current = true;
-    send(delegate
-      ? { type: "delegate", text, isolation, attachments }
-      : { type: "prompt", text, attachments, context: context.map((entry) => `${entry.label}\n${entry.text}`) });
+    send({ type: "prompt", text, attachments, context: context.map((entry) => `${entry.label}\n${entry.text}`) });
     images.forEach((image) => URL.revokeObjectURL(image.previewUrl));
     setImages([]);
     setPrompt("");
-    if (!delegate) setContext([]);
+    setContext([]);
   };
 
   return (
     <main className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">N</span><span>neocode</span></div>
-        <button className="workspace-chip" onClick={() => setPaletteOpen(true)}>
+        <button className="workspace-chip" onClick={() => setPaletteOpen(true)} title="Open command palette (Command/Ctrl-K)">
           <span className="muted">workspace</span> {snapshot ? shortPath(snapshot.cwd) : "loading…"}
-          <kbd>⌘P</kbd>
+          <kbd>⌘/Ctrl K</kbd>
         </button>
         <div className={`connection ${connected ? "online" : "offline"}`}>
           <span />{connected ? "local" : "offline"}
@@ -743,7 +735,7 @@ export function App() {
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
-                  submit(false);
+                  submit();
                 }
               }}
             />
@@ -759,16 +751,7 @@ export function App() {
               </div>
               <span className="muted composer-hint">↵ send · ⇧↵ newline · esc normal</span>
               <div className="action-buttons">
-                <label className="isolation-picker" title="auto uses root only for clearly read-only tasks">
-                  isolation
-                  <select value={isolation} onChange={(event) => setIsolation(event.target.value as RequestedIsolationMode)}>
-                    <option value="auto">auto</option>
-                    <option value="worktree">worktree</option>
-                    <option value="root">root</option>
-                  </select>
-                </label>
-                <button className="delegate-button" title={isPlan ? "Switch to Build mode to delegate" : undefined} disabled={(!prompt.trim() && !images.length) || isPlan} onClick={() => submit(true)}>Hand off</button>
-                <button className="send-button" disabled={!prompt.trim() && !images.length} onClick={() => submit(false)}>Send <span>↵</span></button>
+                <button className="send-button" disabled={!prompt.trim() && !images.length} onClick={submit}>Send <span>↵</span></button>
               </div>
             </div>
           </div>
@@ -777,12 +760,12 @@ export function App() {
 
       {paletteOpen && (
         <div className="palette-backdrop" onMouseDown={() => setPaletteOpen(false)}>
-          <div className="palette" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="palette-input"><span>⌕</span><input autoFocus value={paletteQuery} onChange={(event) => setPaletteQuery(event.target.value)} placeholder="Find threads, workers and commands…" /></div>
-            <div className="palette-results">
+          <div className="palette" role="dialog" aria-modal="true" aria-label="Command palette" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="palette-input"><span aria-hidden="true">⌕</span><input autoFocus role="combobox" aria-expanded="true" aria-autocomplete="list" aria-label="Filter command palette" aria-controls="command-palette-results" aria-activedescendant={filteredPalette[paletteIndex] ? `palette-entry-${filteredPalette[paletteIndex].id}` : undefined} value={paletteQuery} onChange={(event) => setPaletteQuery(event.target.value)} placeholder="Find threads, workers and commands…" /></div>
+            <div className="palette-results" id="command-palette-results" role="listbox" aria-label="Commands and threads">
               {filteredPalette.map((entry, index) => (
-                <button key={entry.id} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => { entry.action(); setPaletteOpen(false); }}>
-                  <span>{entry.label}</span><small>{entry.detail}</small>
+                <button id={`palette-entry-${entry.id}`} role="option" aria-selected={index === paletteIndex} key={entry.id} className={index === paletteIndex ? "active" : ""} onMouseEnter={() => setPaletteIndex(index)} onClick={() => { entry.action(); setPaletteOpen(false); }}>
+                  <span className="palette-label">{entry.label}</span><small className="palette-detail">{entry.detail}</small>
                 </button>
               ))}
             </div>

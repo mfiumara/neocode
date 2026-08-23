@@ -7,10 +7,10 @@ A keyboard-first cockpit for coordinating AI coding agents. Neocode uses Pi as i
 The current vertical slice includes:
 
 - a persistent Pi coordinator with read/search and orchestration tools
-- background Pi workers with configurable worktree/root isolation
+- background Pi workers with policy-driven worktree/root isolation
 - durable coordinator/job transcripts plus workspace-scoped browser state
 - live coordinator/worker activity, cancellation and diff inspection
-- configurable worker isolation and per-thread cursor/viewport restoration
+- durable worker metadata and per-thread cursor/viewport restoration
 - safe GFM Markdown and bounded clipboard image attachments (4 × 8 MiB)
 - visible Pi model, Build/Plan mode and reasoning-effort controls
 - a context basket and Neovim-inspired normal/insert navigation
@@ -46,14 +46,14 @@ Open <http://127.0.0.1:4317>. If `NEOCODE_CWD` is omitted, the directory where t
 | `a` | Add selected message to context basket |
 | `]j`, `[j` | Next/previous worker |
 | `q` | Return to coordinator |
-| `` ` ``, `Ctrl/Command-P`, `:` | Open global picker |
+| `` ` `` in NORMAL mode, `Command/Ctrl-K`, `:` | Open global picker |
 | `j`, `k` in an empty picker | Move through picker results |
 | `Shift-Tab` | Cycle Build/Plan mode |
 | `Ctrl-.` | Cycle model reasoning effort |
 | `Enter` | Send prompt / choose picker result |
 | `Shift-Enter` | Insert newline |
 
-Use **Hand off** to start a worker directly, or ask the coordinator to implement something and let its `delegate_task` tool create the worker. The handoff control exposes the same isolation policy as the tool API.
+Send implementation requests to the coordinator normally. Its `delegate_task` tool creates an appropriate background worker while keeping the main thread responsive.
 
 ### Worker isolation
 
@@ -63,7 +63,7 @@ Every delegated job records both its requested mode and effective mode/path, whi
 - **worktree** always creates a new branch and worktree under `.worktrees/`. This is the safe choice for concurrent implementation jobs.
 - **root** runs the worker directly in the root checkout and never creates or removes a worktree. Root workers share files and branch state, so use this explicitly for read-only work or when shared-checkout edits are intentional.
 
-An explicit mode selected in the UI or requested by the user takes precedence over auto classification. The coordinator itself is separate from this setting: it always runs from the repository root with read/search/orchestration tools only and is instructed never to edit. Starting Neocode in a repository subdirectory still anchors it at the Git root.
+An explicit isolation mode requested by the user takes precedence over auto classification. The coordinator itself always runs from the repository root with read/search/orchestration tools only and is instructed never to edit. Starting Neocode in a repository subdirectory still anchors it at the Git root.
 
 ## Architecture
 
