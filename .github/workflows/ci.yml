@@ -18,6 +18,15 @@ jobs:
           # Candidate checks validate the complete PR range, never a shallow
           # HEAD^ fallback that can omit earlier feature commits.
           fetch-depth: 0
+      - name: Materialize the target branch used by integration and browser tests
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git branch -f main origin/main
+          else
+            git branch -f main HEAD
+          fi
+          git rev-parse main
       - uses: actions/setup-node@v5
         with:
           node-version: 22
