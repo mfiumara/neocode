@@ -39,7 +39,7 @@ const stateLabels: Record<string, string> = {
   worker_resumed: "Worker resumed",
 };
 
-function semanticState(state: unknown, detail?: unknown): string {
+export function semanticLifecycleState(state: unknown, detail?: unknown): string {
   if (state !== "lifecycle_transition") return stateLabels[String(state)] || String(state).replaceAll("_", " ");
   if (typeof detail === "string") {
     const match = detail.match(/^(?:worker|server|coordinator|judge):([a-z_]+)/);
@@ -58,7 +58,7 @@ function workerStatusPresentation(text: string, jobs: AgentJob[]): TranscriptPre
     const payloadTitle = typeof payload.title === "string" && payload.title.trim() ? payload.title.trim() : undefined;
     const title = known?.title || payloadTitle || "Unknown worker";
     return {
-      primary: `${title} · ${semanticState(payload.state, payload.detail)}`,
+      primary: `${title} · ${semanticLifecycleState(payload.state, payload.detail)}`,
       secondary: `Worker · ${shortReference(payload.jobId)}`,
       technical: text,
       lifecycle: true,

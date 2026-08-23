@@ -935,7 +935,7 @@ export function App() {
                       <Button variant="ghost" title="Add to context" onClick={(event) => { event.stopPropagation(); setSelectedRow(index); addMessageToContext(row.message); }}>+context</Button>
                     </div>
                     {parseWorkerEvent(row.message)
-                      ? <div className="message-body"><WorkerEventCard message={row.message} /></div>
+                      ? <div className="message-body"><WorkerEventCard message={row.message} jobs={snapshot?.jobs || []} /></div>
                       : <TranscriptMessageBody message={row.message} jobs={snapshot?.jobs || []} />}
                     {!!row.message.attachments?.length && <AttachmentGallery attachments={row.message.attachments} />}
                   </article>
