@@ -402,12 +402,22 @@ export function App() {
       };
     };
 
-    connect();
+    // Opening on the next task is intentional. React StrictMode performs a
+    // setup → cleanup → setup probe in development; opening synchronously made
+    // that probe abandon a CONNECTING socket while Vite was upgrading it. The
+    // backend could then send its initial snapshot through a downstream socket
+    // that had already closed, producing Vite's paired `write EPIPE` proxy
+    // errors. Cancelling this owned task means the probe creates no connection,
+    // while real mounts and the reconnect path keep the same behavior.
+    reconnectTimer = window.setTimeout(connect, 0);
     return () => {
       disposed = true;
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
-      socketRef.current?.close();
+      const socket = socketRef.current;
       socketRef.current = undefined;
+      // An established connection gets a WebSocket close handshake. With the
+      // deferred initial open above, cleanup no longer has to abort CONNECTING.
+      socket?.close();
     };
   }, []);
 

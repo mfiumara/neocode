@@ -8,17 +8,26 @@ const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+
 const pngBytes = Buffer.from(pngBase64, "base64");
 
 class MockSocket {
+  static CONNECTING = 0;
   static OPEN = 1;
   static instances: MockSocket[] = [];
-  readyState = MockSocket.OPEN;
+  readyState = MockSocket.CONNECTING;
   sent: string[] = [];
+  closedWhileConnecting = false;
   onopen?: () => void;
   onmessage?: (event: MessageEvent) => void;
   onerror?: () => void;
   onclose?: () => void;
   constructor(readonly url: string) { MockSocket.instances.push(this); }
   send(value: string) { this.sent.push(value); }
-  close() { this.readyState = 3; }
+  close() {
+    this.closedWhileConnecting = this.readyState === MockSocket.CONNECTING;
+    this.readyState = 3;
+  }
+  open() {
+    this.readyState = MockSocket.OPEN;
+    this.onopen?.();
+  }
 }
 
 function snapshot(): AppSnapshot {
@@ -75,12 +84,27 @@ test("the React composer preserves image prompts and deduplicates durable lifecy
   URL.revokeObjectURL = (value) => { revoked.push(String(value)); };
 
   try {
-    const [{ createRoot }, { act }, { App }] = await Promise.all([
+    const [{ createRoot }, { act, StrictMode }, { App }] = await Promise.all([
       import("react-dom/client"), import("react"), import("./App"),
     ]);
-    const root = createRoot(document.getElementById("root")!);
+    let root = createRoot(document.getElementById("root")!);
+    await act(async () => root.render(<StrictMode><App /></StrictMode>));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    assert.equal(MockSocket.instances.length, 1,
+      "StrictMode's discarded effect must not start an upgrade that cleanup aborts");
+    assert.equal(MockSocket.instances[0]?.closedWhileConnecting, false);
+
+    // Continue the broader prompt/reconnect assertions without StrictMode's
+    // unrelated duplicate image-effect probes affecting URL-revocation counts.
+    await act(async () => root.unmount());
+    MockSocket.instances = [];
+    created.length = 0;
+    revoked.length = 0;
+    root = createRoot(document.getElementById("root")!);
     await act(async () => root.render(<App />));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
     const socket = MockSocket.instances.at(-1)!;
+    await act(async () => socket.open());
     await act(async () => socket.onmessage?.(new dom.window.MessageEvent("message", {
       data: JSON.stringify({ type: "snapshot", snapshot: snapshot() }),
     }) as unknown as MessageEvent));
@@ -136,6 +160,9 @@ test("the React composer preserves image prompts and deduplicates durable lifecy
     assert.match(document.querySelector(".prompt-state")?.getAttribute("title") || "", /may not have been received/);
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
     const reconnected = MockSocket.instances.at(-1)!;
+    assert.equal(MockSocket.instances.length, 2, "one intentional close schedules exactly one reconnect");
+    assert.equal(reconnected.closedWhileConnecting, false);
+    await act(async () => reconnected.open());
     const durablePrompt = {
       id: sent.id, role: "user" as const, text: "", timestamp: 2,
       attachments: [{ ...sent.attachments[0]!, id: "queued-image", size: pngBytes.length, name: "queued.png" }],
@@ -185,6 +212,8 @@ test("the React composer preserves image prompts and deduplicates durable lifecy
     assert.equal(document.querySelectorAll(".attachment-preview").length, 0);
 
     await act(async () => root.unmount());
+    assert.equal(reconnected.closedWhileConnecting, false,
+      "unmount closes an established socket rather than aborting an upgrade");
   } finally {
     URL.createObjectURL = originalCreate;
     URL.revokeObjectURL = originalRevoke;
