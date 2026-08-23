@@ -61,9 +61,11 @@ export function checkGitState(env = process.env) {
   // in captured CI evidence so a reviewer can verify the exact candidate
   // range without translating an opaque SHA-only packet.
   if (resolveCommit("main")) {
+    const identityFormat = "author-name=%an%nauthor-email=%ae%ncommitter-name=%cn%ncommitter-email=%ce";
     const mainChecks = [
       { args: ["merge-base", "main", "HEAD"], command: "git merge-base main HEAD", label: "main-merge-base" },
       { args: ["diff", "--name-status", "main...HEAD"], command: "git diff --name-status main...HEAD", label: "main-name-status" },
+      { args: ["show", "-s", `--format=${identityFormat}`, "HEAD"], command: `git show -s --format='${identityFormat}' HEAD`, label: "head-identity" },
       { args: ["diff", "--check", "main...HEAD"], command: "git diff --check main...HEAD", label: "main-diff-check" },
     ];
     let mainFailure = 0;

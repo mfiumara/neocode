@@ -63,6 +63,8 @@ test("coordinator worktrees report literal main packet commands across the full 
     assert.match(result.stdout, /\$ git diff --name-status main\.\.\.HEAD\nmain-name-status output begin/);
     assert.match(result.stdout, /A\s+early\.txt.*A\s+later\.txt/s);
     assert.match(result.stdout, /main-name-status output end\nmain-name-status exit: 0/);
+    assert.match(result.stdout, /\$ git show -s --format='author-name=%an%nauthor-email=%ae%ncommitter-name=%cn%ncommitter-email=%ce' HEAD\nhead-identity output begin/);
+    assert.match(result.stdout, /author-name=Neocode Test\nauthor-email=test@neocode\.local\ncommitter-name=Neocode Test\ncommitter-email=test@neocode\.local\nhead-identity output end\nhead-identity exit: 0/);
     assert.match(result.stdout, /\$ git diff --check main\.\.\.HEAD\nmain-diff-check output begin\nmain-diff-check output end\nmain-diff-check exit: 0/);
     assert.match(result.stdout, new RegExp(`\\$ git diff --check ${value.base} HEAD`));
   } finally { value.cleanup(); }
