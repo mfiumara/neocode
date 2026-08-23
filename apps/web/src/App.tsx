@@ -1,4 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  isNearTranscriptBottom,
+  nearestTranscriptScrollTop,
+} from "./transcriptScroll";
 import type {
   AgentJob,
   AppSnapshot,
@@ -90,6 +94,12 @@ export function App() {
   const hydratedWorkspaceRef = useRef<string | undefined>(undefined);
   const socketRef = useRef<WebSocket | undefined>(undefined);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const transcriptContentRef = useRef<HTMLDivElement>(null);
+  const selectedThreadRef = useRef("coordinator");
+  // Content may grow between scroll events. A render must not turn an
+  // older-message reader back into a live-output follower.
+  const followTranscriptRef = useRef(true);
 
   const send = (message: ClientMessage) => {
     const socket = socketRef.current;
@@ -238,9 +248,18 @@ export function App() {
     return [...transcriptRows, ...jobRows].sort((a, b) => a.timestamp - b.timestamp);
   }, [active.kind, messages, snapshot?.jobs]);
 
+  const activeThreadKey = active.kind === "job" ? `job:${active.id}` : "coordinator";
   useEffect(() => {
-    setSelectedRow(Math.max(0, rows.length - 1));
-  }, [active.kind, active.kind === "job" ? active.id : "coordinator", rows.length]);
+    const threadChanged = selectedThreadRef.current !== activeThreadKey;
+    selectedThreadRef.current = activeThreadKey;
+    setSelectedRow((current) => {
+      const last = Math.max(0, rows.length - 1);
+      // Keep the existing cursor/viewport when output is appended while the
+      // user is reading history. Per-thread cursor restoration can continue
+      // to own the thread-switch case independently.
+      return threadChanged || followTranscriptRef.current ? last : Math.min(current, last);
+    });
+  }, [activeThreadKey, rows.length]);
 
   const openCoordinator = () => {
     setActive({ kind: "coordinator" });
@@ -340,13 +359,52 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [mode, paletteOpen, rows, selectedRow, snapshot?.jobs, active]);
 
-  useEffect(() => {
-    document.querySelector(`[data-row-index="${selectedRow}"]`)?.scrollIntoView({ block: "nearest" });
+  useLayoutEffect(() => {
+    const transcript = transcriptRef.current;
+    const row = transcript?.querySelector<HTMLElement>(`[data-row-index="${selectedRow}"]`);
+    if (!transcript || !row) return;
+
+    const viewport = transcript.getBoundingClientRect();
+    const item = row.getBoundingClientRect();
+    transcript.scrollTop = nearestTranscriptScrollTop({
+      scrollTop: transcript.scrollTop,
+      viewportTop: viewport.top,
+      viewportBottom: viewport.bottom,
+      itemTop: item.top,
+      itemBottom: item.bottom,
+    });
   }, [selectedRow]);
+
+  const lastRow = rows[rows.length - 1];
+  const outputRevision = lastRow?.kind === "message"
+    ? `${lastRow.key}:${lastRow.message.text.length}`
+    : lastRow ? `${lastRow.key}:${lastRow.job.status}` : "empty";
+
+  useLayoutEffect(() => {
+    const transcript = transcriptRef.current;
+    if (transcript && followTranscriptRef.current) transcript.scrollTop = transcript.scrollHeight;
+  }, [outputRevision, rows.length, snapshot?.coordinator.status, activeJob?.status]);
+
+  useEffect(() => {
+    const transcript = transcriptRef.current;
+    const content = transcriptContentRef.current;
+    if (!transcript || !content || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      // Covers wrapping Markdown/code while streaming, context-chip/composer
+      // height changes, font/layout shifts, and window resizes.
+      if (followTranscriptRef.current) transcript.scrollTop = transcript.scrollHeight;
+    });
+    observer.observe(transcript);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [active.kind, active.kind === "job" ? active.id : "coordinator", jobTab]);
 
   const submit = (delegate = false) => {
     const text = prompt.trim();
     if (!text) return;
+    // Sending is an explicit request to return to live output.
+    followTranscriptRef.current = true;
     send(delegate
       ? { type: "delegate", text, isolation }
       : { type: "prompt", text, context: context.map((entry) => `${entry.label}\n${entry.text}`) });
@@ -419,7 +477,14 @@ export function App() {
           {jobTab === "diff" && activeJob ? (
             <DiffView diff={activeJob.diff || ""} />
           ) : (
-            <div className="transcript">
+            <div
+              className="transcript"
+              ref={transcriptRef}
+              onScroll={(event) => {
+                followTranscriptRef.current = isNearTranscriptBottom(event.currentTarget);
+              }}
+            >
+              <div className="transcript-content" ref={transcriptContentRef}>
               {!rows.length && (
                 <div className="empty-view">
                   {active.kind === "coordinator" ? "Type a prompt to start." : "Worker is starting."}
@@ -454,9 +519,14 @@ export function App() {
                   <span className="worker-open">l</span>
                 </button>
               ))}
-              {active.kind === "coordinator" && snapshot?.coordinator.status === "running" && (
-                <div className="working-row"><span /><span>Coordinator is working</span></div>
+              {((active.kind === "coordinator" && snapshot?.coordinator.status === "running") ||
+                (active.kind === "job" && activeJob?.status === "running")) && (
+                <div className="working-row">
+                  <span /><span>{active.kind === "coordinator" ? "Coordinator" : "Worker"} is working</span>
+                </div>
               )}
+              <div className="transcript-end" aria-hidden="true" />
+              </div>
             </div>
           )}
 
