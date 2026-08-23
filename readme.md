@@ -8,11 +8,13 @@ The current vertical slice includes:
 
 - a persistent Pi coordinator with read/search and orchestration tools
 - background Pi workers with configurable worktree/root isolation
-- live coordinator and worker transcripts
-- worker status, cancellation and diff inspection
-- a context basket for carrying messages into a prompt
-- Neovim-inspired normal/insert modes and a global picker
-- a browser UI designed to become the frontend of a Tauri application
+- durable coordinator/job transcripts plus workspace-scoped browser state
+- live coordinator/worker activity, cancellation and diff inspection
+- configurable worker isolation and per-thread cursor/viewport restoration
+- safe GFM Markdown and bounded clipboard image attachments (4 × 8 MiB)
+- visible Pi model, Build/Plan mode and reasoning-effort controls
+- a context basket and Neovim-inspired normal/insert navigation
+- a backtick command palette with `j`/`k` selection
 
 ## Run
 
@@ -44,8 +46,11 @@ Open <http://127.0.0.1:4317>. If `NEOCODE_CWD` is omitted, the directory where t
 | `a` | Add selected message to context basket |
 | `]j`, `[j` | Next/previous worker |
 | `q` | Return to coordinator |
-| `Ctrl/Command-P`, `:` | Open global picker |
-| `Enter` | Send prompt |
+| `` ` ``, `Ctrl/Command-P`, `:` | Open global picker |
+| `j`, `k` in an empty picker | Move through picker results |
+| `Shift-Tab` | Cycle Build/Plan mode |
+| `Ctrl-.` | Cycle model reasoning effort |
+| `Enter` | Send prompt / choose picker result |
 | `Shift-Enter` | Insert newline |
 
 Use **Hand off** to start a worker directly, or ask the coordinator to implement something and let its `delegate_task` tool create the worker. The handoff control exposes the same isolation policy as the tool API.
@@ -81,9 +86,8 @@ The frontend intentionally has no Node dependency. The intended desktop packagin
 
 ## Next milestones
 
-1. Persist and restore jobs across application restarts.
-2. Add worker review, merge, discard and conflict-resolution actions.
-3. Add file, git-log, search-result and terminal buffer types.
-4. Generalize the picker across files, symbols, commits, messages and diff hunks.
-5. Make context entries structured references instead of copied text.
-6. Package the server as a sidecar and add the Tauri shell.
+1. Add worker review, merge, discard and conflict-resolution actions.
+2. Add file, git-log, search-result and terminal buffer types.
+3. Generalize the picker across files, symbols, commits, messages and diff hunks.
+4. Make context entries structured references instead of copied text.
+5. Package the server as a sidecar and add the Tauri shell.

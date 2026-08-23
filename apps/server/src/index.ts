@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ClientMessage, ServerMessage } from "@neocode/protocol";
 import { Orchestrator } from "./orchestrator.js";
+import { validateImageAttachments } from "./image-attachments.js";
 
 const execFileAsync = promisify(execFile);
 const port = Number(process.env.NEOCODE_PORT || 4318);
@@ -36,7 +37,9 @@ const server = createServer((request, response) => {
   response.end();
 });
 
-const websocket = new WebSocketServer({ server, path: "/ws" });
+// Four 8 MiB images expand to roughly 43 MiB as base64. Bound the complete
+// WebSocket frame as a second line of defense against memory exhaustion.
+const websocket = new WebSocketServer({ server, path: "/ws", maxPayload: 48 * 1024 * 1024 });
 websocket.on("connection", (client) => {
   clients.add(client);
   send(client, { type: "snapshot", snapshot: orchestrator.snapshot() });
@@ -45,10 +48,17 @@ websocket.on("connection", (client) => {
     void (async () => {
       try {
         const message = JSON.parse(raw.toString()) as ClientMessage;
-        if (message.type === "prompt") await orchestrator.prompt(message.text, message.context);
-        else if (message.type === "abort") await orchestrator.abort();
-        else if (message.type === "delegate") await orchestrator.delegate(message.text, undefined, message.isolation ?? "auto");
-        else if (message.type === "cancel_job") await orchestrator.cancelJob(message.jobId);
+        if (message.type === "prompt") {
+          if (typeof message.text !== "string" || (message.context !== undefined && !Array.isArray(message.context))) throw new Error("Invalid prompt.");
+          await orchestrator.prompt(message.text, message.context, validateImageAttachments(message.attachments));
+        } else if (message.type === "abort") await orchestrator.abort();
+        else if (message.type === "delegate") {
+          if (typeof message.text !== "string") throw new Error("Invalid task.");
+          await orchestrator.delegate(message.text, undefined, message.isolation ?? "auto", validateImageAttachments(message.attachments));
+        } else if (message.type === "cancel_job") await orchestrator.cancelJob(message.jobId);
+        else if (message.type === "cycle_variant") orchestrator.cycleVariant();
+        else if (message.type === "cycle_thinking") orchestrator.cycleThinking();
+        else if (message.type === "set_model") await orchestrator.setModel(message.model);
         else if (message.type === "refresh") send(client, { type: "snapshot", snapshot: orchestrator.snapshot() });
       } catch (error) {
         send(client, { type: "error", message: error instanceof Error ? error.message : String(error) });

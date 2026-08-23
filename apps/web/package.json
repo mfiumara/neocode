@@ -5,20 +5,22 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test src/*.test.ts src/*.test.tsx",
     "check": "tsc --noEmit",
     "build": "tsc --noEmit && vite build"
   },
   "dependencies": {
     "@neocode/protocol": "*",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.2",
-    "tsx": "^4.20.5",
+    "tsx": "^4.23.12",
     "vite": "^7.1.4"
   }
 }

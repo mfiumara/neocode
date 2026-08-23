@@ -11,16 +11,24 @@ import {
   SessionManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, ThinkingLevel as PiThinkingLevel } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
-import type {
-  AgentJob,
-  AgentStatus,
-  AppSnapshot,
-  RequestedIsolationMode,
-  ServerMessage,
-  TranscriptMessage,
+import {
+  SUPPORTED_IMAGE_MIME_TYPES,
+  type AgentActivity,
+  type AgentJob,
+  type AgentSettings,
+  type AgentStatus,
+  type AgentVariant,
+  type AppSnapshot,
+  type ImageAttachment,
+  type ModelChoice,
+  type ModelRef,
+  type RequestedIsolationMode,
+  type ServerMessage,
+  type TranscriptMessage,
 } from "@neocode/protocol";
+import { activity, toolActivity } from "./activity.js";
 import { resolveIsolationMode } from "./isolation.js";
 import {
   RUNTIME_STATE_VERSION,
@@ -36,18 +44,31 @@ interface RunningWorker {
   session: AgentSession;
   cancelled: boolean;
 }
+interface WorkerConfig {
+  model: AgentSession["model"];
+  thinkingLevel: PiThinkingLevel;
+}
+
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job"];
+const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
+const VARIANTS: AgentVariant[] = ["build", "plan"];
 
 function id(): string {
   return randomUUID();
 }
 
+function transcriptText(value: string): string {
+  const limit = 12_000;
+  return value.length > limit ? `${value.slice(0, limit)}\n\n… output truncated for display` : value;
+}
+
 function textOf(message: AgentMessage): string {
-  if (message.role === "bashExecution") return message.output;
-  if ("summary" in message && typeof message.summary === "string") return message.summary;
+  if (message.role === "bashExecution") return transcriptText(message.output);
+  if ("summary" in message && typeof message.summary === "string") return transcriptText(message.summary);
   if (!("content" in message)) return "";
   if (typeof message.content === "string") return message.content;
   if (!Array.isArray(message.content)) return "";
-  return message.content
+  return transcriptText(message.content
     .map((part: { type: string; text?: string; thinking?: string; name?: string; arguments?: unknown }) => {
       if (part.type === "text") return part.text || "";
       if (part.type === "thinking") return part.thinking || "";
@@ -55,7 +76,17 @@ function textOf(message: AgentMessage): string {
       return "";
     })
     .filter(Boolean)
-    .join("\n");
+    .join("\n"));
+}
+
+function attachmentsOf(message: AgentMessage): ImageAttachment[] | undefined {
+  if (!("content" in message) || !Array.isArray(message.content)) return undefined;
+  const attachments = message.content.flatMap((part) => part.type === "image"
+    && SUPPORTED_IMAGE_MIME_TYPES.includes(part.mimeType as ImageAttachment["mimeType"]) ? [{
+      id: id(), mimeType: part.mimeType as ImageAttachment["mimeType"], data: part.data,
+      size: Buffer.byteLength(part.data, "base64"),
+    }] : []);
+  return attachments.length ? attachments : undefined;
 }
 
 function assistantText(message: AgentMessage): string {
@@ -86,11 +117,16 @@ function slug(value: string): string {
 export class Orchestrator {
   private readonly jobs = new Map<string, AgentJob>();
   private readonly workers = new Map<string, RunningWorker>();
+  private readonly workerConfigs = new Map<string, WorkerConfig>();
   private readonly coordinatorMessages: TranscriptMessage[] = [];
   private readonly piSessionFiles = new Map<string, string>();
   private readonly stateStore: RuntimeStateStore;
   private coordinatorSessionFile?: string;
   private coordinatorStatus: AgentStatus = "idle";
+  private coordinatorActivity: AgentActivity | undefined;
+  private coordinatorVariant: AgentVariant = "build";
+  private coordinatorAborting = false;
+  private modelChangeInProgress = false;
   private modelRuntime!: ModelRuntime;
   private coordinator!: AgentSession;
 
@@ -120,6 +156,7 @@ export class Orchestrator {
     }
 
     this.modelRuntime = await ModelRuntime.create();
+    await this.modelRuntime.getAvailable();
 
     const loader = new DefaultResourceLoader({
       cwd: this.cwd,
@@ -209,6 +246,7 @@ export class Orchestrator {
       customTools,
     });
     this.coordinator = result.session;
+    this.applyVariantTools();
     this.bindCoordinator();
     this.persist();
   }
@@ -218,31 +256,82 @@ export class Orchestrator {
       cwd: this.cwd,
       coordinator: {
         status: this.coordinatorStatus,
+        activity: this.coordinatorActivity,
         messages: [...this.coordinatorMessages],
+        settings: this.settings(),
+        model: this.currentModel(),
+        models: this.modelChoices(),
       },
       jobs: this.listJobs(),
     };
   }
 
-  async prompt(text: string, context: string[] = []): Promise<void> {
-    const content = context.length
-      ? `${text}\n\n<context-basket>\n${context.join("\n\n---\n\n")}\n</context-basket>`
-      : text;
+  async prompt(text: string, context: string[] = [], attachments: ImageAttachment[] = []): Promise<void> {
+    const modeInstruction = this.coordinatorVariant === "plan"
+      ? "<neocode-mode>PLAN: investigate and propose a plan only. Do not delegate implementation.</neocode-mode>"
+      : "<neocode-mode>BUILD: implementation work may be delegated to background workers.</neocode-mode>";
+    const content = `${text}${context.length
+      ? `\n\n<context-basket>\n${context.join("\n\n---\n\n")}\n</context-basket>`
+      : ""}\n\n${modeInstruction}`;
 
-    const userMessage: TranscriptMessage = { id: id(), role: "user", text, timestamp: Date.now() };
+    const userMessage: TranscriptMessage = { id: id(), role: "user", text, timestamp: Date.now(), attachments: attachments.length ? attachments : undefined };
     this.coordinatorMessages.push(userMessage);
     this.persist();
     this.emit({ type: "coordinator_message", message: userMessage });
 
     try {
-      await this.coordinator.prompt(content, this.coordinator.isStreaming ? { streamingBehavior: "steer" } : undefined);
+      await this.coordinator.prompt(content, {
+        ...(attachments.length ? { images: attachments.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })) } : {}),
+        ...(this.coordinator.isStreaming ? { streamingBehavior: "steer" as const } : {}),
+      });
     } catch (error) {
-      this.fail(error);
+      if (!this.coordinatorAborting) this.fail(error);
     }
   }
 
   async abort(): Promise<void> {
-    await this.coordinator.abort();
+    this.coordinatorAborting = true;
+    try {
+      await this.coordinator.abort();
+    } finally {
+      this.coordinatorStatus = "idle";
+      this.emit({ type: "coordinator_status", status: "idle" });
+      this.setCoordinatorActivity(undefined);
+      this.coordinatorAborting = false;
+      this.persist();
+    }
+  }
+
+  cycleVariant(): AgentSettings {
+    const available = this.availableVariants();
+    const index = available.indexOf(this.coordinatorVariant);
+    this.coordinatorVariant = available[(index + 1) % available.length] ?? available[0] ?? "plan";
+    this.applyVariantTools();
+    return this.publishSettings();
+  }
+
+  cycleThinking(): AgentSettings {
+    if (this.coordinator.supportsThinking()) this.coordinator.cycleThinkingLevel();
+    return this.publishSettings();
+  }
+
+  async setModel(selection: ModelRef): Promise<void> {
+    if (this.modelChangeInProgress) throw new Error("A coordinator model change is already in progress.");
+    if (!this.coordinator.isIdle) throw new Error("Wait for the coordinator response to finish (or abort it) before changing models.");
+    const model = this.modelRuntime.getAvailableSnapshot().find(
+      (candidate) => candidate.provider === selection.provider && candidate.id === selection.id,
+    );
+    if (!model) throw new Error(`Model is not configured or available: ${selection.provider}/${selection.id}`);
+    if (this.coordinator.model?.provider === model.provider && this.coordinator.model.id === model.id) return;
+    this.modelChangeInProgress = true;
+    try {
+      await this.coordinator.setModel(model);
+      this.emit({ type: "coordinator_model_updated", model: { provider: model.provider, id: model.id } });
+      this.publishSettings();
+      this.persist();
+    } finally {
+      this.modelChangeInProgress = false;
+    }
   }
 
   async dispose(): Promise<void> {
@@ -254,6 +343,7 @@ export class Orchestrator {
       const job = this.jobs.get(jobId);
       if (job && (job.status === "running" || job.status === "queued")) {
         job.status = "interrupted";
+        job.activity = undefined;
         job.recoverable = true;
         job.updatedAt = Date.now();
       }
@@ -269,7 +359,9 @@ export class Orchestrator {
     task: string,
     requestedTitle?: string,
     requestedIsolation: RequestedIsolationMode = "auto",
+    attachments: ImageAttachment[] = [],
   ): Promise<AgentJob> {
+    if (this.coordinatorVariant === "plan") throw new Error("Delegation is unavailable in Plan mode. Switch to Build mode first.");
     const shortId = id().slice(0, 8);
     const title = requestedTitle?.trim() || task.trim().split("\n")[0]!.slice(0, 60) || "Background task";
     // Pin the starting commit so a root worker that commits does not move the
@@ -293,9 +385,12 @@ export class Orchestrator {
       baseRef,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      messages: [{ id: id(), role: "user", text: task, timestamp: Date.now() }],
+      messages: [{ id: id(), role: "user", text: task, timestamp: Date.now(), attachments: attachments.length ? attachments : undefined }],
+      activity: activity("starting", "Waiting to start"),
+      settings: { variant: "build", thinkingLevel: this.coordinator.thinkingLevel },
     };
     this.jobs.set(job.id, job);
+    this.workerConfigs.set(job.id, { model: this.coordinator.model, thinkingLevel: this.coordinator.thinkingLevel });
     this.publishJob(job);
 
     try {
@@ -304,7 +399,9 @@ export class Orchestrator {
         await this.git(["worktree", "add", "-b", branch, worktree, baseRef]);
       }
     } catch (error) {
+      this.workerConfigs.delete(job.id);
       job.status = "failed";
+      job.activity = undefined;
       job.error = error instanceof Error ? error.message : String(error);
       job.updatedAt = Date.now();
       this.publishJob(job);
@@ -312,9 +409,10 @@ export class Orchestrator {
     }
 
     job.status = "running";
+    job.activity = activity("starting", "Starting worker");
     job.updatedAt = Date.now();
     this.publishJob(job);
-    void this.runWorker(job);
+    void this.runWorker(job, attachments);
     return job;
   }
 
@@ -327,6 +425,7 @@ export class Orchestrator {
       await worker.session.abort();
     }
     job.status = "cancelled";
+    job.activity = undefined;
     job.updatedAt = Date.now();
     this.publishJob(job);
   }
@@ -343,51 +442,67 @@ export class Orchestrator {
         this.coordinatorStatus = "running";
         this.persist();
         this.emit({ type: "coordinator_status", status: "running" });
+        this.setCoordinatorActivity(activity("starting", "Starting"));
       } else if (event.type === "message_start" && event.message.role === "assistant") {
         streaming = { id: id(), role: "assistant", text: "", timestamp: Date.now() };
         emitted = false;
-      } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta" && streaming) {
-        if (!emitted) {
-          streaming.text = event.assistantMessageEvent.delta;
-          this.coordinatorMessages.push(streaming);
-          this.persist();
-          this.emit({ type: "coordinator_message", message: { ...streaming } });
-          emitted = true;
-        } else {
-          streaming.text += event.assistantMessageEvent.delta;
-          this.persist();
-          this.emit({ type: "coordinator_delta", messageId: streaming.id, delta: event.assistantMessageEvent.delta });
+      } else if (event.type === "message_update") {
+        const update = event.assistantMessageEvent;
+        if (update.type === "thinking_start" || update.type === "thinking_delta") {
+          this.setCoordinatorActivity(activity("thinking", "Thinking"));
+        } else if (update.type === "toolcall_end") {
+          this.setCoordinatorActivity(toolActivity("tool_pending", update.toolCall.name, update.toolCall.arguments));
+        } else if (update.type === "text_start" || update.type === "text_delta") {
+          this.setCoordinatorActivity(activity("responding", "Writing response"));
+          if (update.type === "text_delta" && streaming) {
+            if (!emitted) {
+              streaming.text = update.delta;
+              this.coordinatorMessages.push(streaming);
+              this.emit({ type: "coordinator_message", message: { ...streaming } });
+              emitted = true;
+            } else {
+              streaming.text += update.delta;
+              this.emit({ type: "coordinator_delta", messageId: streaming.id, delta: update.delta });
+            }
+            this.persist();
+          }
         }
+      } else if (event.type === "tool_execution_start") {
+        this.setCoordinatorActivity(toolActivity("tool_running", event.toolName, event.args));
+      } else if (event.type === "tool_execution_end") {
+        this.setCoordinatorActivity(toolActivity(event.isError ? "tool_error" : "tool_complete", event.toolName));
       } else if (event.type === "message_end" && event.message.role === "assistant" && streaming) {
         const finalText = assistantText(event.message);
-        if (finalText) {
+        const attachments = attachmentsOf(event.message);
+        if (finalText || attachments) {
           streaming.text = finalText;
+          streaming.attachments = attachments;
           if (!emitted) {
             this.coordinatorMessages.push(streaming);
             this.emit({ type: "coordinator_message", message: { ...streaming } });
-          } else {
-            this.emit({ type: "coordinator_message_updated", message: { ...streaming } });
-          }
+          } else this.emit({ type: "coordinator_message_updated", message: { ...streaming } });
         }
         this.persist();
         streaming = undefined;
         emitted = false;
       } else if (event.type === "agent_settled") {
-        this.coordinatorStatus = "idle";
+        if (this.coordinatorStatus !== "error") {
+          this.coordinatorStatus = "idle";
+          this.emit({ type: "coordinator_status", status: "idle" });
+        }
+        this.setCoordinatorActivity(undefined);
         this.persist();
-        this.emit({ type: "coordinator_status", status: "idle" });
       }
     });
   }
 
-  private async runWorker(job: AgentJob): Promise<void> {
+  private async runWorker(job: AgentJob, attachments: ImageAttachment[] = []): Promise<void> {
     let session: AgentSession | undefined;
     try {
       const loader = new DefaultResourceLoader({
         cwd: job.isolation.path,
         agentDir: getAgentDir(),
         systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode background worker\nYou are a background worker running in ${job.isolation.mode === "worktree" ? "an isolated git worktree" : "the shared root checkout"} at ${job.isolation.path}. ${job.isolation.mode === "root" && job.isolation.requested === "auto" ? "This task was classified as non-mutating: inspect and report only; do not edit files." : "Complete the assigned task autonomously, including edits when requested."} Run relevant checks. Do not ask conversational questions unless completely blocked. End with a concise report covering changes, tests, and remaining risks.`,
-
       });
       await loader.reload();
       const workerSessionDir = join(this.stateStore.root, "pi-sessions", "workers", job.id);
@@ -395,10 +510,11 @@ export class Orchestrator {
       const workerSessionFile = workerManager.getSessionFile();
       if (workerSessionFile) this.piSessionFiles.set(job.id, workerSessionFile);
       this.persist();
+      const workerConfig = this.workerConfigs.get(job.id);
       const result = await createAgentSession({
         cwd: job.isolation.path,
-        model: this.coordinator.model,
-        thinkingLevel: this.coordinator.thinkingLevel,
+        model: workerConfig?.model,
+        thinkingLevel: workerConfig?.thinkingLevel,
         modelRuntime: this.modelRuntime,
         resourceLoader: loader,
         sessionManager: workerManager,
@@ -406,21 +522,27 @@ export class Orchestrator {
       session = result.session;
       this.workers.set(job.id, { session, cancelled: false });
       this.bindWorker(job, session);
-      await session.prompt(job.prompt);
+      await session.prompt(job.prompt, attachments.length ? {
+        images: attachments.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })),
+      } : undefined);
 
       if (this.workers.get(job.id)?.cancelled) return;
       job.status = "completed";
+      job.activity = undefined;
       job.summary = [...job.messages].reverse().find((message) => message.role === "assistant")?.text;
       await this.refreshDiff(job);
       job.updatedAt = Date.now();
       this.publishJob(job);
     } catch (error) {
+      if (this.workers.get(job.id)?.cancelled || job.status === "cancelled") return;
       job.status = "failed";
+      job.activity = undefined;
       job.error = error instanceof Error ? error.message : String(error);
       job.updatedAt = Date.now();
       this.publishJob(job);
     } finally {
       this.workers.delete(job.id);
+      this.workerConfigs.delete(job.id);
       session?.dispose();
     }
   }
@@ -428,33 +550,48 @@ export class Orchestrator {
   private bindWorker(job: AgentJob, session: AgentSession): void {
     let streaming: TranscriptMessage | undefined;
     let emitted = false;
+    const setActivity = (next: AgentActivity | undefined) => {
+      if (job.activity?.phase === next?.phase && job.activity?.description === next?.description) return;
+      job.activity = next;
+      job.updatedAt = Date.now();
+      this.publishJob(job);
+    };
     session.subscribe((event) => {
-      if (event.type === "message_start") {
+      if (event.type === "agent_start") setActivity(activity("starting", "Starting"));
+      else if (event.type === "message_start") {
         const role = roleOf(event.message);
         if (role === "assistant") {
           streaming = { id: id(), role, text: "", timestamp: Date.now() };
           emitted = false;
         } else if (role === "tool") {
           const text = textOf(event.message);
-          if (!text) return;
-          job.messages.push({ id: id(), role, text, timestamp: Date.now() });
+          const messageAttachments = attachmentsOf(event.message);
+          if (!text && !messageAttachments) return;
+          job.messages.push({ id: id(), role, text, timestamp: Date.now(), attachments: messageAttachments });
           job.updatedAt = Date.now();
           this.publishJob(job);
         }
-      } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta" && streaming) {
-        if (!emitted) {
-          streaming.text = event.assistantMessageEvent.delta;
-          job.messages.push(streaming);
-          emitted = true;
-        } else {
-          streaming.text += event.assistantMessageEvent.delta;
+      } else if (event.type === "message_update") {
+        const update = event.assistantMessageEvent;
+        if (update.type === "thinking_start" || update.type === "thinking_delta") setActivity(activity("thinking", "Thinking"));
+        else if (update.type === "toolcall_end") setActivity(toolActivity("tool_pending", update.toolCall.name, update.toolCall.arguments));
+        else if (update.type === "text_start" || update.type === "text_delta") {
+          setActivity(activity("responding", "Writing response"));
+          if (update.type === "text_delta" && streaming) {
+            if (!emitted) { streaming.text = update.delta; job.messages.push(streaming); emitted = true; }
+            else streaming.text += update.delta;
+            job.updatedAt = Date.now();
+            this.publishJob(job);
+          }
         }
-        job.updatedAt = Date.now();
-        this.publishJob(job);
-      } else if (event.type === "message_end" && event.message.role === "assistant" && streaming) {
+      } else if (event.type === "tool_execution_start") setActivity(toolActivity("tool_running", event.toolName, event.args));
+      else if (event.type === "tool_execution_end") setActivity(toolActivity(event.isError ? "tool_error" : "tool_complete", event.toolName));
+      else if (event.type === "message_end" && event.message.role === "assistant" && streaming) {
         const finalText = assistantText(event.message);
-        if (finalText) {
+        const messageAttachments = attachmentsOf(event.message);
+        if (finalText || messageAttachments) {
           streaming.text = finalText;
+          streaming.attachments = messageAttachments;
           if (!emitted) job.messages.push(streaming);
           job.updatedAt = Date.now();
           this.publishJob(job);
@@ -487,6 +624,52 @@ export class Orchestrator {
       "\n# Neocode runtime (workspace-local, never source)\n.worktrees/\n.neocode/runtime/\n",
       "utf8",
     ).catch(() => undefined);
+  }
+
+  private availableVariants(): AgentVariant[] {
+    const toolNames = new Set(this.coordinator.getAllTools().map((tool) => tool.name));
+    return VARIANTS.filter((variant) => variant === "plan" || toolNames.has("delegate_task"));
+  }
+
+  private applyVariantTools(): void {
+    const available = this.availableVariants();
+    if (!available.includes(this.coordinatorVariant)) this.coordinatorVariant = available[0] ?? "plan";
+    this.coordinator.setActiveToolsByName(this.coordinatorVariant === "plan" ? PLAN_TOOLS : BUILD_TOOLS);
+  }
+
+  private settings(): AgentSettings {
+    return {
+      variant: this.coordinatorVariant,
+      thinkingLevel: this.coordinator.thinkingLevel,
+      availableVariants: this.availableVariants(),
+      availableThinkingLevels: this.coordinator.supportsThinking()
+        ? [...this.coordinator.getAvailableThinkingLevels()]
+        : [],
+    };
+  }
+
+  private publishSettings(): AgentSettings {
+    const settings = this.settings();
+    this.emit({ type: "coordinator_settings", settings });
+    return settings;
+  }
+
+  private currentModel(): ModelRef | null {
+    const model = this.coordinator?.model;
+    return model ? { provider: model.provider, id: model.id } : null;
+  }
+
+  private modelChoices(): ModelChoice[] {
+    return this.modelRuntime.getAvailableSnapshot()
+      .map((model) => ({ provider: model.provider, id: model.id, label: model.name || model.id }))
+      .sort((a, b) => a.provider.localeCompare(b.provider) || a.label.localeCompare(b.label));
+  }
+
+  private setCoordinatorActivity(next: AgentActivity | undefined): void {
+    if (this.coordinatorActivity?.phase === next?.phase
+      && this.coordinatorActivity?.description === next?.description) return;
+    this.coordinatorActivity = next;
+    this.emit({ type: "coordinator_activity", activity: next });
   }
 
   private publishJob(job: AgentJob): void {
@@ -535,6 +718,8 @@ export class Orchestrator {
         job.status = "interrupted";
         job.updatedAt = Date.now();
       }
+      // Activity describes live in-process work and must never be fabricated on restore.
+      job.activity = undefined;
 
       if (job.isolation.mode === "root") {
         job.isolation.path = this.cwd;
@@ -564,6 +749,7 @@ export class Orchestrator {
     this.coordinatorStatus = "error";
     this.persist();
     this.emit({ type: "coordinator_status", status: "error" });
+    this.setCoordinatorActivity(undefined);
     this.emit({ type: "error", message: error instanceof Error ? error.message : String(error) });
   }
 }
