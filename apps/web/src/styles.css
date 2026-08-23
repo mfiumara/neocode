@@ -245,11 +245,13 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .review-status.rejected, .review-status.ci_failed, .review-status.post_ci_failed, .review-status.failed, .review-status.conflict { color: var(--red); }
 .review-error { padding: 9px; border: 1px solid #663b40; background: #251719; color: #e2a0a5; white-space: pre-wrap; }
 .check-list details { margin-bottom: 5px; border: 1px solid var(--line); }
-.check-list details.pass summary, .judge-evidence .pass b { color: var(--green); }
-.check-list details.fail summary, .judge-evidence .fail b { color: var(--red); }
+.check-list details.pass summary, .judge-evidence .pass strong { color: var(--green); }
+.check-list details.fail summary, .judge-evidence .fail strong { color: var(--red); }
 .check-list summary { padding: 7px; cursor: pointer; }
 .check-list summary span { float: right; color: var(--dim); }
 .check-list pre { max-height: 280px; margin: 0; padding: 9px; overflow: auto; border-top: 1px solid var(--line); background: #0d0f12; color: #aaaeb6; white-space: pre-wrap; }
+.readable-review-text { margin: 5px 0; white-space: pre-wrap; }
+.readable-review-text > span, .readable-review-text > strong { overflow-wrap: anywhere; }
 .judge-evidence code { color: var(--dim); font-size: 9px; }
 .judge-evidence ul { padding: 0; list-style: none; }
 .judge-evidence li { display: grid; gap: 3px; margin: 6px 0; padding: 7px; border-left: 2px solid var(--line); }

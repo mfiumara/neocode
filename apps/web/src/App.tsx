@@ -15,7 +15,7 @@ import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
 import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
-import { presentTranscriptMessage, shortReference } from "./transcriptPresentation";
+import { presentIdentifierText, presentTranscriptMessage, shortReference } from "./transcriptPresentation";
 
 import { clipboardPlainText, filesFromClipboard, prepareImage } from "./image-attachments";
 
@@ -885,7 +885,7 @@ export function App() {
           {jobTab === "diff" && activeJob ? (
             <DiffView diff={activeJob.diff || ""} />
           ) : jobTab === "review" && activeJob ? (
-            <ReviewView job={activeJob} />
+            <ReviewView job={activeJob} jobs={snapshot?.jobs || []} />
           ) : (
             <ScrollArea
               className="transcript"
@@ -1078,6 +1078,17 @@ export function TechnicalEvidence({ label = "Technical details", children }: { l
   return <details className="technical-evidence"><summary>{label}</summary><pre>{children}</pre></details>;
 }
 
+function ReadableReviewText({ text, jobs, label, emphasis = false }: {
+  text: string; jobs: AgentJob[]; label: string; emphasis?: boolean;
+}) {
+  const presentation = presentIdentifierText(text, jobs);
+  return <div className="readable-review-text">
+    {emphasis ? <strong>{presentation.primary}</strong> : <span>{presentation.primary}</span>}
+    {presentation.secondary && <small className="identifier-reference">{presentation.secondary}</small>}
+    {presentation.technical && <TechnicalEvidence label={label}>{presentation.technical}</TechnicalEvidence>}
+  </div>;
+}
+
 export function TranscriptMessageBody({ message, jobs }: { message: TranscriptMessage; jobs: AgentJob[] }) {
   const presentation = presentTranscriptMessage(message, jobs);
   return <div className={`message-body ${presentation.lifecycle ? "lifecycle-message" : ""}`}>
@@ -1139,12 +1150,12 @@ function WorkingIndicator({ activity: current, agentLabel }: { activity?: AgentA
   </div>;
 }
 
-export function ReviewView({ job }: { job: AgentJob }) {
+export function ReviewView({ job, jobs = [job] }: { job: AgentJob; jobs?: AgentJob[] }) {
   const review = job.review;
   if (!review) return <div className="review-view"><h2>Awaiting successful completion</h2><p>Completion will hand evidence to the main coordinator; it will not auto-judge or auto-merge.</p></div>;
   return <div className="review-view">
     <header><span className={`review-status ${review.status}`}>{review.status.replaceAll("_", " ")}</span><span>coordinator-owned · attempt {review.attempt} · target {review.targetBranch}</span></header>
-    {job.handoff && <><h2>Worker handoff · round {job.handoff.round}</h2><p>{job.handoff.report}</p><p className="identifier-reference">Reviewed changes · {shortReference(job.handoff.diffSha256)}</p><TechnicalEvidence label="Exact handoff evidence">diff sha256 {job.handoff.diffSha256}</TechnicalEvidence></>}
+    {job.handoff && <><h2>Worker handoff · round {job.handoff.round}</h2><ReadableReviewText text={job.handoff.report} jobs={jobs} label="Exact worker report" /><p className="identifier-reference">Reviewed changes · {shortReference(job.handoff.diffSha256)}</p><TechnicalEvidence label="Exact handoff evidence">diff sha256 {job.handoff.diffSha256}</TechnicalEvidence></>}
     {review.error && <><p className="review-error">Review needs attention.</p><TechnicalEvidence label="Exact review error">{review.error}</TechnicalEvidence></>}
     {review.remediation?.actions.length ? <>
       <h2>Action-required remediation</h2>
@@ -1160,10 +1171,13 @@ export function ReviewView({ job }: { job: AgentJob }) {
     <h2>Independent Pi judge</h2>
     {review.judge ? <section className="judge-evidence">
       <p><strong>{review.judge.approved ? "APPROVED" : "REJECTED"}</strong> · {review.judge.model.provider}/{review.judge.model.id}</p>
-      <p>{review.judge.summary}</p>
+      <ReadableReviewText text={review.judge.summary} jobs={jobs} label="Exact judge summary" />
       <p className="identifier-reference">Reviewed changes · {shortReference(review.judge.diffSha256)}</p>
       <TechnicalEvidence label="Exact judge evidence">diff sha256 {review.judge.diffSha256}</TechnicalEvidence>
-      <ul>{review.judge.requirements.map((item, index) => <li key={index} className={item.satisfied ? "pass" : "fail"}><b>{item.satisfied ? "✓" : "×"} {item.requirement}</b><span>{item.evidence}</span></li>)}</ul>
+      <ul>{review.judge.requirements.map((item, index) => <li key={index} className={item.satisfied ? "pass" : "fail"}>
+        <span aria-hidden="true">{item.satisfied ? "✓" : "×"}</span><ReadableReviewText text={item.requirement} jobs={jobs} label="Exact requirement" emphasis />
+        <ReadableReviewText text={item.evidence} jobs={jobs} label="Exact requirement evidence" />
+      </li>)}</ul>
     </section> : <p className="muted">No structured verdict yet.</p>}
     <h2>Reconciliation</h2>
     {review.mergeCommit ? <><p>Integrated · {shortReference(review.mergeCommit)}</p><TechnicalEvidence label="Exact integration evidence">commit {review.mergeCommit}</TechnicalEvidence></> : <p>Not reconciled.</p>}

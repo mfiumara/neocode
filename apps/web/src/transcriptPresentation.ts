@@ -18,7 +18,10 @@ const stateLabels: Record<string, string> = {
   approved: "Review approved",
   backlog_sweep: "Queued for coordinator review",
   ci_running: "Running verification",
+  ci_failed: "Verification failed",
+  conflict: "Conflict needs attention",
   conflicted: "Conflict needs attention",
+  blocked: "Blocked · needs attention",
   failed: "Worker failed",
   feedback_sent: "Changes requested",
   handoff: "Ready for review",
@@ -30,14 +33,16 @@ const stateLabels: Record<string, string> = {
   merging: "Integrating",
   needs_attention: "Needs attention",
   post_merge_ci: "Verifying integration",
+  post_ci_failed: "Integration verification failed",
   queued: "Queued for review",
+  rejected: "Review rejected",
   worker_resumed: "Worker resumed",
 };
 
 function semanticState(state: unknown, detail?: unknown): string {
   if (state !== "lifecycle_transition") return stateLabels[String(state)] || String(state).replaceAll("_", " ");
   if (typeof detail === "string") {
-    const match = detail.match(/^(?:worker|server|coordinator):([a-z_]+)/);
+    const match = detail.match(/^(?:worker|server|coordinator|judge):([a-z_]+)/);
     if (match) return stateLabels[match[1]!] || match[1]!.replaceAll("_", " ");
   }
   return stateLabels.lifecycle_transition!;
@@ -66,13 +71,8 @@ function workerStatusPresentation(text: string, jobs: AgentJob[]): TranscriptPre
 const fullUuid = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const longHash = /\b[0-9a-f]{16,}\b/gi;
 
-/** Build readable display copy without changing the exact durable transcript. */
-export function presentTranscriptMessage(message: TranscriptMessage, jobs: AgentJob[]): TranscriptPresentation {
-  if (message.role === "user") return { primary: message.text, lifecycle: false };
-  const status = workerStatusPresentation(message.text, jobs);
-  if (status) return status;
-
-  let primary = message.text;
+export function presentIdentifierText(text: string, jobs: AgentJob[]): TranscriptPresentation {
+  let primary = text;
   let transformed = false;
   const knownReferences: string[] = [];
   // Durable IDs win over stale transcript labels and sentence-shape guesses.
@@ -92,11 +92,18 @@ export function presentTranscriptMessage(message: TranscriptMessage, jobs: Agent
     return shortReference(identifier)!;
   });
 
-  if (!transformed) return { primary: message.text, lifecycle: false };
+  if (!transformed) return { primary: text, lifecycle: false };
   return {
     primary,
     secondary: knownReferences.length ? [...new Set(knownReferences)].join(" · ") : undefined,
-    technical: message.text,
+    technical: text,
     lifecycle: true,
   };
+}
+
+/** Build readable display copy without changing the exact durable transcript. */
+export function presentTranscriptMessage(message: TranscriptMessage, jobs: AgentJob[]): TranscriptPresentation {
+  if (message.role === "user") return { primary: message.text, lifecycle: false };
+  const status = workerStatusPresentation(message.text, jobs);
+  return status || presentIdentifierText(message.text, jobs);
 }
