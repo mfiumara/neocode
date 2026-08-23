@@ -87,11 +87,13 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .view-controls { display: flex; align-items: center; gap: 10px; }
 .view-controls > code { color: var(--dim); font-size: 9px; }
 .view-tabs { display: flex; }
-.view-tabs button, .cancel-button, .review-button { padding: 5px 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 9px; }
+.view-tabs button, .cancel-button, .resume-button, .review-button { padding: 5px 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 9px; }
 .review-button { border-color: #647247; color: var(--accent); }
 .view-tabs button + button { border-left: 0; }
 .view-tabs button.active { background: #1b1d21; color: var(--text); }
 .cancel-button { color: var(--red); }
+.resume-button { color: var(--green); }
+.recovery-notice { margin: 10px 0; padding: 9px 11px; border: 1px solid var(--accent); color: var(--accent); font-size: 11px; }
 
 .transcript {
   min-width: 0;

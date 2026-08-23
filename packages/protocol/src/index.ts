@@ -1,5 +1,5 @@
 export type AgentStatus = "idle" | "running" | "error";
-export type JobStatus = "queued" | "running" | "interrupted" | "completed" | "failed" | "cancelled";
+export type JobStatus = "queued" | "running" | "interrupted" | "needs_attention" | "completed" | "failed" | "cancelled";
 export type RequestedIsolationMode = "auto" | "worktree" | "root";
 export type IsolationMode = Exclude<RequestedIsolationMode, "auto">;
 export type AgentVariant = "build" | "plan";
@@ -100,6 +100,29 @@ export interface TranscriptMessage {
   attachments?: ImageAttachment[];
 }
 
+export interface WorkerAttempt {
+  number: number;
+  generation: number;
+  token: string;
+  reason: "initial" | "backend_restart" | "manual_resume";
+  startedAt: number;
+  finishedAt?: number;
+  sessionMode?: "created" | "opened" | "fresh_fallback";
+  sessionFile?: string;
+  error?: string;
+}
+
+export interface WorkerRecovery {
+  retryCount: number;
+  maxRetries: number;
+  generation: number;
+  leaseToken?: string;
+  leaseAcquiredAt?: number;
+  nextRetryAt?: number;
+  needsConfirmation?: boolean;
+  checkoutDirty?: boolean;
+}
+
 export interface AgentJob {
   id: string;
   title: string;
@@ -122,6 +145,10 @@ export interface AgentJob {
   recoverable?: boolean;
   /** Set when durable metadata no longer agrees with the git checkout. */
   recoveryIssue?: string;
+  /** Durable worker restart accounting and generation lease. */
+  recovery?: WorkerRecovery;
+  /** Every process launch is a distinct, visible attempt. */
+  attempts?: WorkerAttempt[];
   /** Durable automated CI, independent review, and reconciliation state. */
   review?: JobReview;
 }
@@ -144,6 +171,7 @@ export type ClientMessage =
   | { type: "abort" }
   | { type: "delegate"; text: string; isolation?: RequestedIsolationMode; attachments?: ImageAttachment[] }
   | { type: "cancel_job"; jobId: string }
+  | { type: "resume_job"; jobId: string }
   | { type: "retry_review"; jobId: string }
   | { type: "merge_review"; jobId: string }
   | { type: "cycle_variant" }
