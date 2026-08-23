@@ -94,6 +94,32 @@ export class CompletionPipeline {
     return true;
   }
 
+  /** Upgrade pre-handoff queued records after the orchestrator refreshes their exact diff. */
+  migrateLegacyHandoff(job: AgentJob): boolean {
+    if (job.status !== "completed" || !job.review || job.handoff || job.review.status !== "queued") return false;
+    const now = Date.now();
+    const diff = job.diff || "";
+    job.handoff = {
+      report: job.summary || "Legacy worker completed without a written report.",
+      requirements: requirementsFrom(job.prompt),
+      diffSha256: createHash("sha256").update(diff).digest("hex"),
+      branch: job.branch,
+      worktree: job.isolation.path,
+      tests: evidenceLines(job.summary, /test|check|build/i),
+      risks: evidenceLines(job.summary, /risk|unresolved|remaining/i),
+      round: 1,
+      createdAt: now,
+    };
+    job.review.updatedAt = now;
+    job.review.transitions.push({
+      status: "queued", at: now, owner: "server",
+      detail: "Legacy completed record upgraded to a structured exact-diff handoff",
+    });
+    job.updatedAt = now;
+    this.publish(job);
+    return true;
+  }
+
   startJudge(job: AgentJob): void {
     if (job.status !== "completed" || !job.review || !job.handoff) throw new Error("A completed worker handoff is required.");
     if (this.active.has(job.id)) throw new Error("A lifecycle action is already running.");

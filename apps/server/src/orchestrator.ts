@@ -395,6 +395,13 @@ export class Orchestrator {
           : "Resume coordinator-owned reconciliation now: inspect the handoff, start an independent judge when appropriate, and report each decision concisely. Never merge without a fresh exact-diff approval."}`,
       ),
     });
+    // Old runtimes could have queued review metadata without the structured
+    // handoff now required by coordinator-owned judging. Upgrade only that
+    // passive queued state from a freshly read exact diff.
+    for (const job of this.listJobs()) {
+      if (job.status !== "completed" || job.handoff || job.review?.status !== "queued") continue;
+      await this.refreshDiff(job).then(() => this.completionPipeline.migrateLegacyHandoff(job)).catch(() => undefined);
+    }
     this.completionPipeline.recover(this.listJobs());
     await this.resumeClaimedRemediations();
     // Observe current durable states after queue construction so startup

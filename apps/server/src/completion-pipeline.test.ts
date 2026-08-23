@@ -78,6 +78,22 @@ test("completion records one handoff but performs no judge or merge decision", a
   assert.equal(adapter.reconcileCalls, 0, "worker completion cannot merge");
 });
 
+test("legacy queued reviews gain a durable exact-diff handoff before autonomous judging", async () => {
+  const adapter = new FakeAdapter();
+  const value = job();
+  const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root");
+  pipeline.enqueue(value);
+  delete value.handoff;
+  value.diff = "freshly-read-legacy-diff";
+  assert.equal(pipeline.migrateLegacyHandoff(value), true);
+  assert.equal(pipeline.migrateLegacyHandoff(value), false);
+  assert.equal((value as AgentJob).handoff?.diffSha256, createHash("sha256").update(value.diff).digest("hex"));
+  assert.match(value.review?.transitions.at(-1)?.detail || "", /upgraded/);
+  pipeline.startJudge(value);
+  await pipeline.idle();
+  assert.equal(value.review?.status, "approved");
+});
+
 test("fresh judge and guarded merge require distinct coordinator actions", async () => {
   const adapter = new FakeAdapter();
   const value = job();
