@@ -136,7 +136,8 @@ test("real browser virtualizes, measures, paginates, navigates, and preserves re
       `prepend moved stable interleaved anchor ${initialAnchor.key}: ${initialAnchor.offset} -> ${restoredAnchorOffset}`);
     for (let guard = 0; serverHasOlder && guard < 50; guard += 1) {
       const previous = pageResponses;
-      await evaluate("(() => { const v=document.querySelector('.transcript-viewport'); v.scrollTop=0; v.dispatchEvent(new Event('scroll',{bubbles:true})); return true })()");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await evaluate("(() => { const v=document.querySelector('.transcript-viewport'); v.scrollTop=1; v.dispatchEvent(new Event('scroll',{bubbles:true})); v.scrollTop=0; v.dispatchEvent(new Event('scroll',{bubbles:true})); return true })()");
       await waitFor(async () => pageResponses > previous || !serverHasOlder);
     }
     assert.equal(serverHasOlder, false);
@@ -158,10 +159,12 @@ test("real browser virtualizes, measures, paginates, navigates, and preserves re
     await waitFor(async () => evaluate<boolean>("[...document.querySelectorAll('[data-row-index]')].some(e => +e.dataset.rowIndex > 4000 && +e.dataset.rowIndex < 6000)"));
 
     const readingTop = await evaluate<number>("document.querySelector('.transcript-viewport').scrollTop");
+    const readingKey = await evaluate<string>("(() => { const v=document.querySelector('.transcript-viewport'); return [...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]?.e.dataset.rowKey || '' })()");
     peer!.send(JSON.stringify({ type: "coordinator_message", message: { id: "stream-new", role: "assistant", text: "stream", timestamp: 20_000 } } satisfies ServerMessage));
     await new Promise((resolve) => setTimeout(resolve, 150));
-    const afterStream = await evaluate<number>("document.querySelector('.transcript-viewport').scrollTop");
-    assert.ok(Math.abs(afterStream - readingTop) < 5, `history reader snapped ${readingTop} -> ${afterStream}`);
+    const afterStream = await evaluate<{ top: number; max: number; key: string }>("(() => { const v=document.querySelector('.transcript-viewport'); const key=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]?.e.dataset.rowKey || ''; return {top:v.scrollTop,max:v.scrollHeight-v.clientHeight,key} })()");
+    assert.equal(afterStream.key, readingKey, `streaming changed visible row while reading at ${readingTop}`);
+    assert.ok(afterStream.max - afterStream.top > 100, `history reader snapped to bottom at ${afterStream.top}/${afterStream.max}`);
 
     // Dynamic Markdown and an image resize the measured row; context remains usable.
     const visibleKey = await evaluate<string>("document.querySelector('[data-row-key^=\"message-\"]')?.dataset.rowKey || ''");
@@ -202,7 +205,8 @@ test("real browser virtualizes, measures, paginates, navigates, and preserves re
       `disjoint reconnect moved ${reconnectAnchor.key}: ${reconnectAnchor.offset} -> ${afterReconnect.offset}`);
     for (let guard = 0; serverHasOlder && guard < 50; guard += 1) {
       const previous = pageResponses;
-      await evaluate("(() => { const v=document.querySelector('.transcript-viewport'); v.scrollTop=0; v.dispatchEvent(new Event('scroll',{bubbles:true})); return true })()");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await evaluate("(() => { const v=document.querySelector('.transcript-viewport'); v.scrollTop=1; v.dispatchEvent(new Event('scroll',{bubbles:true})); v.scrollTop=0; v.dispatchEvent(new Event('scroll',{bubbles:true})); return true })()");
       await waitFor(async () => pageResponses > previous || !serverHasOlder);
     }
     assert.equal(serverHasOlder, false);
