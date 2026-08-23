@@ -77,7 +77,7 @@ export interface MaintenanceConfig {
   startup?: boolean;
 }
 
-const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job"];
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "start_judge", "request_worker_changes", "guarded_merge"];
 const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
 const VARIANTS: AgentVariant[] = ["build", "plan"];
 
@@ -244,7 +244,7 @@ export class Orchestrator {
     const loader = new DefaultResourceLoader({
       cwd: this.cwd,
       agentDir: getAgentDir(),
-      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing coordinator. You always run at the root repository. Discuss, investigate, and help the user understand the project, but never edit files or run mutating commands yourself. Delegate implementation work to background workers with delegate_task instead. Choose isolation=worktree for implementation or any potentially mutating task and isolation=root for clearly read-only investigation. Use isolation=auto when uncertain. An explicit user request for root or worktree isolation always takes precedence. Keep the main thread available: after delegation, report the job id briefly and continue helping. Use inspect_job only when the user asks to check a worker or when its result is needed. Never claim a worker succeeded before inspecting its status.`,
+      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive, non-editing MAIN coordinator. Your primary job is reconciliation and integration, while remaining available for normal user questions. You always run at the root repository. Never edit files or run mutating commands yourself. Delegate implementation to worktree workers. Worker handoffs appear as durable lifecycle events: inspect them, explicitly start a fresh independent judge, send specific feedback back to the same worker when needed, and only after final approval call guarded_merge. Judges report to you and never merge. Conflicts must be delegated back to a worker, handed off, and re-judged. Never ask a worker to mutate root/main. Lifecycle events queue while user prompts have priority; resume them afterward. Never claim success before exact-diff review and verified merge.`,
 
     });
     await loader.reload();
@@ -287,23 +287,31 @@ export class Orchestrator {
         }),
       },
       {
-        name: "inspect_job",
-        label: "Inspect job",
-        description: "Inspect a background worker's report and current diff.",
+        name: "inspect_job", label: "Inspect job", description: "Inspect a worker handoff, review evidence, and exact diff.",
         parameters: Type.Object({ jobId: Type.String() }),
         execute: async (_callId: string, params: { jobId: string }) => {
-          const job = this.jobs.get(params.jobId);
-          if (!job) throw new Error(`Unknown job: ${params.jobId}`);
-          await this.refreshDiff(job);
-          const output = [
-            `${job.id} [${job.status}] ${job.title}`,
-            `Isolation: ${job.isolation.mode} (${job.isolation.path})`,
-            job.summary ? `\nReport:\n${job.summary}` : "",
-            job.diff ? `\nDiff:\n${job.diff.slice(0, 40_000)}` : "\nNo diff yet.",
-            job.error ? `\nError:\n${job.error}` : "",
-          ].join("");
+          const job = this.requireJob(params.jobId); await this.refreshDiff(job);
+          const output = [`${job.id} [${job.status}] ${job.title}`, `Isolation: ${job.isolation.mode} (${job.isolation.path})`,
+            job.handoff ? `\nHandoff round ${job.handoff.round}:\n${JSON.stringify(job.handoff, null, 2)}` : "",
+            job.summary ? `\nReport:\n${job.summary}` : "", job.diff ? `\nDiff:\n${job.diff.slice(0, 40_000)}` : "\nNo diff yet.",
+            job.review ? `\nLifecycle:\n${JSON.stringify(job.review, null, 2)}` : "", job.error ? `\nError:\n${job.error}` : ""].join("");
           return { content: [{ type: "text" as const, text: output }], details: { jobId: job.id } };
         },
+      },
+      {
+        name: "start_judge", label: "Start independent judge", description: "Coordinator-owned exact-diff CI and fresh independent judge review.",
+        parameters: Type.Object({ jobId: Type.String() }),
+        execute: async (_callId: string, params: { jobId: string }) => { this.completionPipeline.startJudge(this.requireJob(params.jobId)); return { content: [{ type: "text" as const, text: `Judge started for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
+      },
+      {
+        name: "request_worker_changes", label: "Request worker changes", description: "Send specific judge/coordinator feedback and resume the same worktree.",
+        parameters: Type.Object({ jobId: Type.String(), feedback: Type.String() }),
+        execute: async (_callId: string, params: { jobId: string; feedback: string }) => { await this.requestWorkerChanges(params.jobId, params.feedback); return { content: [{ type: "text" as const, text: `Feedback sent and worker ${params.jobId} resumed.` }], details: { jobId: params.jobId } }; },
+      },
+      {
+        name: "guarded_merge", label: "Guarded merge", description: "Authorize serialized exact-diff merge after fresh judge approval.",
+        parameters: Type.Object({ jobId: Type.String() }),
+        execute: async (_callId: string, params: { jobId: string }) => { this.completionPipeline.requestMerge(this.requireJob(params.jobId)); return { content: [{ type: "text" as const, text: `Coordinator authorized guarded merge for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
       },
     ];
 
@@ -325,7 +333,7 @@ export class Orchestrator {
       modelRuntime: this.modelRuntime,
       resourceLoader: loader,
       sessionManager: coordinatorManager,
-      tools: ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job"],
+      tools: BUILD_TOOLS,
       customTools,
     });
     this.coordinator = result.session;
@@ -338,15 +346,18 @@ export class Orchestrator {
       judge: (job, diff, diffSha256) => this.runJudge(job, diff, diffSha256),
     });
     this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock);
-    this.completionPipeline.recover(this.listJobs());
     this.coordinatorNotifications = new CoordinatorNotificationQueue(this.notificationState, {
       append: (event) => this.appendCoordinatorWorkerEvent(event),
       persist: () => this.persist(),
       isIdle: () => this.coordinatorStatus === "idle" && this.coordinator.isIdle,
       wake: (event) => this.coordinator.prompt(
-        `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\nGive the user one concise status update. Do not delegate or inspect unless the event says attention is needed.`,
+        `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\nResume coordinator-owned reconciliation now: inspect the handoff, start an independent judge when appropriate, and report each decision concisely. Never merge without a fresh exact-diff approval.`,
       ),
     });
+    this.completionPipeline.recover(this.listJobs());
+    // Observe current durable states after queue construction so startup
+    // recovery is visible without replaying side effects.
+    for (const job of this.listJobs()) this.coordinatorNotifications.observe(job);
     this.persist();
     this.coordinatorNotifications.settled();
     await this.resumeRestoredJobs();
@@ -548,16 +559,22 @@ export class Orchestrator {
     return job;
   }
 
-  retryReview(jobId: string): void {
+  private requireJob(jobId: string): AgentJob {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
-    this.completionPipeline.retry(job);
+    return job;
   }
 
-  mergeReview(jobId: string): void {
-    const job = this.jobs.get(jobId);
-    if (!job) throw new Error(`Unknown job: ${jobId}`);
-    this.completionPipeline.requestMerge(job);
+  async requestWorkerChanges(jobId: string, feedback: string): Promise<void> {
+    const job = this.requireJob(jobId);
+    if (job.status !== "completed") throw new Error(`Worker ${jobId} is not awaiting review.`);
+    if (job.isolation.mode !== "worktree") throw new Error("Review iterations require an isolated worktree worker.");
+    if ((job.handoff?.round || 1) >= 4) throw new Error("Maximum review rounds reached; coordinator attention is required.");
+    this.completionPipeline.requestChanges(job, feedback);
+    job.messages.push({ id: id(), role: "system", text: `Coordinator review feedback: ${feedback}`, timestamp: Date.now() });
+    job.recoverable = true;
+    this.completionPipeline.workerResumed(job);
+    await this.startRecoveryAttempt(job, "manual_resume");
   }
 
   async resumeJob(jobId: string): Promise<void> {
@@ -745,9 +762,10 @@ export class Orchestrator {
       delete job.recoveryIssue;
       this.finishAttempt(job);
       this.publishJob(job);
-      // This call is in the worker lifecycle itself: no coordinator prompt,
-      // list_jobs poll, or WebSocket request is needed to start review.
-      this.completionPipeline.enqueue(job);
+      // Completion records a durable handoff and wakes the main coordinator.
+      // It deliberately does not launch a judge or merge action.
+      if (job.review) this.completionPipeline.nextHandoff(job);
+      else this.completionPipeline.enqueue(job);
     } catch (error) {
       if (this.workers.get(job.id)?.cancelled || job.status === "cancelled"
         || !this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;

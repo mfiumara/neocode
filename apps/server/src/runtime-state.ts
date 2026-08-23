@@ -12,8 +12,7 @@ export interface DurableJob {
 }
 
 export type CoordinatorWorkerEventKind =
-  | "completed" | "merged" | "review_rejected" | "review_blocked"
-  | "review_conflict" | "review_failed" | "failed" | "needs_attention";
+  | "handoff" | "lifecycle_transition" | "failed" | "needs_attention";
 
 export interface CoordinatorWorkerEvent {
   id: string;
