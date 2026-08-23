@@ -82,12 +82,31 @@ export interface MaintenanceConfig {
   startup?: boolean;
 }
 
-const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "mark_not_required", "reconcile_jobs", "clean_worktrees"];
+const BUILD_TOOLS = ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job", "resume_worker", "start_judge", "request_worker_changes", "retry_infrastructure", "guarded_merge", "verify_integration", "mark_not_required", "reconcile_jobs", "clean_worktrees"];
 const PLAN_TOOLS = ["read", "grep", "find", "ls", "list_jobs", "inspect_job"];
 const VARIANTS: AgentVariant[] = ["build", "plan"];
 
 function id(): string {
   return randomUUID();
+}
+
+export function executeCoordinatorGuardedMerge(
+  pipeline: Pick<CompletionPipeline, "requestMerge">,
+  capability: symbol,
+  requireJob: (jobId: string) => AgentJob,
+  jobId: string,
+) {
+  pipeline.requestMerge(requireJob(jobId), capability);
+  return { content: [{ type: "text" as const, text: `Coordinator authorized guarded rebased fast-forward for ${jobId}.` }], details: { jobId } };
+}
+
+export function workerSystemPrompt(base: string | undefined, job: Pick<AgentJob, "isolation">): string {
+  const inWorktree = job.isolation.mode === "worktree";
+  const checkout = inWorktree ? "an isolated git worktree" : "the explicitly selected shared root checkout";
+  const assignment = inWorktree
+    ? "Complete the assigned task autonomously, including edits when requested. Keep all implementation and conflict-resolution edits inside this assigned checkout; never mutate root/main."
+    : "Root isolation remains recorded as requested, but background workers are read-only there: inspect and report only; do not edit or mutate the shared checkout.";
+  return `${base ?? ""}\n\n# Neocode background worker\nYou are a background worker running in ${checkout} at ${job.isolation.path}. ${assignment} You never merge or advance the main ref, launch a judge, judge the work yourself, or directly start integration; only the MAIN coordinator owns those decisions and tool calls. Run relevant checks. Do not ask conversational questions unless completely blocked. End with a structured, concise handoff covering requirements, changes, tests, and unresolved risks.`;
 }
 
 function normalizeActivityTiming(value: AgentActivity): AgentActivity {
@@ -176,6 +195,7 @@ export class Orchestrator {
   private modelRuntime!: ModelRuntime;
   private coordinator!: AgentSession;
   private completionPipeline!: CompletionPipeline;
+  readonly #coordinatorMergeCapability = Symbol("main coordinator guarded integration");
   private readonly operationLock = new OperationLock();
   private readonly janitor: WorktreeJanitor;
   private maintenance: MaintenanceStatus = { state: "idle" };
@@ -338,7 +358,28 @@ export class Orchestrator {
       {
         name: "guarded_merge", label: "Guarded fast-forward", description: "Authorize serialized integration of the exact rebased diff with --ff-only after fresh judge approval.",
         parameters: Type.Object({ jobId: Type.String() }),
-        execute: async (_callId: string, params: { jobId: string }) => { this.completionPipeline.requestMerge(this.requireJob(params.jobId)); return { content: [{ type: "text" as const, text: `Coordinator authorized guarded rebased fast-forward for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
+        execute: async (_callId: string, params: { jobId: string }) => executeCoordinatorGuardedMerge(
+          this.completionPipeline, this.#coordinatorMergeCapability, (jobId) => this.requireJob(jobId), params.jobId,
+        ),
+      },
+      {
+        name: "verify_integration", label: "Verify integration", description: "Verify one job against main and return its persisted merge and CI evidence without authorizing a merge.",
+        parameters: Type.Object({ jobId: Type.String() }),
+        execute: async (_callId: string, params: { jobId: string }) => {
+          await this.reconcileIntegratedJobs();
+          const job = this.requireJob(params.jobId);
+          if (job.integration?.status !== "merged") throw new Error(`Job ${params.jobId} is not verified on main.`);
+          const evidence = {
+            jobId: job.id,
+            targetRef: job.integration.targetRef,
+            targetHead: job.integration.targetHead,
+            completionHead: job.integration.completionHead,
+            verifiedAt: job.integration.verifiedAt,
+            reviewedDiffSha256: job.review?.judge?.diffSha256,
+            checks: job.review?.postMergeCi || [],
+          };
+          return { content: [{ type: "text" as const, text: `Verified ${job.id} on ${evidence.targetRef || "main"} at ${evidence.targetHead || "unknown head"}.` }], details: evidence };
+        },
       },
       {
         name: "mark_not_required", label: "Mark not required", description: "Mark clean committed work as superseded only when a replacement job or commit is already verified on main. The branch is retained.",
@@ -402,7 +443,7 @@ export class Orchestrator {
       targetBranch,
       judge: (job, diff, diffSha256) => this.runJudge(job, diff, diffSha256),
     });
-    this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock);
+    this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock, this.#coordinatorMergeCapability);
     await this.reconcileIntegratedJobs(targetBranch);
     this.coordinatorNotifications = new CoordinatorNotificationQueue(this.notificationState, {
       append: (event) => this.appendCoordinatorWorkerEvent(event),
@@ -806,7 +847,7 @@ export class Orchestrator {
       const loader = new DefaultResourceLoader({
         cwd: job.isolation.path,
         agentDir: getAgentDir(),
-        systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode background worker\nYou are a background worker running in ${job.isolation.mode === "worktree" ? "an isolated git worktree" : "the shared root checkout"} at ${job.isolation.path}. ${job.isolation.mode === "root" && job.isolation.requested === "auto" ? "This task was classified as non-mutating: inspect and report only; do not edit files." : "Complete the assigned task autonomously, including edits when requested."} Run relevant checks. Do not ask conversational questions unless completely blocked. End with a concise report covering changes, tests, and remaining risks.`,
+        systemPromptOverride: (base) => workerSystemPrompt(base, job),
       });
       await loader.reload();
       const workerSessionDir = join(this.stateStore.root, "pi-sessions", "workers", job.id);

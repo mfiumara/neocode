@@ -57,6 +57,27 @@ export function checkGitState(env = process.env) {
   const base = discoverDiffBase(env);
   process.stdout.write(`verified diff base: ${base}\n`);
 
+  // A coordinator worktree has a local main ref. Keep these literal commands
+  // in captured CI evidence so a reviewer can verify the exact candidate
+  // range without translating an opaque SHA-only packet.
+  if (resolveCommit("main")) {
+    const mainChecks = [
+      { args: ["merge-base", "main", "HEAD"], command: "git merge-base main HEAD", label: "main-merge-base" },
+      { args: ["diff", "--name-status", "main...HEAD"], command: "git diff --name-status main...HEAD", label: "main-name-status" },
+      { args: ["diff", "--check", "main...HEAD"], command: "git diff --check main...HEAD", label: "main-diff-check" },
+    ];
+    let mainFailure = 0;
+    for (const check of mainChecks) {
+      const result = git(check.args, { allowFailure: true });
+      reportCommand(check.command, result, check.label);
+      if (result.status !== 0 && mainFailure === 0) mainFailure = result.status ?? 1;
+    }
+    if (mainFailure) return mainFailure;
+  }
+
+  // This verified-base check remains authoritative in PR, shallow, and
+  // non-main environments. It deliberately checks the complete feature range
+  // and never falls back to HEAD^.
   const diff = git(["diff", "--check", base, "HEAD"], { allowFailure: true });
   reportCommand(`git diff --check ${base} HEAD`, diff, "diff-check");
   if (diff.status !== 0) return diff.status ?? 1;

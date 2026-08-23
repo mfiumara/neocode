@@ -47,6 +47,27 @@ test("GitHub PR base discovery checks the complete feature range without main or
   } finally { value.cleanup(); }
 });
 
+test("coordinator worktrees report literal main packet commands across the full feature range", () => {
+  const value = fixture();
+  try {
+    git(value.root, ["update-ref", "refs/heads/main", value.base]);
+    writeFileSync(join(value.root, "early.txt"), "early\n");
+    git(value.root, ["add", "."]); git(value.root, ["commit", "-m", "early feature commit"]);
+    writeFileSync(join(value.root, "later.txt"), "later\n");
+    git(value.root, ["add", "."]); git(value.root, ["commit", "-m", "later feature commit"]);
+
+    const result = check(value.root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\$ git merge-base main HEAD\nmain-merge-base output begin/);
+    assert.match(result.stdout, new RegExp(`${value.base}\\nmain-merge-base output end\\nmain-merge-base exit: 0`));
+    assert.match(result.stdout, /\$ git diff --name-status main\.\.\.HEAD\nmain-name-status output begin/);
+    assert.match(result.stdout, /A\s+early\.txt.*A\s+later\.txt/s);
+    assert.match(result.stdout, /main-name-status output end\nmain-name-status exit: 0/);
+    assert.match(result.stdout, /\$ git diff --check main\.\.\.HEAD\nmain-diff-check output begin\nmain-diff-check output end\nmain-diff-check exit: 0/);
+    assert.match(result.stdout, new RegExp(`\\$ git diff --check ${value.base} HEAD`));
+  } finally { value.cleanup(); }
+});
+
 test("verified base checks report exact empty clean status and reject dirty candidates", () => {
   const value = fixture();
   try {

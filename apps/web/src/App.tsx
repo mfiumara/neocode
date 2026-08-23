@@ -833,7 +833,7 @@ export function App() {
         <section className="main-panel">
           <div className="view-header">
             <div>
-              <span className="eyebrow">{active.kind === "coordinator" ? "MAIN THREAD" : activeJob ? jobLifecycleLabel(activeJob).toUpperCase() : "WORKER"}</span>
+              <span className="eyebrow">{active.kind === "coordinator" ? "MAIN THREAD · RECONCILIATION & INTEGRATION" : activeJob ? jobLifecycleLabel(activeJob).toUpperCase() : "WORKER"}</span>
               <h1>{active.kind === "coordinator" ? "Coordinator" : activeJob?.title || "Worker"}</h1>
             </div>
             {active.kind === "coordinator" && (<>
@@ -1155,7 +1155,15 @@ export function ReviewView({ job, jobs = [job] }: { job: AgentJob; jobs?: AgentJ
   if (!review) return <div className="review-view"><h2>Awaiting successful completion</h2><p>Completion will hand evidence to the main coordinator; it will not auto-judge or auto-merge.</p></div>;
   return <div className="review-view">
     <header><span className={`review-status ${review.status}`}>{review.status.replaceAll("_", " ")}</span><span>coordinator-owned · attempt {review.attempt} · target {review.targetBranch}</span></header>
-    {job.handoff && <><h2>Worker handoff · round {job.handoff.round}</h2><ReadableReviewText text={job.handoff.report} jobs={jobs} label="Exact worker report" /><p className="identifier-reference">Reviewed changes · {shortReference(job.handoff.diffSha256)}</p><TechnicalEvidence label="Exact handoff evidence">diff sha256 {job.handoff.diffSha256}</TechnicalEvidence></>}
+    {job.handoff && <section className="handoff-evidence">
+      <h2>Worker handoff · round {job.handoff.round}</h2>
+      <ReadableReviewText text={job.handoff.report} jobs={jobs} label="Exact worker report" />
+      <p><strong>Requirements:</strong> {job.handoff.requirements.join("; ") || "Not extracted"}</p>
+      <p><strong>Tests:</strong> {job.handoff.tests.join("; ") || "Not reported"}</p>
+      <p><strong>Risks:</strong> {job.handoff.risks.join("; ") || "None reported"}</p>
+      <p className="identifier-reference">Reviewed changes · {shortReference(job.handoff.diffSha256)}</p>
+      <TechnicalEvidence label="Exact handoff evidence">{`diff sha256 ${job.handoff.diffSha256}\nbranch ${job.handoff.branch}\nworktree ${job.handoff.worktree}`}</TechnicalEvidence>
+    </section>}
     {review.error && <><p className="review-error">Review needs attention.</p><TechnicalEvidence label="Exact review error">{review.error}</TechnicalEvidence></>}
     {review.remediation?.actions.length ? <>
       <h2>Action-required remediation</h2>
@@ -1183,7 +1191,7 @@ export function ReviewView({ job, jobs = [job] }: { job: AgentJob; jobs?: AgentJ
     {review.mergeCommit ? <><p>Integrated · {shortReference(review.mergeCommit)}</p><TechnicalEvidence label="Exact integration evidence">commit {review.mergeCommit}</TechnicalEvidence></> : <p>Not reconciled.</p>}
     <CheckList checks={review.postMergeCi} empty="Post-merge checks have not run." />
     <h2>Transition log</h2>
-    <ol className="transition-log">{review.transitions.map((entry, index) => <li key={index}><time>{new Date(entry.at).toLocaleTimeString()}</time><b>{entry.status.replaceAll("_", " ")}</b>{entry.detail ? <details><summary>Technical details</summary><pre>{entry.detail}</pre></details> : <span>{entry.owner || "server"}</span>}</li>)}</ol>
+    <ol className="transition-log">{review.transitions.map((entry, index) => <li key={index}><time>{new Date(entry.at).toLocaleTimeString()}</time><b>{entry.status.replaceAll("_", " ")}</b><span>{entry.owner || "server"}</span>{entry.detail && <details><summary>Technical details</summary><pre>{entry.detail}</pre></details>}</li>)}</ol>
   </div>;
 }
 
