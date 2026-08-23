@@ -141,6 +141,13 @@ test("Vite proxy reproduces synthetic reset EPIPE while clean transport reconnec
     assert.ok(recorded("EPIPE", "ws proxy error"));
     assert.ok(recorded("EPIPE", "ws proxy socket error"));
 
+    // Fully drain the synthetic fault before measuring clean lifecycle traffic;
+    // otherwise its second asynchronous logger callback can be misattributed to
+    // the following connection.
+    for (const client of backend.wss.clients) client.terminate();
+    await waitFor(() => backend.wss.clients.size === 0, "synthetic fault cleanup");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     // The production policy avoids that path: after open, a normal close frame
     // is quiet, and repeating it proves reconnect does not retain stale state.
     errors.length = 0;
