@@ -40,6 +40,7 @@ import { resolveIsolationMode } from "./isolation.js";
 import {
   canAutomaticallyResume,
   continuationPrompt,
+  hasUnexpiredRecoveryLease,
   isClearlyReadOnlyRoot,
   isDurableAttemptCurrent,
   openRecoverySession,
@@ -159,6 +160,7 @@ export class Orchestrator {
   private readonly piSessionFiles = new Map<string, string>();
   private readonly stateStore: RuntimeStateStore;
   private readonly recoveryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly workerLeaseTimers = new Map<string, NodeJS.Timeout>();
   private readonly startupRecoveryIds = new Set<string>();
   private readonly recoveryConfig: RecoveryConfig;
   private readonly notificationState: CoordinatorNotificationState = { events: [], lastSignals: {} };
@@ -511,6 +513,8 @@ export class Orchestrator {
   async dispose(): Promise<void> {
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
+    for (const timer of this.workerLeaseTimers.values()) clearInterval(timer);
+    this.workerLeaseTimers.clear();
     if (this.janitorTimer) clearInterval(this.janitorTimer);
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     await this.janitorRun;
@@ -608,8 +612,10 @@ export class Orchestrator {
     const token = id();
     job.recovery!.leaseToken = token;
     job.recovery!.leaseAcquiredAt = Date.now();
+    job.recovery!.leaseExpiresAt = Date.now() + this.recoveryConfig.leaseMs;
     job.attempts!.push({ number: 1, generation: 1, token, reason: "initial", startedAt: Date.now() });
     this.publishJob(job);
+    await this.stateStore.flush();
     void this.runWorker(job, attachments, { generation: 1, token, resume: false });
     return job;
   }
@@ -682,6 +688,8 @@ export class Orchestrator {
     job.recoverable = false;
     job.recoveryIssue = "Cancelled intentionally; automatic recovery is disabled.";
     delete job.recovery?.leaseToken;
+    delete job.recovery?.leaseAcquiredAt;
+    delete job.recovery?.leaseExpiresAt;
     delete job.recovery?.nextRetryAt;
     this.finishWorker(job);
 
@@ -807,6 +815,14 @@ export class Orchestrator {
         return;
       }
       this.workers.set(job.id, { session, cancelled: false, generation: attempt.generation, token: attempt.token });
+      const leaseTimer = setInterval(() => {
+        if (!this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;
+        job.recovery!.leaseExpiresAt = Date.now() + this.recoveryConfig.leaseMs;
+        job.updatedAt = Date.now();
+        this.publishJob(job);
+      }, Math.max(250, Math.floor(this.recoveryConfig.leaseMs / 3)));
+      leaseTimer.unref();
+      this.workerLeaseTimers.set(job.id, leaseTimer);
       this.bindWorker(job, session, attempt.generation, attempt.token);
       const prompt = attempt.resume ? continuationPrompt(job, reopened) : job.prompt;
       await session.prompt(prompt, attachments.length ? {
@@ -847,6 +863,9 @@ export class Orchestrator {
     } finally {
       const worker = this.workers.get(job.id);
       if (worker?.generation === attempt.generation && worker.token === attempt.token) {
+        const leaseTimer = this.workerLeaseTimers.get(job.id);
+        if (leaseTimer) clearInterval(leaseTimer);
+        this.workerLeaseTimers.delete(job.id);
         this.workers.delete(job.id);
         this.workerConfigs.delete(job.id);
         this.workerTimelines.delete(job.id);
@@ -1283,7 +1302,14 @@ export class Orchestrator {
       if (job.activity) job.activity = normalizeActivityTiming(job.activity);
       const wasActive = job.status === "running" || job.status === "queued";
       const wasScheduledRecovery = job.status === "interrupted" && job.recovery?.nextRetryAt !== undefined;
-      // No process survives restart; close a persisted live step as interrupted.
+      if ((wasActive || wasScheduledRecovery) && hasUnexpiredRecoveryLease(job)) {
+        // Another server generation may still own this worker. Do not rewrite
+        // its state or token; re-read durable state when the renewable lease expires.
+        this.deferRecoveryLeaseTakeover(job);
+        continue;
+      }
+      // No process survives restart once its durable generation lease expires;
+      // close the persisted live step as interrupted.
       if (job.activity) {
         const completedAt = Date.now();
         job.activityHistory.unshift({ ...job.activity, completedAt, durationMs: Math.max(0, completedAt - job.activity.startedAt), outcome: "interrupted", updatedAt: completedAt });
@@ -1300,6 +1326,7 @@ export class Orchestrator {
       job.recovery.maxRetries = this.recoveryConfig.maxRetries;
       delete job.recovery.leaseToken; // the old process did not survive
       delete job.recovery.leaseAcquiredAt;
+      delete job.recovery.leaseExpiresAt;
       if (wasActive) this.finishAttempt(job, "Backend restart interrupted this attempt.");
       await this.validateRecoveryCheckout(job);
 
@@ -1315,6 +1342,49 @@ export class Orchestrator {
       }
       this.publishJob(job);
     }
+  }
+
+  private deferRecoveryLeaseTakeover(job: AgentJob): void {
+    const expiresAt = job.recovery?.leaseExpiresAt;
+    const token = job.recovery?.leaseToken;
+    if (!expiresAt || !token) return;
+    const existing = this.recoveryTimers.get(job.id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.recoveryTimers.delete(job.id);
+      void (async () => {
+        const durable = (await this.stateStore.load())?.jobs.find((entry) => entry.job.id === job.id)?.job;
+        if (!durable) return;
+        if (!durable.recovery || durable.recovery.leaseToken !== token
+          || durable.recovery.generation !== job.recovery?.generation) {
+          this.jobs.set(job.id, structuredClone(durable));
+          this.emit({ type: "job_updated", job: structuredClone(durable) });
+          return;
+        }
+        job.recovery = structuredClone(durable.recovery);
+        if (hasUnexpiredRecoveryLease(job)) {
+          this.deferRecoveryLeaseTakeover(job);
+          return;
+        }
+        job.status = "interrupted";
+        if (job.activity) {
+          const completedAt = Date.now();
+          job.activityHistory ??= [];
+          job.activityHistory.unshift({ ...job.activity, completedAt, durationMs: Math.max(0, completedAt - job.activity.startedAt), outcome: "interrupted", updatedAt: completedAt });
+          job.activity = undefined;
+        }
+        this.finishAttempt(job, "Generation lease expired; backend recovery may take over.");
+        await this.validateRecoveryCheckout(job);
+        if (canAutomaticallyResume(job)) await this.startRecoveryAttempt(job, "backend_restart");
+        else {
+          job.status = "needs_attention";
+          job.recoveryIssue ||= "Expired worker generation could not be recovered safely.";
+          this.publishJob(job);
+        }
+      })().catch((error) => this.emit({ type: "error", message: error instanceof Error ? error.message : String(error) }));
+    }, Math.max(0, expiresAt - Date.now()));
+    timer.unref();
+    this.recoveryTimers.set(job.id, timer);
   }
 
   private async validateRecoveryCheckout(job: AgentJob): Promise<void> {
@@ -1419,6 +1489,7 @@ export class Orchestrator {
     recovery.generation = generation;
     recovery.leaseToken = token;
     recovery.leaseAcquiredAt = Date.now();
+    recovery.leaseExpiresAt = Date.now() + this.recoveryConfig.leaseMs;
     delete recovery.nextRetryAt;
     delete recovery.needsConfirmation;
     job.attempts ??= [];
@@ -1469,6 +1540,7 @@ export class Orchestrator {
     if (job.recovery) {
       delete job.recovery.leaseToken;
       delete job.recovery.leaseAcquiredAt;
+      delete job.recovery.leaseExpiresAt;
     }
   }
 

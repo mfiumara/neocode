@@ -189,6 +189,8 @@ export interface WorkerRecovery {
   generation: number;
   leaseToken?: string;
   leaseAcquiredAt?: number;
+  /** Renewed by the owning generation; another server must not take over before this instant. */
+  leaseExpiresAt?: number;
   nextRetryAt?: number;
   needsConfirmation?: boolean;
   checkoutDirty?: boolean;
