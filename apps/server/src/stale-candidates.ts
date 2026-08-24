@@ -24,6 +24,8 @@ export interface NominationInput {
 export interface StaleContext {
   workspaceRoot: string;
   activeJobIds?: ReadonlySet<string>;
+  jobs?: ReadonlyMap<string, AgentJob>;
+  targetRef?: string;
   now?: () => number;
 }
 
@@ -161,6 +163,7 @@ async function archiveDirtyEvidence(job: AgentJob, context: StaleContext): Promi
     source: candidate.evidenceSource, reason: candidate.reason,
     suspectedReplacementJobId: candidate.suspectedReplacementJobId,
     suspectedReplacementCommit: candidate.suspectedReplacementCommit,
+    replacementAuthority: candidate.replacementAuthority,
     audit, untrackedFiles,
   };
   const patch = Buffer.concat(patches);
@@ -176,6 +179,36 @@ async function archiveDirtyEvidence(job: AgentJob, context: StaleContext): Promi
     evidencePath: relative(workspace, evidencePath), diffSha256: sha(patch),
     porcelainSha256: sha(audit.porcelain), dirty: audit.dirty, untrackedFiles,
   };
+}
+
+async function verifyReplacementAuthority(job: AgentJob, context: StaleContext) {
+  const candidate = job.staleCandidate!;
+  const targetRef = context.targetRef || "main";
+  const targetHead = (await git(context.workspaceRoot, ["rev-parse", targetRef])).trim();
+  const verifyCommit = async (value: string) => {
+    const commit = (await git(context.workspaceRoot, ["rev-parse", `${value}^{commit}`])).trim();
+    const contained = await execFileAsync("git", ["merge-base", "--is-ancestor", commit, targetHead], { cwd: context.workspaceRoot })
+      .then(() => true, () => false);
+    if (!contained) throw new Error("Replacement commit is not authoritatively contained in current main.");
+    return commit;
+  };
+  if (candidate.suspectedReplacementJobId) {
+    const replacement = context.jobs?.get(candidate.suspectedReplacementJobId);
+    if (!replacement || replacement.id === job.id || replacement.integration?.status !== "merged"
+      || !replacement.integration.verifiedAt || !replacement.integration.targetHead) {
+      throw new Error("Replacement job lacks durable merged_verified evidence.");
+    }
+    const commit = await verifyCommit(replacement.integration.targetHead);
+    if (candidate.suspectedReplacementCommit) await verifyCommit(candidate.suspectedReplacementCommit);
+    return {
+      kind: "job" as const, verifiedAt: (context.now ?? Date.now)(), targetRef, targetHead,
+      replacementCommit: commit, replacementJobId: replacement.id,
+      replacementJobVerifiedAt: replacement.integration.verifiedAt,
+    };
+  }
+  if (!candidate.suspectedReplacementCommit) throw new Error("Specific replacement commit or merged_verified replacement job evidence is required.");
+  const commit = await verifyCommit(candidate.suspectedReplacementCommit);
+  return { kind: "commit" as const, verifiedAt: (context.now ?? Date.now)(), targetRef, targetHead, replacementCommit: commit };
 }
 
 export async function decideStaleCandidate(
@@ -194,12 +227,19 @@ export async function decideStaleCandidate(
     candidate.state = "kept";
     candidate.confirmation = "still_wanted";
     candidate.resolvedAt = now;
-    job.status = candidate.resumeState.status;
-    job.recoverable = candidate.resumeState.recoverable;
-    job.recoveryIssue = candidate.resumeState.recoveryIssue;
+    if (candidate.resumeState.status === "failed" || candidate.resumeState.status === "cancelled") {
+      job.status = "needs_attention";
+      job.recoverable = false;
+      job.recoveryIssue = "Still wanted after a terminal worker outcome; coordinator path/branch/recovery validation is required before any resume.";
+    } else {
+      job.status = candidate.resumeState.status;
+      job.recoverable = candidate.resumeState.recoverable;
+      job.recoveryIssue = candidate.resumeState.recoveryIssue;
+    }
     job.updatedAt = now;
     return job;
   }
+  candidate.replacementAuthority = await verifyReplacementAuthority(job, context);
   candidate.archive = await archiveDirtyEvidence(job, context);
   if (candidate.audit.dirty && !candidate.archive.diffSha256) throw new Error("Dirty evidence archive was not completed.");
   candidate.state = "superseded";
@@ -211,8 +251,8 @@ export async function decideStaleCandidate(
   job.integration = {
     ...job.integration, status: "superseded", targetRef: "main", verifiedAt: now,
     completionHead: candidate.audit.head, disposition: "superseded", dispositionReason: candidate.reason,
-    supersededByJobId: candidate.suspectedReplacementJobId,
-    supersededByCommit: candidate.suspectedReplacementCommit,
+    supersededByJobId: candidate.replacementAuthority.replacementJobId,
+    supersededByCommit: candidate.replacementAuthority.replacementCommit,
   };
   job.recoverable = false;
   job.recoveryIssue = undefined;
@@ -227,7 +267,11 @@ function replacementEvidence(text: string): { suspectedReplacementJobId?: string
   return { suspectedReplacementJobId: job, suspectedReplacementCommit: commit };
 }
 
-interface ManifestWorktree { path: string; branch: string; head: string; valid: boolean; dirty: boolean | null; disposition: string; evidence: string }
+interface ManifestWorktree {
+  path: string; branch: string; head: string; valid: boolean; dirty: boolean | null; statusLines?: number | null;
+  disposition: string; evidence: string; trackedDiffSha256?: string; contentFingerprint?: string;
+  untrackedFiles?: Array<{ path: string; sha256: string; bytes: number }>;
+}
 interface ManifestJob { id: string; title: string; branch: string; path: string; disposition: string; evidence: string }
 interface AuditManifest { schemaVersion: number; generatedAt: string; baseline: { ref: string; commit: string }; worktrees: ManifestWorktree[]; jobs?: ManifestJob[] }
 
@@ -243,6 +287,7 @@ export async function migrateStaleManifest(
   const parsed = JSON.parse(await readFile(manifestPath, "utf8")) as AuditManifest;
   if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.worktrees)) throw new Error("Unsupported stale manifest schema.");
   const manifestJobs = new Map((parsed.jobs || []).map((job) => [job.id, job]));
+  const matchedManifestJobs = new Set<string>();
   for (const item of parsed.worktrees) {
     if (!CANDIDATE_DISPOSITIONS.has(item.disposition)) { result.skipped += 1; continue; }
     if (!item.valid || typeof item.path !== "string" || typeof item.branch !== "string" || typeof item.head !== "string") {
@@ -250,6 +295,7 @@ export async function migrateStaleManifest(
     }
     const suffix = item.branch.match(/-([0-9a-f]{8})$/)?.[1];
     const source = suffix ? manifestJobs.get(suffix) : undefined;
+    if (source) matchedManifestJobs.add(source.id);
     if (source && (source.path !== item.path || source.branch !== item.branch || !CANDIDATE_DISPOSITIONS.has(source.disposition))) {
       result.ambiguous.push(`${item.path}: manifest worktree/job classification mismatch`); continue;
     }
@@ -270,6 +316,21 @@ export async function migrateStaleManifest(
       if (!samePath || job.branch !== item.branch) {
         result.ambiguous.push(`${item.path}: durable path/branch mismatch`); continue;
       }
+      try {
+        const live = await auditWorktree(job, context);
+        const lineCount = live.porcelain ? live.porcelain.split("\n").length : 0;
+        const exactUntracked = item.untrackedFiles === undefined
+          || JSON.stringify(item.untrackedFiles) === JSON.stringify(live.untrackedFiles);
+        if (live.head !== item.head || (item.dirty !== null && live.dirty !== item.dirty)
+          || (item.statusLines != null && lineCount !== item.statusLines)
+          || (item.trackedDiffSha256 !== undefined && live.trackedDiffSha256 !== item.trackedDiffSha256)
+          || (item.contentFingerprint !== undefined && live.contentFingerprint !== item.contentFingerprint)
+          || !exactUntracked) {
+          result.ambiguous.push(`${item.path}: live HEAD/dirty/content audit differs from manifest`); continue;
+        }
+      } catch (error) {
+        result.ambiguous.push(`${item.path}: live durable-job audit failed: ${error instanceof Error ? error.message : String(error)}`); continue;
+      }
     }
     if (!job) {
       try {
@@ -286,7 +347,10 @@ export async function migrateStaleManifest(
           status: "interrupted" as JobStatus, branch: item.branch, worktree: path,
           isolation: { requested: "worktree", mode: "worktree", path }, baseRef: parsed.baseline.commit,
           createdAt, updatedAt: createdAt, messages: [{ id: randomUUID(), role: "system", text: "Imported from the semantic worktree audit. Files and execution history were not changed.", timestamp: createdAt }],
-          recoverable: true,
+          recoverable: false,
+          recoveryIssue: item.disposition === "intentionally cancelled"
+            ? "Synthetic intentionally-cancelled inventory is never automatically recoverable; coordinator validation is required."
+            : "Synthetic historical inventory requires coordinator path/branch/recovery validation before resume.",
           worktreeIdentity: { path, branch, baseRef: parsed.baseline.commit, createdAt },
         };
         jobs.set(id, job);
@@ -313,6 +377,10 @@ export async function migrateStaleManifest(
     } catch (error) {
       result.ambiguous.push(`${item.path}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+  for (const source of manifestJobs.values()) {
+    if (!CANDIDATE_DISPOSITIONS.has(source.disposition) || matchedManifestJobs.has(source.id)) continue;
+    if (jobs.has(source.id)) result.ambiguous.push(`job ${source.id}: missing matching manifest worktree row`);
   }
   return result;
 }

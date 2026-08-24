@@ -8,6 +8,7 @@ import test from "node:test";
 import type { AgentJob } from "@neocode/protocol";
 import { auditWorktree, decideStaleCandidate, migrateStaleManifest, nominateStaleCandidate } from "./stale-candidates.js";
 import { WorktreeJanitor } from "./worktree-janitor.js";
+import { canAutomaticallyResume } from "./recovery.js";
 
 const exec = promisify(execFile);
 async function git(cwd: string, args: string[]) { return (await exec("git", args, { cwd })).stdout.trim(); }
@@ -88,10 +89,10 @@ test("still wanted explicitly resolves nomination and restores safe prior lifecy
 });
 
 test("dirty diff is archived before supersession without rewriting immutable completion history", async () => {
-  const { root, path, job } = await fixture();
+  const { root, path, base, job } = await fixture();
   job.completion = { head: "immutable-completion", finishedAt: 7 };
   const completion = structuredClone(job.completion);
-  await nominateStaleCandidate(job, nomination, { workspaceRoot: root, now: () => 10 });
+  await nominateStaleCandidate(job, { ...nomination, suspectedReplacementCommit: base }, { workspaceRoot: root, now: () => 10 });
   await decideStaleCandidate(job, "confirm_superseded", { workspaceRoot: root, now: () => 20 });
   assert.equal(job.integration?.status, "superseded");
   assert.deepEqual(job.completion, completion);
@@ -109,8 +110,8 @@ test("dirty diff is archived before supersession without rewriting immutable com
 });
 
 test("confirmation rejects same-porcelain dirty content changes", async () => {
-  const { root, path, job } = await fixture();
-  await nominateStaleCandidate(job, nomination, { workspaceRoot: root });
+  const { root, path, base, job } = await fixture();
+  await nominateStaleCandidate(job, { ...nomination, suspectedReplacementCommit: base }, { workspaceRoot: root });
   const original = job.staleCandidate?.audit.contentFingerprint;
   await writeFile(join(path, "base.txt"), "different content with the same porcelain row\n");
   await writeFile(join(path, "untracked.bin"), Buffer.from([9, 8, 7]));
@@ -120,16 +121,16 @@ test("confirmation rejects same-porcelain dirty content changes", async () => {
 });
 
 test("archive creation rejects traversal-shaped durable job ids", async () => {
-  const { root, job } = await fixture();
-  await nominateStaleCandidate(job, nomination, { workspaceRoot: root });
+  const { root, base, job } = await fixture();
+  await nominateStaleCandidate(job, { ...nomination, suspectedReplacementCommit: base }, { workspaceRoot: root });
   job.id = "../escape";
   await assert.rejects(decideStaleCandidate(job, "confirm_superseded", { workspaceRoot: root }), /Unsafe job id/);
   assert.equal(job.integration, undefined);
 });
 
 test("confirmation fails closed if checkout changed after nomination", async () => {
-  const { root, path, job } = await fixture();
-  await nominateStaleCandidate(job, nomination, { workspaceRoot: root });
+  const { root, path, base, job } = await fixture();
+  await nominateStaleCandidate(job, { ...nomination, suspectedReplacementCommit: base }, { workspaceRoot: root });
   await writeFile(join(path, "later.txt"), "later\n");
   await assert.rejects(decideStaleCandidate(job, "confirm_superseded", { workspaceRoot: root }), /changed after nomination/);
   assert.notEqual(job.integration?.status, "superseded");
@@ -204,4 +205,117 @@ test("manifest imports content-equivalent classifications provisionally and leav
   assert.equal(conflicted.synthetic, 0);
   assert.equal(conflicted.nominated, 0);
   assert.match(conflicted.ambiguous[0] || "", /classification mismatch/);
+});
+
+test("supersession requires replacement authority and accepts verified commit or merged job evidence", async () => {
+  const absent = await fixture(false);
+  await nominateStaleCandidate(absent.job, { reason: nomination.reason, evidenceSource: nomination.evidenceSource }, { workspaceRoot: absent.root });
+  await assert.rejects(decideStaleCandidate(absent.job, "confirm_superseded", { workspaceRoot: absent.root }), /Specific replacement/);
+  assert.equal(absent.job.integration, undefined);
+
+  const unverified = await fixture(false);
+  await nominateStaleCandidate(unverified.job, { ...nomination, suspectedReplacementCommit: "deadbeef" }, { workspaceRoot: unverified.root });
+  await assert.rejects(decideStaleCandidate(unverified.job, "confirm_superseded", { workspaceRoot: unverified.root }), /unknown revision|Needed a single revision|ambiguous argument/i);
+  assert.equal(unverified.job.integration, undefined);
+
+  const clean = await fixture(false);
+  await nominateStaleCandidate(clean.job, { ...nomination, suspectedReplacementCommit: clean.base }, { workspaceRoot: clean.root });
+  await decideStaleCandidate(clean.job, "confirm_superseded", { workspaceRoot: clean.root });
+  assert.equal(clean.job.staleCandidate?.replacementAuthority?.kind, "commit");
+  assert.equal(clean.job.staleCandidate?.replacementAuthority?.replacementCommit, clean.base);
+  assert.equal(clean.job.staleCandidate?.archive?.dirty, false);
+  assert.equal(clean.job.staleCandidate?.archive?.diffSha256.length, 64, "clean decisions still receive an explicit empty archive packet");
+
+  const byJob = await fixture(false);
+  const replacement: AgentJob = {
+    ...structuredClone(byJob.job), id: "replacement", branch: "neocode/replacement", worktree: byJob.path,
+    integration: { status: "merged", verifiedAt: 99, targetRef: "main", targetHead: byJob.base, completionHead: byJob.base },
+  };
+  await nominateStaleCandidate(byJob.job, { reason: nomination.reason, evidenceSource: nomination.evidenceSource, suspectedReplacementJobId: replacement.id }, { workspaceRoot: byJob.root });
+  await decideStaleCandidate(byJob.job, "confirm_superseded", { workspaceRoot: byJob.root, jobs: new Map([[replacement.id, replacement]]) });
+  assert.equal(byJob.job.staleCandidate?.replacementAuthority?.kind, "job");
+  assert.equal(byJob.job.integration?.supersededByJobId, replacement.id);
+
+  const badJob = await fixture(false);
+  const unmerged = { ...replacement, integration: { status: "unmerged" as const } };
+  await nominateStaleCandidate(badJob.job, { reason: nomination.reason, evidenceSource: nomination.evidenceSource, suspectedReplacementJobId: unmerged.id }, { workspaceRoot: badJob.root });
+  await assert.rejects(decideStaleCandidate(badJob.job, "confirm_superseded", { workspaceRoot: badJob.root, jobs: new Map([[unmerged.id, unmerged]]) }), /merged_verified/);
+});
+
+test("still wanted routes failed and cancelled execution history through a manual needs-attention gate", async () => {
+  for (const status of ["failed", "cancelled"] as const) {
+    const value = await fixture();
+    value.job.status = status;
+    value.job.completion = { head: value.base, finishedAt: 4 };
+    const completion = structuredClone(value.job.completion);
+    await nominateStaleCandidate(value.job, nomination, { workspaceRoot: value.root });
+    await decideStaleCandidate(value.job, "still_wanted", { workspaceRoot: value.root });
+    assert.equal(value.job.status, "needs_attention");
+    assert.equal(value.job.recoverable, false);
+    assert.match(value.job.recoveryIssue || "", /coordinator path\/branch\/recovery validation/);
+    assert.deepEqual(value.job.completion, completion);
+  }
+});
+
+test("existing-job migration rejects manifest HEAD, dirty, and exact-content drift and reports missing rows", async () => {
+  const value = await fixture();
+  const initial = await auditWorktree(value.job, { workspaceRoot: value.root });
+  const manifestPath = join(value.root, "audit-existing.json");
+  const row = {
+    path: value.path, branch: value.job.branch, head: value.base, valid: true, dirty: true, statusLines: 2,
+    disposition: "superseded duplicate", evidence: "Replacement commit abcdef12 contains equivalent behavior.",
+    trackedDiffSha256: initial.trackedDiffSha256, contentFingerprint: initial.contentFingerprint, untrackedFiles: initial.untrackedFiles,
+  };
+  const source = { id: value.job.id, title: value.job.title, branch: value.job.branch, path: value.path, disposition: "superseded duplicate", evidence: "Job evidence." };
+  const write = async (worktrees: unknown[]) => writeFile(manifestPath, JSON.stringify({ schemaVersion: 1, generatedAt: "2026-08-23T00:00:00Z", baseline: { ref: "main", commit: value.base }, worktrees, jobs: [source] }));
+
+  await write([{ ...row, head: "0000000000000000000000000000000000000000" }]);
+  let result = await migrateStaleManifest(manifestPath, new Map([[value.job.id, structuredClone(value.job)]]), { workspaceRoot: value.root });
+  assert.match(result.ambiguous[0] || "", /live HEAD\/dirty\/content audit/);
+  await write([{ ...row, dirty: false }]);
+  result = await migrateStaleManifest(manifestPath, new Map([[value.job.id, structuredClone(value.job)]]), { workspaceRoot: value.root });
+  assert.match(result.ambiguous[0] || "", /live HEAD\/dirty\/content audit/);
+  await writeFile(join(value.path, "base.txt"), "same porcelain, changed bytes\n");
+  await write([row]);
+  result = await migrateStaleManifest(manifestPath, new Map([[value.job.id, structuredClone(value.job)]]), { workspaceRoot: value.root });
+  assert.match(result.ambiguous[0] || "", /live HEAD\/dirty\/content audit/);
+  assert.equal(result.nominated, 0);
+
+  await write([]);
+  result = await migrateStaleManifest(manifestPath, new Map([[value.job.id, structuredClone(value.job)]]), { workspaceRoot: value.root });
+  assert.match(result.ambiguous[0] || "", /missing matching manifest worktree/);
+});
+
+test("intentionally-cancelled synthetic inventory never becomes autonomously recoverable", async () => {
+  const value = await fixture(false);
+  const manifestPath = join(value.root, "audit-cancelled.json");
+  await writeFile(manifestPath, JSON.stringify({
+    schemaVersion: 1, generatedAt: "2026-08-23T00:00:00Z", baseline: { ref: "main", commit: value.base },
+    worktrees: [{ path: value.path, branch: value.job.branch, head: value.base, valid: true, dirty: false, statusLines: 0,
+      disposition: "intentionally cancelled", evidence: "Legacy Lua target was deliberately removed and replacement commit abcdef12 exists." }], jobs: [],
+  }));
+  const jobs = new Map<string, AgentJob>();
+  const result = await migrateStaleManifest(manifestPath, jobs, { workspaceRoot: value.root });
+  assert.equal(result.synthetic, 1);
+  const synthetic = jobs.get(value.job.id)!;
+  assert.equal(synthetic.recoverable, false);
+  await decideStaleCandidate(synthetic, "still_wanted", { workspaceRoot: value.root });
+  assert.equal(synthetic.recoverable, false);
+  assert.equal(canAutomaticallyResume(synthetic), false);
+  assert.match(synthetic.recoveryIssue || "", /never automatically recoverable|validation/);
+});
+
+test("janitor refuses confirmed stale state without archive and replacement authority", async () => {
+  const value = await fixture(false);
+  value.job.status = "completed";
+  value.job.completion = { head: value.base, finishedAt: 1 };
+  value.job.worktreeIdentity = { path: value.path, branch: value.job.branch, baseRef: value.base, createdAt: 1 };
+  value.job.integration = { status: "superseded", disposition: "superseded" };
+  value.job.staleCandidate = {
+    state: "superseded", nominatedAt: 1, nominatedBy: "coordinator", reason: nomination.reason, evidenceSource: nomination.evidenceSource,
+    suspectedReplacementCommit: value.base, confirmation: "confirmed_superseded", resolvedAt: 2, resumeState: { status: "completed" },
+    audit: await auditWorktree(value.job, { workspaceRoot: value.root }),
+  };
+  assert.equal(await new WorktreeJanitor(value.root, { graceMs: 0, targetRef: "main" }).review(value.job), false);
+  assert.match(value.job.cleanup?.status === "refused" ? value.job.cleanup.detail : "", /lacks archive or authoritative replacement/);
 });

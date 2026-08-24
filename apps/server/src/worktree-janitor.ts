@@ -108,8 +108,9 @@ export class WorktreeJanitor {
 
     const targetHead = await this.git(["rev-parse", this.options.targetRef], this.workspaceRoot);
     const superseded = integration === "superseded";
-    if (superseded && job.staleCandidate?.confirmation === "confirmed_superseded" && !job.staleCandidate.archive) {
-      return refusal(job, "missing_durable_identity", "Confirmed stale work has no durable evidence archive.", checkedAt);
+    if (superseded && job.staleCandidate?.confirmation === "confirmed_superseded"
+      && (!job.staleCandidate.archive || !job.staleCandidate.replacementAuthority)) {
+      return refusal(job, "missing_durable_identity", "Confirmed stale work lacks archive or authoritative replacement evidence.", checkedAt);
     }
     let mergeMethod: CleanupEvidence["mergeMethod"] = superseded
       ? "superseded-branch-retained" : commits.length ? "commit-ancestry" : "no-changes";

@@ -311,7 +311,7 @@ export class Orchestrator {
     if (await this.pathExists(manifestPath)) {
       try {
         const result = await migrateStaleManifest(manifestPath, this.jobs, {
-          workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()),
+          workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()), jobs: this.jobs, targetRef: this.maintenanceConfig.targetRef,
         });
         this.maintenance.staleMigration = { source: manifestPath, at: Date.now(), ...result };
       } catch (error) {
@@ -1084,7 +1084,7 @@ export class Orchestrator {
 
   async nominateStale(jobId: string, input: { reason: string; evidenceSource: string; suspectedReplacementJobId?: string; suspectedReplacementCommit?: string }): Promise<AgentJob> {
     const job = this.requireJob(jobId);
-    await nominateStaleCandidate(job, input, { workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()) });
+    await nominateStaleCandidate(job, input, { workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()), jobs: this.jobs, targetRef: this.maintenanceConfig.targetRef });
     this.sweepJobIds.delete(job.id);
     this.suppressStaleWakes(job.id);
     this.publishJob(job);
@@ -1094,7 +1094,7 @@ export class Orchestrator {
 
   async decideStale(jobId: string, decision: "confirm_superseded" | "still_wanted"): Promise<AgentJob> {
     const job = this.requireJob(jobId);
-    await decideStaleCandidate(job, decision, { workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()) });
+    await decideStaleCandidate(job, decision, { workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()), jobs: this.jobs, targetRef: this.maintenanceConfig.targetRef });
     this.publishJob(job);
     await this.stateStore.flush();
     if (decision === "still_wanted") this.scheduleBacklogSweep();
@@ -1112,7 +1112,7 @@ export class Orchestrator {
 
   async migrateStaleAudit() {
     const result = await migrateStaleManifest(join(this.cwd, "docs", "worktree-backlog-manifest-20260823.json"), this.jobs, {
-      workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()),
+      workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()), jobs: this.jobs, targetRef: this.maintenanceConfig.targetRef,
     });
     for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") this.suppressStaleWakes(job.id);
     this.maintenance.staleMigration = {

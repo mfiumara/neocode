@@ -275,6 +275,16 @@ export interface JobCompletion {
   finishedAt: number;
 }
 
+export interface StaleReplacementAuthority {
+  kind: "commit" | "job";
+  verifiedAt: number;
+  targetRef: string;
+  targetHead: string;
+  replacementCommit: string;
+  replacementJobId?: string;
+  replacementJobVerifiedAt?: number;
+}
+
 export interface StaleCandidateArchive {
   archivedAt: number;
   /** Workspace-relative paths; archive files never enter transcripts or public URLs. */
@@ -305,6 +315,7 @@ export interface StaleCandidate {
     contentFingerprint: string;
     untrackedFiles: Array<{ path: string; sha256: string; bytes: number }>;
   };
+  replacementAuthority?: StaleReplacementAuthority;
   archive?: StaleCandidateArchive;
 }
 

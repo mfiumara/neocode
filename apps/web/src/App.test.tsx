@@ -240,7 +240,7 @@ test("stale evidence is accessible, exact evidence is collapsed/copyable, and de
   stale.id = "stale-id";
   stale.staleCandidate = {
     state: "pending", nominatedAt: 1, nominatedBy: "manifest-migration",
-    reason: "Dirty historical implementation appears replaced by the current model picker.",
+    reason: "superseded duplicate: /secret/worktree replaced by abcdef1234567890 and patch-id fedcba9876543210",
     suspectedReplacementJobId: "replacement-job", suspectedReplacementCommit: "abcdef123456",
     evidenceSource: "docs/audit.json", confirmation: "pending", resumeState: { status: "interrupted", recoverable: true },
     audit: { path: "/safe/.worktrees/stale", branch: "neocode/stale", head: "012345", dirty: true, porcelain: " M secret-name.txt", trackedDiffSha256: "tracked-sha", contentFingerprint: "fingerprint", untrackedFiles: [] },
@@ -252,7 +252,7 @@ test("stale evidence is accessible, exact evidence is collapsed/copyable, and de
   assert.match(evidence, /<details><summary>Exact audit, replacement, and archive evidence<\/summary>/);
   assert.match(evidence, /Copy exact evidence/);
   const summary = evidence.split("<details>")[0] || "";
-  assert.doesNotMatch(summary, /replacement-job|abcdef123456|\/safe\/\.worktrees/);
+  assert.doesNotMatch(summary, /replacement-job|abcdef123456|fedcba9876543210|\/secret\/worktree|\/safe\/\.worktrees/);
   for (const exact of ["stale-id", "abcdef123456", "/safe/.worktrees/stale", "secret-name.txt", "tracked-sha", "fingerprint"]) assert.ok(evidence.includes(exact));
   const controls = renderToStaticMarkup(<StaleDecisionControls job={stale} send={() => true} />);
   assert.match(controls, /role="group" aria-label="Stale candidate decision"/);
