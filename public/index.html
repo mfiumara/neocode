@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#090b10" />
+    <title>Neocode · repository graph</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="mark">N</span>
+        <div>
+          <strong id="repo">Neocode</strong><small>repository graph</small>
+        </div>
+      </div>
+      <div class="stats" id="stats"></div>
+      <div class="actions">
+        <label class="search"
+          ><span>/</span
+          ><input
+            id="search"
+            type="search"
+            placeholder="Find a branch or person"
+            autocomplete="off"
+        /></label>
+        <button id="worktrees" type="button">worktrees</button>
+        <button id="refresh" type="button" aria-label="Refresh">↻</button>
+      </div>
+    </header>
+    <main>
+      <section id="viewport" aria-label="Repository tree">
+        <svg id="graph" role="tree"></svg>
+      </section>
+      <aside id="details" aria-live="polite"></aside>
+    </main>
+    <footer>
+      <span><kbd>h</kbd><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd> navigate</span
+      ><span><kbd>/</kbd> find</span><span><kbd>w</kbd> worktrees</span
+      ><span><kbd>?</kbd> help</span>
+    </footer>
+    <dialog id="help">
+      <button class="close" aria-label="Close">×</button>
+      <h2>Move like Neovim</h2>
+      <div class="help-grid">
+        <kbd>h</kbd><span>parent</span><kbd>j / k</kbd
+        ><span>next / previous</span><kbd>l</kbd><span>first child</span
+        ><kbd>gg / G</kbd><span>root / last</span><kbd>/ / n</kbd
+        ><span>find / next result</span><kbd>w</kbd><span>toggle worktrees</span
+        ><kbd>r</kbd><span>refresh Git</span><kbd>esc</kbd
+        ><span>clear / close</span>
+      </div>
+    </dialog>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

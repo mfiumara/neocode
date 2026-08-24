@@ -1,26 +1,10 @@
 {
   "name": "neocode",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
   "scripts": {
-    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @neocode/server\" \"npm run dev -w @neocode/web\"",
-    "dev:server": "npm run dev -w @neocode/server",
-    "dev:server:verbose": "NEOCODE_VERBOSE=1 npm run dev -w @neocode/server",
-    "dev:web": "npm run dev -w @neocode/web",
-    "test": "npm run test:unit && npm run test:e2e",
-    "test:unit": "npm run test --workspaces --if-present",
-    "test:e2e": "npm exec --workspace @neocode/web playwright install chromium && npm run test:e2e -w @neocode/web",
-    "check:git": "node scripts/check-git-state.mjs && node scripts/verify-lifecycle-evidence-commit.mjs",
-    "check": "npm run check:git && npm run check --workspaces --if-present",
-    "build": "npm run build --workspaces --if-present"
-  },
-  "devDependencies": {
-    "concurrently": "^9.2.1",
-    "typescript": "^5.9.2"
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "test": "node --test"
   }
 }
