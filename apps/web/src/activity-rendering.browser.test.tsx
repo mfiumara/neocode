@@ -52,6 +52,14 @@ function worker(status: JobStatus): AgentJob {
   };
 }
 
+function reviewingWorker(): AgentJob {
+  const value = worker("completed");
+  value.handoff = { report: "done", requirements: [], diffSha256: "hash", branch: value.branch, worktree: value.worktree, tests: [], risks: [], round: 1, createdAt: 2 };
+  value.integration = { status: "reviewing" };
+  value.review = { hookToken: "hook", status: "judging", attempt: 1, targetBranch: "main", updatedAt: 3, transitions: [{ status: "judging", at: 3 }] };
+  return value;
+}
+
 function snapshot(coordinatorStatus: AppSnapshot["coordinator"]["status"], jobs: AgentJob[] = []): AppSnapshot {
   return {
     cwd: "/tmp/activity-rendering",
@@ -130,6 +138,17 @@ test("transcript activity renders only while its coordinator or worker is active
       await receive({ type: "job_updated", job: worker("running") });
       assertActivityVisible(true);
     }
+
+    // A socket opening is not enough to trust cached transient review phases.
+    // The panel becomes active only after the fresh snapshot synchronizes activity.
+    await receive({ type: "snapshot", snapshot: snapshot("idle", [reviewingWorker()]) });
+    assert.ok(document.querySelector('.review-pipeline [aria-current="step"]'));
+    await act(async () => socket.onclose?.());
+    assert.equal(document.querySelector('.review-pipeline [aria-current="step"]'), null);
+    await act(async () => socket.onopen?.());
+    assert.equal(document.querySelector('.review-pipeline [aria-current="step"]'), null);
+    await receive({ type: "snapshot", snapshot: snapshot("idle", [reviewingWorker()]) });
+    assert.ok(document.querySelector('.review-pipeline [aria-current="step"]'));
 
     await act(async () => root.unmount());
   } finally {

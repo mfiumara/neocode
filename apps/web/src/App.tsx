@@ -1009,7 +1009,7 @@ export function App() {
               }}
             >
               <div className="transcript-content" ref={transcriptContentRef}>
-              {activeJob && <ReviewStatusPanel job={activeJob} activityReady={connected} />}
+              {activeJob && <ReviewStatusPanel job={activeJob} activityReady={activityReady} />}
               {activeJob?.recoveryIssue && <div className="recovery-notice">{activeJob.recoveryIssue}</div>}
               {!rows.length && (
                 <div className="empty-view">

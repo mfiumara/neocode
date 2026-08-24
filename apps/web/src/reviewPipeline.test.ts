@@ -111,6 +111,64 @@ test("latest judge survives remediation and superseded outcomes remain terminal"
   assert.equal(stage(value, "verification").summary, "Superseded terminal outcome");
 });
 
+test("major approval, repair, integration, and terminal states have production guidance", () => {
+  const cases: Array<[ReviewStatus, string, "waiting" | "active" | "complete"]> = [
+    ["approved", "Approved — merge not started", "waiting"],
+    ["merge_queued", "Approved — integration queued", "waiting"],
+    ["merging", "Integrating now", "active"],
+    ["post_merge_ci", "Integrating now", "active"],
+    ["merged", "Verified outcome", "complete"],
+    ["feedback_sent", "Repair requested", "waiting"],
+    ["worker_resumed", "Repairing feedback", "waiting"],
+  ];
+  for (const [status, headline, tone] of cases) {
+    const value = job(status);
+    if (status === "merged") value.integration = { status: "merged", verifiedAt: 4_000 };
+    const pipeline = reviewPipeline(value);
+    assert.equal(pipeline.headline, headline, status);
+    if (status === "merging") assert.equal(pipeline.stages.find((item) => item.id === "merge")?.tone, tone);
+    if (status === "post_merge_ci" || status === "merged") assert.equal(pipeline.stages.find((item) => item.id === "verification")?.tone, tone);
+  }
+});
+
+test("interrupted judge infrastructure evidence is surfaced without inventing a verdict", () => {
+  const value = job("blocked");
+  value.review!.transitions = [{ status: "judging", at: 3_000 }, { status: "blocked", at: 4_000 }];
+  value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "infra", actions: [{ id: "infra", failureClass: "infrastructure", fingerprint: "f", state: "pending", attempt: 1, maxAttempts: 2, createdAt: 4_000, updatedAt: 4_000, evidence: { detail: "Judge process interrupted" } }] };
+  assert.match(stage(value, "judge").summary, /Interrupted: Judge process interrupted/);
+  assert.equal(stage(value, "judge").tone, "blocked");
+  assert.doesNotMatch(stage(value, "judge").summary, /has not started/);
+});
+
+test("pending conflict requests action while repairing conflict reports active repair", () => {
+  const conflict = (state: "pending" | "repairing", top: AgentJob["status"] = "completed") => {
+    const value = job("conflict", top); value.integration = { status: "conflicted" }; value.review!.error = "Worker rebase onto main conflicts";
+    value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "conflict", actions: [{ id: "conflict", failureClass: "conflict", fingerprint: "f", state, attempt: 1, maxAttempts: 2, createdAt: 3_000, updatedAt: 4_000, evidence: { detail: "rebase conflict" } }] };
+    return value;
+  };
+  assert.match(reviewPipeline(conflict("pending")).guidance, /awaiting coordinator action/i);
+  assert.doesNotMatch(reviewPipeline(conflict("pending")).guidance, /worker is resolving/i);
+  assert.match(reviewPipeline(conflict("repairing")).guidance, /worker is resolving/i);
+  assert.match(reviewPipeline(conflict("repairing", "running")).guidance, /same worktree/i);
+});
+
+test("target advancement and a fresh handoff invalidate an older prepared base", () => {
+  const advanced = job("handoff_received"); advanced.review!.reviewBaseRef = "old-main"; advanced.review!.judgeHandoffRound = 1;
+  advanced.handoff!.round = 2; advanced.review!.transitions = [{ status: "handoff_received", at: 4_000, detail: "Main advanced to new-main; prior approval invalidated" }];
+  assert.equal(stage(advanced, "preparation").tone, "waiting");
+  assert.match(stage(advanced, "preparation").summary, /fresh approval required/i);
+  assert.match(reviewPipeline(advanced).guidance, /rebase and preparation plus fresh approval/i);
+});
+
+test("fresh active rounds label retained checks and verdicts as historical", () => {
+  const ci = job("ci_running"); ci.review!.ci = [{ command: "old", ok: false, exitCode: 1, durationMs: 20, output: "old" }];
+  assert.match(stage(ci, "ci").summary, /^Historical prior-round evidence/);
+  assert.equal(stage(ci, "ci").durationMs, undefined);
+  const judging = job("judging"); judging.review!.judge = verdict("Old rejection");
+  assert.match(stage(judging, "judge").summary, /^Historical prior-round verdict/);
+  assert.equal(stage(judging, "judge").tone, "active");
+});
+
 test("top-level authority and reconnect suppress stale active phases while recovered work wins", () => {
   const interrupted = job("judging", "interrupted");
   assert.equal(reviewPipeline(interrupted).active, false);

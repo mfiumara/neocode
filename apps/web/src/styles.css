@@ -254,7 +254,7 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .pipeline-marker { z-index: 1; width: 9px; height: 9px; margin-top: 1px; border: 2px solid var(--line); border-radius: 50%; background: var(--panel); }
 .pipeline-marker.complete { border-color: var(--green); background: var(--green); }
 .pipeline-marker.failed, .pipeline-marker.blocked { border-color: var(--red); }
-.pipeline-marker.active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); animation: pulse 1.5s ease-in-out infinite; }
+.pipeline-marker.active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); animation: neocode-pulse 1.5s ease-in-out infinite; }
 .review-pipeline strong, .review-pipeline small { display: block; }
 .review-pipeline strong { position: relative; color: var(--text); font-size: 9px; font-weight: 500; }
 .review-pipeline small { margin-top: 3px; color: var(--dim); line-height: 1.35; }
@@ -262,6 +262,7 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
 .review-pipeline li.failed small, .review-pipeline li.blocked small { color: var(--red); }
 .review-pipeline time { grid-column: 2; color: var(--dim); font-size: 8px; }
 .review-panel > .technical-evidence { margin-top: 10px; }
+@media (prefers-reduced-motion: reduce) { .pipeline-marker.active { animation: none; } }
 
 .review-view { min-height: 0; overflow: auto; padding: 20px max(24px, calc((100% - 900px) / 2)) 70px; font-size: 11px; line-height: 1.5; }
 .review-view > header { display: flex; gap: 12px; align-items: center; color: var(--muted); }
