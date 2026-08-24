@@ -56,7 +56,7 @@ async function authorizedWorktree(workspaceRoot: string, candidatePath: string):
 }
 
 async function dirtyContentAudit(path: string, porcelain: string) {
-  const trackedPatch = await gitRaw(path, ["diff", "--binary", "HEAD", "--"]);
+  const trackedPatch = await gitRaw(path, ["diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--"]);
   const untrackedRaw = await git(path, ["ls-files", "--others", "--exclude-standard", "-z"]);
   const untrackedFiles: StaleCandidateArchive["untrackedFiles"] = [];
   for (const name of untrackedRaw.split("\0").filter(Boolean).sort()) {
@@ -145,7 +145,7 @@ async function archiveDirtyEvidence(job: AgentJob, context: StaleContext): Promi
   const archiveRoot = resolve(authorizedArchiveRoot, job.id, String(candidate.nominatedAt));
   if (!archiveRoot.startsWith(authorizedArchiveRoot + sep)) throw new Error("Stale archive path escaped its authorized root.");
   await mkdir(archiveRoot, { recursive: true });
-  const trackedPatch = await gitRaw(audit.path, ["diff", "--binary", "HEAD", "--"]);
+  const trackedPatch = await gitRaw(audit.path, ["diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--"]);
   if (sha(trackedPatch) !== audit.trackedDiffSha256) throw new Error("Tracked content changed while archiving stale evidence.");
   const patches = [trackedPatch];
   const untrackedFiles = audit.untrackedFiles;
@@ -154,7 +154,7 @@ async function archiveDirtyEvidence(job: AgentJob, context: StaleContext): Promi
     if (!file.startsWith(audit.path + sep)) throw new Error("Unsafe untracked path in candidate checkout.");
     const bytes = await readFile(file);
     if (bytes.length !== item.bytes || sha(bytes) !== item.sha256) throw new Error("Untracked content changed while archiving stale evidence.");
-    patches.push(await gitRaw(audit.path, ["diff", "--binary", "--no-index", "--", "/dev/null", file], true));
+    patches.push(await gitRaw(audit.path, ["diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", file], true));
   }
   const evidence = {
     schemaVersion: 1, jobId: job.id, nominatedAt: candidate.nominatedAt,
