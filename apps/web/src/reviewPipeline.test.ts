@@ -174,8 +174,7 @@ test("current-round verdict published during judging is terminal evidence, not a
     const value = job("judging"); value.review!.judgeHandoffRound = 1; value.review!.judge = verdict(approved ? "Current approval" : "Current rejection", approved);
     const pipeline = reviewPipeline(value);
     assert.equal(stage(value, "judge").tone, approved ? "complete" : "failed");
-    assert.match(stage(value, "judge").summary, new RegExp(approved ? "Approved current handoff round" : "Rejected; implementation changes required"));
-    assert.doesNotMatch(stage(value, "judge").summary, /Current approval|Current rejection/);
+    assert.match(stage(value, "judge").summary, new RegExp(approved ? "Current approved conclusion — Current approval" : "Current rejected conclusion — Current rejection"));
     assert.equal(pipeline.stages.some((item) => item.tone === "active"), false);
     assert.match(pipeline.guidance, /awaiting durable coordinator transition/i);
   }
@@ -213,8 +212,7 @@ test("latest judge survives remediation and superseded outcomes remain terminal"
   ] };
   assert.equal(latestJudgeEvidence(value), undefined);
   assert.equal(latestHistoricalJudgeEvidence(value), preserved);
-  assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*rejected/i);
-  assert.doesNotMatch(stage(value, "judge").summary, /Fresh approval required/);
+  assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*rejected.*Fresh approval required/i);
   assert.equal(stage(value, "judge").tone, "waiting");
 
   value.integration = { status: "superseded" };
@@ -234,8 +232,7 @@ test("fresh handoff and pre-judge CI never promote resolved prior remediation ve
     value.review!.reviewBaseRef = "base";
     value.review!.remediation = { maxAttempts: 2, rounds: {}, actions: [{ id: "old", failureClass: "judge_changes", fingerprint: "f", state: "resolved", attempt: 1, maxAttempts: 2, createdAt: 2, updatedAt: 3, evidence: { detail: "old rejection", judge: verdict("Prior rejected verdict") } }] };
     assert.equal(latestJudgeEvidence(value), undefined);
-    assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*rejected/i);
-    assert.doesNotMatch(stage(value, "judge").summary, /Prior rejected verdict/i);
+    assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*rejected.*Prior rejected verdict/i);
     assert.equal(stage(value, "judge").tone, "waiting");
   }
 });
@@ -314,8 +311,7 @@ test("fresh active rounds label retained checks and verdicts as historical", () 
   assert.match(stage(ci, "ci").summary, /^Historical prior-round evidence/);
   assert.equal(stage(ci, "ci").durationMs, undefined);
   const judging = job("judging"); judging.review!.judge = verdict("Old rejection");
-  assert.match(stage(judging, "judge").summary, /Latest prior-round verdict.*rejected/i);
-  assert.doesNotMatch(stage(judging, "judge").summary, /Old rejection/i);
+  assert.match(stage(judging, "judge").summary, /Latest prior-round verdict.*rejected.*Old rejection/i);
   assert.equal(stage(judging, "judge").tone, "active");
 });
 

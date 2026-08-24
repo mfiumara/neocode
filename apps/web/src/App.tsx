@@ -1336,9 +1336,9 @@ function reviewTechnicalEvidence(job: AgentJob): string {
     review?.error && `review error\n${review.error}`,
     ...(review?.remediation?.actions || []).map((action) => `remediation action\n${JSON.stringify(action, null, 2)}`),
     ...(review?.ci || []).map((check) => `CI command: ${check.command}\nexit ${check.exitCode}\n${check.output}`),
-    latestJudgeEvidence(job) && `current judge diff sha256 ${latestJudgeEvidence(job)!.diffSha256}\nmodel ${latestJudgeEvidence(job)!.model.provider}/${latestJudgeEvidence(job)!.model.id}\n${latestJudgeEvidence(job)!.raw}`,
+    latestJudgeEvidence(job) && `current judge summary\n${latestJudgeEvidence(job)!.summary}\ndiff sha256 ${latestJudgeEvidence(job)!.diffSha256}\nmodel ${latestJudgeEvidence(job)!.model.provider}/${latestJudgeEvidence(job)!.model.id}\nraw verdict\n${latestJudgeEvidence(job)!.raw}`,
     latestHistoricalJudgeEvidence(job) && !review?.remediation?.actions.some((action) => action.evidence.judge === latestHistoricalJudgeEvidence(job))
-      ? `historical prior-round judge diff sha256 ${latestHistoricalJudgeEvidence(job)!.diffSha256}\nmodel ${latestHistoricalJudgeEvidence(job)!.model.provider}/${latestHistoricalJudgeEvidence(job)!.model.id}\n${latestHistoricalJudgeEvidence(job)!.raw}` : undefined,
+      ? `historical prior-round judge summary\n${latestHistoricalJudgeEvidence(job)!.summary}\ndiff sha256 ${latestHistoricalJudgeEvidence(job)!.diffSha256}\nmodel ${latestHistoricalJudgeEvidence(job)!.model.provider}/${latestHistoricalJudgeEvidence(job)!.model.id}\nraw verdict\n${latestHistoricalJudgeEvidence(job)!.raw}` : undefined,
     review?.mergeCommit && `merge commit ${review.mergeCommit}`,
     ...(review?.postMergeCi || []).map((check) => `Post-merge CI command: ${check.command}\nexit ${check.exitCode}\n${check.output}`),
   ].filter(Boolean);

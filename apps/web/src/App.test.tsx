@@ -131,15 +131,17 @@ test("compact review panel has timeline semantics, check counts, and collapsed t
     { command: "npm run test", ok: true, exitCode: 0, durationMs: 10, output: "secret diagnostic" },
     { command: "npm run check", ok: false, exitCode: 1, durationMs: 20, output: "type diagnostic" },
   ];
+  value.handoff = { report: "done", requirements: [], diffSha256: "exacthash", branch: value.branch, worktree: value.worktree, tests: [], risks: [], round: 1, createdAt: 2 };
+  value.review!.judgeHandoffRound = 1;
   value.review!.judge = { approved: false, summary: "One requirement remains", requirements: [], model: { provider: "pi", id: "judge" }, diffSha256: "exacthash", raw: "{\"approved\":false}" };
   const markup = renderToStaticMarkup(<ReviewStatusPanel job={value} activityReady />);
 
   assert.match(markup, /aria-label="Worker review progress"/);
-  assert.match(markup, /aria-current="step"/);
+  assert.doesNotMatch(markup, /aria-current="step"/, "published current verdict settles live judge activity");
   assert.match(markup, /1\/2 product checks passed/);
-  assert.match(markup, /Latest prior-round verdict.*rejected/i);
-  assert.doesNotMatch(markup.split('<details class="technical-evidence">')[0]!, /One requirement remains/);
-  assert.match(markup, /historical prior-round judge diff sha256 exacthash/);
+  assert.match(markup, /Current rejected conclusion.*One requirement remains/i);
+  assert.match(markup.split('<details class="technical-evidence">')[0]!, /One requirement remains/);
+  assert.match(markup, /current judge summary.*One requirement remains.*diff sha256 exacthash/s);
   assert.match(markup, /<details class="technical-evidence">/);
   assert.match(markup, /Technical review evidence/);
   assert.match(markup, /npm run test/);
@@ -156,8 +158,8 @@ test("compact panel preserves remediation judge audit evidence after the current
     } },
   }] };
   const markup = renderToStaticMarkup(<ReviewStatusPanel job={value} />);
-  assert.match(markup, /Latest prior-round verdict.*rejected/i);
-  assert.doesNotMatch(markup.split('<details class="technical-evidence">')[0]!, /Durable remediation verdict/);
+  assert.match(markup, /Latest prior-round verdict.*rejected.*Durable remediation verdict/i);
+  assert.match(markup.split('<details class="technical-evidence">')[0]!, /Durable remediation verdict/);
   assert.match(markup, /opaque-action/);
   assert.match(markup, /npm test -- exact/);
   assert.match(markup, /nested diagnostic/);
@@ -184,6 +186,29 @@ test("primary review panel redacts arbitrary diagnostics while collapsed evidenc
     assert.ok(markup.includes(secret), `collapsed evidence omitted exact ${secret}`);
   }
   assert.match(primary, /Implementation checks requires coordinator action/);
+  assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
+});
+
+test("judge conclusion sanitizer preserves prose and collapses exact technical summary evidence", () => {
+  const value = sidebarJob("judging");
+  const sha1 = "1111111111111111111111111111111111111111";
+  const sha256 = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+  const path = "/private/tmp/exact-candidate/worktree";
+  const command = "npm test -- --exact-secret";
+  const opaqueId = "claim-550e8400-e29b-41d4-a716-446655440000";
+  const packet = `BASE=${sha1} HEAD=${sha256} PARENT=parent-token TREE=tree-token`;
+  const exactSummary = `One requirement remains; ${packet}; ${path}; ${command}; ${opaqueId}\nmultiline diagnostic exact-secret`;
+  value.handoff = { report: "done", requirements: [], diffSha256: sha256, branch: value.branch, worktree: value.worktree, tests: [], risks: [], round: 4, createdAt: 2 };
+  value.review!.judgeHandoffRound = 4;
+  value.review!.judge = { approved: false, summary: exactSummary, requirements: [], model: { provider: "pi", id: "judge" }, diffSha256: sha256, raw: `raw verdict ${exactSummary}` };
+  const markup = renderToStaticMarkup(<ReviewStatusPanel job={value} />);
+  const primary = markup.split('<details class="technical-evidence">')[0]!;
+  assert.match(primary, /Current rejected conclusion.*One requirement remains/i);
+  for (const technical of [sha1, sha256, path, command, opaqueId, packet, "multiline diagnostic exact-secret"]) {
+    assert.ok(!primary.includes(technical), `visible judge conclusion leaked ${technical}`);
+  }
+  assert.ok(markup.includes(exactSummary), "collapsed evidence retains the exact unmodified judge summary");
+  assert.match(markup, /raw verdict/);
   assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
 });
 

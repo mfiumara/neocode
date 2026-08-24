@@ -57,16 +57,30 @@ function interruptedJudgeAction(job: AgentJob) {
   const judgingAt = transitionAt(job, ["judging"]);
   return action?.failureClass === "infrastructure" && judgingAt !== undefined && action.updatedAt >= judgingAt ? action : undefined;
 }
-function judgeSummary(job: AgentJob, historical = false): string {
+function presentJudgeSummary(value: string): string {
+  // Verdict summaries are human-authored conclusions, but providers may append
+  // exact packets or diagnostics. Keep one bounded prose line and redact broad
+  // technical identifier classes; the original remains in collapsed evidence.
+  const firstLine = value.split(/\r?\n/, 1)[0]?.trim() || "";
+  const presented = firstLine
+    .replace(/\b(?:BASE|HEAD|PARENT|TREE|DIFF|SHA(?:1|256)?)=[^\s,;]+/gi, "[technical reference]")
+    .replace(/\b[0-9a-f]{40,64}\b/gi, "[reference]")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[identifier]")
+    .replace(/\b[a-z][a-z0-9_]*-[a-z0-9_-]{16,}\b/gi, "[identifier]")
+    .replace(/(?:[A-Za-z]:\\|\/)(?:[^\s,;:]+[\\/])*[^\s,;:]*/g, "[path]")
+    .replace(/\b(?:npm|pnpm|yarn|npx|git|node|bash|sh)\s+(?:run\s+)?[^,;]+/gi, "[command]")
+    .replace(/\s+/g, " ").trim();
+  if (!presented) return "Conclusion recorded; open technical evidence for the exact summary";
+  return presented.length <= 180 ? presented : `${presented.slice(0, 179).trimEnd()}…`;
+}
+
+function judgeSummary(job: AgentJob): string {
   const judge = latestJudgeEvidence(job);
-  if (judge) {
-    const summary = judge.approved ? "Approved current handoff round" : "Rejected; implementation changes required";
-    return historical ? `Historical prior-round verdict: ${summary}` : summary;
-  }
+  if (judge) return `Current ${judge.approved ? "approved" : "rejected"} conclusion — ${presentJudgeSummary(judge.summary)}`;
   if (interruptedJudgeAction(job)) return "Independent judge interrupted; coordinator recovery required";
   const historicalJudge = latestHistoricalJudgeEvidence(job);
   return historicalJudge
-    ? `Latest prior-round verdict — ${historicalJudge.approved ? "approved" : "rejected"}`
+    ? `Latest prior-round verdict — ${historicalJudge.approved ? "approved" : "rejected"}: ${presentJudgeSummary(historicalJudge.summary)}`
     : "Independent judge has not started for this handoff round";
 }
 
