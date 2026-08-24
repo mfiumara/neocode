@@ -46,6 +46,8 @@ test("stale decision buttons confirm explicitly and exact evidence copies from k
   const details = document.querySelector(".stale-evidence details");
   assert.ok(details && !details.hasAttribute("open"), "exact identifiers are collapsed by default");
   const summaryText = document.querySelector(".stale-evidence")!.textContent!.split("Exact audit")[0]!;
+  assert.match(summaryText, /Historical implementation has specific replacement evidence/);
+  assert.match(summaryText, /unresolved\/unverified replacement job/);
   assert.doesNotMatch(summaryText, /replacement-full-id|0123456789abcdef/);
   const copy = [...document.querySelectorAll("button")].find((button) => button.textContent === "Copy exact evidence")!;
   copy.focus(); assert.equal(document.activeElement, copy);

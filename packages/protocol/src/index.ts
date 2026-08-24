@@ -286,13 +286,20 @@ export interface StaleReplacementAuthority {
 }
 
 export interface StaleCandidateArchive {
+  schemaVersion: 1;
   archivedAt: number;
   /** Workspace-relative paths; archive files never enter transcripts or public URLs. */
+  archivePath: string;
   patchPath: string;
   evidencePath: string;
+  /** Immutable payload metadata; cleanup recomputes every value. */
   diffSha256: string;
+  patchBytes: number;
+  evidenceSha256: string;
+  evidenceBytes: number;
   porcelainSha256: string;
   dirty: boolean;
+  /** Source inventory represented in the aggregate binary patch. */
   untrackedFiles: Array<{ path: string; sha256: string; bytes: number }>;
 }
 

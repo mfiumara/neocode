@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { AgentJob, JobStatus, StaleCandidateArchive } from "@neocode/protocol";
@@ -27,6 +27,8 @@ export interface StaleContext {
   jobs?: ReadonlyMap<string, AgentJob>;
   targetRef?: string;
   now?: () => number;
+  /** Test-only crash-boundary hook; throwing must leave the nomination nonterminal. */
+  archivePublicationHook?: (step: "file_fsync" | "temp_directory_fsync" | "publish_rename" | "parent_fsync") => void | Promise<void>;
 }
 
 function sha(value: string | Buffer): string {
@@ -134,6 +136,76 @@ export async function nominateStaleCandidate(job: AgentJob, input: NominationInp
   return job;
 }
 
+const SAFE_ARCHIVE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function writeDurableFile(path: string, bytes: Buffer, beforeSync?: () => void | Promise<void>): Promise<void> {
+  const handle = await open(path, "wx", 0o600);
+  try { await handle.writeFile(bytes); await beforeSync?.(); await handle.sync(); } finally { await handle.close(); }
+}
+
+function sameReplacementAuthority(left: any, right: any): boolean {
+  return !!left && !!right && left.kind === right.kind && left.targetRef === right.targetRef
+    && left.targetHead === right.targetHead && left.replacementCommit === right.replacementCommit
+    && left.replacementJobId === right.replacementJobId && left.replacementJobVerifiedAt === right.replacementJobVerifiedAt;
+}
+
+function archiveLocations(workspace: string, jobId: string, nominatedAt: number) {
+  if (!SAFE_ARCHIVE_ID.test(jobId)) throw new Error("Unsafe job id for stale evidence archive.");
+  const authorizedRoot = resolve(workspace, ".neocode", "runtime", "stale-archives");
+  const parent = resolve(authorizedRoot, jobId);
+  const final = resolve(parent, String(nominatedAt));
+  if (!parent.startsWith(authorizedRoot + sep) || !final.startsWith(parent + sep)) throw new Error("Stale archive path escaped its authorized root.");
+  return { authorizedRoot, parent, final };
+}
+
+async function regularContainedFile(root: string, path: string): Promise<Buffer> {
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600) throw new Error("Archive payload is not a mode-0600 regular file.");
+  const actual = await realpath(path);
+  if (actual !== path || !actual.startsWith(root + sep)) throw new Error("Archive payload escaped its authorized root.");
+  return readFile(actual);
+}
+
+/** Recomputes all archive authority. Metadata alone is never sufficient. */
+export async function validateStaleArchive(job: AgentJob, workspaceRoot: string, proposedArchive?: StaleCandidateArchive): Promise<void> {
+  const candidate = job.staleCandidate;
+  const archive = proposedArchive ?? candidate?.archive;
+  if (!candidate || !archive || archive.schemaVersion !== 1) throw new Error("Stale archive metadata is missing or unsupported.");
+  const workspace = await realpath(workspaceRoot);
+  const locations = archiveLocations(workspace, job.id, candidate.nominatedAt);
+  const expectedArchive = relative(workspace, locations.final);
+  if (archive.archivePath !== expectedArchive || archive.patchPath !== join(expectedArchive, "dirty.patch")
+    || archive.evidencePath !== join(expectedArchive, "evidence.json")) throw new Error("Archive metadata path mismatch.");
+  const finalReal = await realpath(locations.final);
+  if (finalReal !== locations.final) throw new Error("Archive directory is symlinked or escaped.");
+  const patch = await regularContainedFile(locations.final, resolve(workspace, archive.patchPath));
+  const evidenceBytes = await regularContainedFile(locations.final, resolve(workspace, archive.evidencePath));
+  if (patch.length !== archive.patchBytes || sha(patch) !== archive.diffSha256
+    || evidenceBytes.length !== archive.evidenceBytes || sha(evidenceBytes) !== archive.evidenceSha256) throw new Error("Archive payload checksum or byte count mismatch.");
+  let packet: Record<string, any>;
+  try { packet = JSON.parse(evidenceBytes.toString("utf8")); } catch { throw new Error("Archive evidence packet is malformed."); }
+  if (packet.schemaVersion !== 1 || packet.jobId !== job.id || packet.nominatedAt !== candidate.nominatedAt
+    || packet.archivedAt !== archive.archivedAt || packet.aggregateFormat !== "tracked-and-untracked-git-binary-patch"
+    || packet.patch?.sha256 !== archive.diffSha256 || packet.patch?.bytes !== archive.patchBytes
+    || packet.source !== candidate.evidenceSource || packet.reason !== candidate.reason
+    || packet.suspectedReplacementJobId !== candidate.suspectedReplacementJobId
+    || packet.suspectedReplacementCommit !== candidate.suspectedReplacementCommit
+    || !sameReplacementAuthority(packet.replacementAuthority, candidate.replacementAuthority)
+    || JSON.stringify(packet.audit) !== JSON.stringify(candidate.audit)
+    || packet.audit?.dirty !== archive.dirty || archive.dirty !== candidate.audit.dirty
+    || archive.porcelainSha256 !== sha(candidate.audit.porcelain)
+    || JSON.stringify(packet.untrackedFiles) !== JSON.stringify(archive.untrackedFiles)
+    || JSON.stringify(archive.untrackedFiles) !== JSON.stringify(candidate.audit.untrackedFiles)) throw new Error("Archive evidence packet does not match durable nomination metadata.");
+  if (archive.dirty ? archive.patchBytes === 0 : archive.patchBytes !== 0 || archive.untrackedFiles.length !== 0) {
+    throw new Error("Archive dirty/clean payload semantics are invalid.");
+  }
+}
+
 async function archiveDirtyEvidence(job: AgentJob, context: StaleContext): Promise<StaleCandidateArchive> {
   const candidate = job.staleCandidate;
   if (!candidate || candidate.state !== "pending") throw new Error("No pending stale candidate.");
@@ -141,44 +213,79 @@ async function archiveDirtyEvidence(job: AgentJob, context: StaleContext): Promi
   if (audit.head !== candidate.audit.head || audit.contentFingerprint !== candidate.audit.contentFingerprint) {
     throw new Error("Worktree changed after nomination; renominate with fresh evidence.");
   }
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(job.id)) throw new Error("Unsafe job id for stale evidence archive.");
   const workspace = await realpath(context.workspaceRoot);
-  const authorizedArchiveRoot = join(workspace, ".neocode", "runtime", "stale-archives");
-  const archiveRoot = resolve(authorizedArchiveRoot, job.id, String(candidate.nominatedAt));
-  if (!archiveRoot.startsWith(authorizedArchiveRoot + sep)) throw new Error("Stale archive path escaped its authorized root.");
-  await mkdir(archiveRoot, { recursive: true });
+  const locations = archiveLocations(workspace, job.id, candidate.nominatedAt);
+  const controlRoot = resolve(workspace, ".neocode");
+  const runtimeRoot = resolve(controlRoot, "runtime");
+  await mkdir(controlRoot, { recursive: true, mode: 0o700 }); await syncDirectory(workspace);
+  await mkdir(runtimeRoot, { recursive: true, mode: 0o700 }); await syncDirectory(controlRoot);
+  await mkdir(locations.authorizedRoot, { recursive: true, mode: 0o700 }); await syncDirectory(runtimeRoot);
+  await mkdir(locations.parent, { recursive: true, mode: 0o700 }); await syncDirectory(locations.authorizedRoot);
+  if (await realpath(controlRoot) !== controlRoot || await realpath(runtimeRoot) !== runtimeRoot
+    || await realpath(locations.authorizedRoot) !== locations.authorizedRoot || await realpath(locations.parent) !== locations.parent) {
+    throw new Error("Stale archive parent is symlinked or escaped.");
+  }
   const trackedPatch = await gitRaw(audit.path, ["diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--"]);
   if (sha(trackedPatch) !== audit.trackedDiffSha256) throw new Error("Tracked content changed while archiving stale evidence.");
   const patches = [trackedPatch];
-  const untrackedFiles = audit.untrackedFiles;
-  for (const item of untrackedFiles) {
+  for (const item of audit.untrackedFiles) {
     const file = await realpath(join(audit.path, item.path));
     if (!file.startsWith(audit.path + sep)) throw new Error("Unsafe untracked path in candidate checkout.");
     const bytes = await readFile(file);
     if (bytes.length !== item.bytes || sha(bytes) !== item.sha256) throw new Error("Untracked content changed while archiving stale evidence.");
     patches.push(await gitRaw(audit.path, ["diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", file], true));
   }
-  const evidence = {
-    schemaVersion: 1, jobId: job.id, nominatedAt: candidate.nominatedAt,
+  const patch = Buffer.concat(patches);
+  const archivedAt = (context.now ?? Date.now)();
+  const packet = {
+    schemaVersion: 1, jobId: job.id, nominatedAt: candidate.nominatedAt, archivedAt,
     source: candidate.evidenceSource, reason: candidate.reason,
     suspectedReplacementJobId: candidate.suspectedReplacementJobId,
     suspectedReplacementCommit: candidate.suspectedReplacementCommit,
-    replacementAuthority: candidate.replacementAuthority,
-    audit, untrackedFiles,
+    replacementAuthority: candidate.replacementAuthority, audit,
+    aggregateFormat: "tracked-and-untracked-git-binary-patch",
+    patch: { sha256: sha(patch), bytes: patch.length }, untrackedFiles: audit.untrackedFiles,
   };
-  const patch = Buffer.concat(patches);
-  const patchPath = resolve(archiveRoot, "dirty.patch");
-  const evidencePath = resolve(archiveRoot, "evidence.json");
-  if (!patchPath.startsWith(authorizedArchiveRoot + sep) || !evidencePath.startsWith(authorizedArchiveRoot + sep)) {
-    throw new Error("Stale archive file escaped its authorized root.");
+  const evidence = Buffer.from(`${JSON.stringify(packet, null, 2)}\n`);
+  const archivePath = relative(workspace, locations.final);
+  const paths = { archivePath, patchPath: join(archivePath, "dirty.patch"), evidencePath: join(archivePath, "evidence.json") };
+  let metadata: StaleCandidateArchive;
+  const alreadyPublished = await lstat(locations.final).then((value) => value.isDirectory(), () => false);
+  if (alreadyPublished) {
+    // A prior process may have crashed after rename but before the parent fsync.
+    // Re-establish publication durability before considering that directory authority.
+    await context.archivePublicationHook?.("parent_fsync");
+    await syncDirectory(locations.parent);
+    const publishedPatch = await regularContainedFile(locations.final, resolve(workspace, paths.patchPath));
+    const publishedEvidence = await regularContainedFile(locations.final, resolve(workspace, paths.evidencePath));
+    let publishedPacket: Record<string, any>;
+    try { publishedPacket = JSON.parse(publishedEvidence.toString("utf8")); } catch { throw new Error("Published stale archive packet is malformed."); }
+    metadata = {
+      schemaVersion: 1, archivedAt: publishedPacket.archivedAt, ...paths,
+      diffSha256: sha(publishedPatch), patchBytes: publishedPatch.length,
+      evidenceSha256: sha(publishedEvidence), evidenceBytes: publishedEvidence.length,
+      porcelainSha256: sha(audit.porcelain), dirty: audit.dirty, untrackedFiles: audit.untrackedFiles,
+    };
+  } else {
+    metadata = {
+      schemaVersion: 1, archivedAt, ...paths, diffSha256: sha(patch), patchBytes: patch.length,
+      evidenceSha256: sha(evidence), evidenceBytes: evidence.length,
+      porcelainSha256: sha(audit.porcelain), dirty: audit.dirty, untrackedFiles: audit.untrackedFiles,
+    };
+    const temporary = resolve(locations.authorizedRoot, `.tmp-${job.id}-${candidate.nominatedAt}-${randomUUID()}`);
+    if (!temporary.startsWith(locations.authorizedRoot + sep)) throw new Error("Temporary archive path escaped its authorized root.");
+    await mkdir(temporary, { mode: 0o700 });
+    await writeDurableFile(resolve(temporary, "dirty.patch"), patch, () => context.archivePublicationHook?.("file_fsync"));
+    await writeDurableFile(resolve(temporary, "evidence.json"), evidence, () => context.archivePublicationHook?.("file_fsync"));
+    await context.archivePublicationHook?.("temp_directory_fsync");
+    await syncDirectory(temporary);
+    await context.archivePublicationHook?.("publish_rename");
+    await rename(temporary, locations.final);
+    await context.archivePublicationHook?.("parent_fsync");
+    await syncDirectory(locations.parent);
   }
-  await writeFile(patchPath, patch, { mode: 0o600 });
-  await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  return {
-    archivedAt: (context.now ?? Date.now)(), patchPath: relative(workspace, patchPath),
-    evidencePath: relative(workspace, evidencePath), diffSha256: sha(patch),
-    porcelainSha256: sha(audit.porcelain), dirty: audit.dirty, untrackedFiles,
-  };
+  await validateStaleArchive(job, workspace, metadata);
+  return metadata;
 }
 
 async function verifyReplacementAuthority(job: AgentJob, context: StaleContext) {

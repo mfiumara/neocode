@@ -3,6 +3,7 @@ import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { AgentJob, CleanupEvidence, CleanupRefusalReason } from "@neocode/protocol";
+import { validateStaleArchive } from "./stale-candidates.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -108,9 +109,14 @@ export class WorktreeJanitor {
 
     const targetHead = await this.git(["rev-parse", this.options.targetRef], this.workspaceRoot);
     const superseded = integration === "superseded";
-    if (superseded && job.staleCandidate?.confirmation === "confirmed_superseded"
-      && (!job.staleCandidate.archive || !job.staleCandidate.replacementAuthority)) {
-      return refusal(job, "missing_durable_identity", "Confirmed stale work lacks archive or authoritative replacement evidence.", checkedAt);
+    if (superseded && job.staleCandidate?.confirmation === "confirmed_superseded") {
+      if (!job.staleCandidate.archive || !job.staleCandidate.replacementAuthority) {
+        return refusal(job, "missing_durable_identity", "Confirmed stale work lacks archive or authoritative replacement evidence.", checkedAt);
+      }
+      try { await validateStaleArchive(job, this.workspaceRoot); }
+      catch (error) {
+        return refusal(job, "missing_durable_identity", `Confirmed stale archive failed integrity validation: ${error instanceof Error ? error.message : String(error)}`, checkedAt);
+      }
     }
     let mergeMethod: CleanupEvidence["mergeMethod"] = superseded
       ? "superseded-branch-retained" : commits.length ? "commit-ancestry" : "no-changes";

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import test from "node:test";
 import type { AgentJob } from "@neocode/protocol";
-import { auditWorktree, decideStaleCandidate, migrateStaleManifest, nominateStaleCandidate } from "./stale-candidates.js";
+import { auditWorktree, decideStaleCandidate, migrateStaleManifest, nominateStaleCandidate, validateStaleArchive } from "./stale-candidates.js";
 import { WorktreeJanitor } from "./worktree-janitor.js";
 import { canAutomaticallyResume } from "./recovery.js";
 
@@ -41,6 +41,13 @@ const nomination = {
   reason: "Semantic audit found this historical implementation was replaced.",
   evidenceSource: "docs/audit.json", suspectedReplacementCommit: "deadbeef",
 } as const;
+
+async function confirmedArchive(dirty = false) {
+  const value = await fixture(dirty);
+  await nominateStaleCandidate(value.job, { ...nomination, suspectedReplacementCommit: value.base }, { workspaceRoot: value.root, now: () => 10 });
+  await decideStaleCandidate(value.job, "confirm_superseded", { workspaceRoot: value.root, now: () => 20 });
+  return value;
+}
 
 test("inactive dirty nomination is provisional, durable-shaped, suppresses recovery, and deletes no files", async () => {
   const { root, path, job } = await fixture();
@@ -107,6 +114,57 @@ test("dirty diff is archived before supersession without rewriting immutable com
   assert.equal(await readFile(join(path, "base.txt"), "utf8"), "changed\n", "confirmation never cleans files");
   assert.equal(await new WorktreeJanitor(root, { graceMs: 0, targetRef: "main" }).review(job), false, "dirty checkout remains cleanup-ineligible");
   assert.equal(job.cleanup?.status, "refused");
+});
+
+test("published archives validate completely and authorize cleanup only after payload verification", async () => {
+  const { root, base, job } = await confirmedArchive(false);
+  const archive = job.staleCandidate!.archive!;
+  assert.equal(archive.patchBytes, 0);
+  assert.equal(archive.evidenceSha256.length, 64);
+  await validateStaleArchive(job, root);
+  job.status = "completed";
+  job.completion = { head: base, finishedAt: 1 };
+  job.worktreeIdentity = { path: job.isolation.path, branch: job.branch, baseRef: job.baseRef, createdAt: job.createdAt };
+  assert.equal(await new WorktreeJanitor(root, { graceMs: 0, targetRef: "main", now: () => 30 }).review(job), true);
+});
+
+test("archive validation rejects missing, partial, tampered, mismatched, and symlinked payloads", async () => {
+  for (const [name, mutate] of [
+    ["missing patch", async (root: string, job: AgentJob) => rm(join(root, job.staleCandidate!.archive!.patchPath))],
+    ["missing evidence / partial publication", async (root: string, job: AgentJob) => rm(join(root, job.staleCandidate!.archive!.evidencePath))],
+    ["tampered payload", async (root: string, job: AgentJob) => writeFile(join(root, job.staleCandidate!.archive!.evidencePath), "tampered")],
+    ["size/hash mismatch", async (_root: string, job: AgentJob) => { job.staleCandidate!.archive!.patchBytes += 1; job.staleCandidate!.archive!.diffSha256 = "0".repeat(64); }],
+    ["metadata path escape", async (_root: string, job: AgentJob) => { job.staleCandidate!.archive!.patchPath = "../outside.patch"; }],
+    ["symlink payload", async (root: string, job: AgentJob) => {
+      const path = join(root, job.staleCandidate!.archive!.patchPath); await rm(path); const outside = join(root, "outside.patch"); await writeFile(outside, "outside"); await symlink(outside, path);
+    }],
+  ] as Array<[string, (root: string, job: AgentJob) => Promise<void>]>) {
+    const { root, job } = await confirmedArchive(false);
+    await mutate(root, job);
+    await assert.rejects(validateStaleArchive(job, root), `${name} must fail closed`);
+    job.status = "completed";
+    job.completion = { head: job.staleCandidate!.audit.head, finishedAt: 1 };
+    job.worktreeIdentity = { path: job.isolation.path, branch: job.branch, baseRef: job.baseRef, createdAt: job.createdAt };
+    assert.equal(await new WorktreeJanitor(root, { graceMs: 0, targetRef: "main", now: () => 30 }).review(job), false, name);
+    assert.match(job.cleanup?.status === "refused" ? job.cleanup.detail : "", /archive failed integrity validation/i);
+  }
+});
+
+test("publication crash boundaries never record archive authority or final supersession", async () => {
+  for (const boundary of ["file_fsync", "temp_directory_fsync", "publish_rename", "parent_fsync"] as const) {
+    const { root, base, job } = await fixture(true);
+    await nominateStaleCandidate(job, { ...nomination, suspectedReplacementCommit: base }, { workspaceRoot: root, now: () => 10 });
+    await assert.rejects(decideStaleCandidate(job, "confirm_superseded", {
+      workspaceRoot: root, now: () => 20,
+      archivePublicationHook: (step) => { if (step === boundary) throw new Error(`injected ${boundary}`); },
+    }), /injected/);
+    assert.equal(job.staleCandidate?.state, "pending", boundary);
+    assert.equal(job.staleCandidate?.archive, undefined, boundary);
+    assert.notEqual(job.integration?.status, "superseded", boundary);
+    await decideStaleCandidate(job, "confirm_superseded", { workspaceRoot: root, now: () => 30 });
+    assert.equal(job.staleCandidate?.state, "superseded", `restart-safe retry after ${boundary}`);
+    await validateStaleArchive(job, root);
+  }
 });
 
 test("confirmation rejects same-porcelain dirty content changes", async () => {

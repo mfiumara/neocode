@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentJob, ServerMessage, TranscriptMessage } from "@neocode/protocol";
 import { CoordinatorNotificationQueue } from "./coordinator-notifications.js";
-import { Orchestrator, workerSystemPrompt } from "./orchestrator.js";
+import { migrateStartupLegacyHandoffs, Orchestrator, workerSystemPrompt } from "./orchestrator.js";
+import { canAutomaticallyResume } from "./recovery.js";
 import { RuntimeStateStore, type CoordinatorNotificationState, type DurableCoordinatorPrompt } from "./runtime-state.js";
 
 test("worktree worker prompt reserves judging and integration authority for the main coordinator", () => {
@@ -18,6 +19,33 @@ test("worktree worker prompt reserves judging and integration authority for the 
   assert.match(prompt, /only the MAIN coordinator owns those decisions and tool calls/);
   assert.match(prompt, /structured, concise handoff covering requirements, changes, tests, and unresolved risks/);
   assert.match(prompt, /inside this assigned checkout/);
+});
+
+test("startup leaves pending completed legacy handoffs entirely inert", async () => {
+  const job = {
+    id: "stale", title: "Pending legacy", prompt: "work", status: "completed", branch: "branch", worktree: "/repo/.worktrees/stale",
+    isolation: { requested: "worktree", mode: "worktree", path: "/repo/.worktrees/stale" }, baseRef: "main", createdAt: 1, updatedAt: 2,
+    messages: [], recoverable: false, review: { hookToken: "legacy", status: "queued", attempt: 1, targetBranch: "main", updatedAt: 2, transitions: [] },
+    staleCandidate: { state: "pending", nominatedAt: 2, nominatedBy: "coordinator", reason: "A specific retained legacy implementation needs a human decision.",
+      evidenceSource: "audit", confirmation: "pending", resumeState: { status: "completed", recoverable: false },
+      audit: { path: "/repo/.worktrees/stale", branch: "branch", head: "head", dirty: false, porcelain: "", trackedDiffSha256: "x", contentFingerprint: "y", untrackedFiles: [] } },
+  } as AgentJob;
+  const before = structuredClone(job);
+  let refreshes = 0; let migrations = 0;
+  await migrateStartupLegacyHandoffs([job], async () => { refreshes += 1; job.diff = "mutated"; }, () => { migrations += 1; job.handoff = { report: "generated", requirements: [], diffSha256: "hash", branch: job.branch, worktree: job.worktree, tests: [], risks: [], round: 1, createdAt: 3 }; });
+  assert.equal(refreshes, 0);
+  assert.equal(migrations, 0);
+  assert.deepEqual(job, before, "startup adds no handoff, review transition, or diff mutation");
+  assert.equal(canAutomaticallyResume(job), false, "startup recovery remains suppressed");
+  let wakes = 0;
+  const durable = { events: [], lastSignals: {} };
+  const notifications = new CoordinatorNotificationQueue(durable, {
+    append: () => undefined, persist: () => undefined, isIdle: () => true, wake: async () => { wakes += 1; },
+  });
+  assert.equal(notifications.observe(job), false);
+  assert.equal(notifications.requestBacklogSweep(job), false);
+  assert.equal(wakes, 0, "startup observation and backlog paths produce no autonomous wake");
+  assert.deepEqual(durable.events, []);
 });
 
 test("root isolation stays explicit but every shared-root background worker is read-only", () => {

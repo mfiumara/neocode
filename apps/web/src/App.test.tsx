@@ -248,7 +248,8 @@ test("stale evidence is accessible, exact evidence is collapsed/copyable, and de
   const evidence = renderToStaticMarkup(<StaleEvidence job={stale} />);
   assert.match(evidence, /Needs decision — checkout retained/);
   assert.match(evidence, /Nothing was cleaned or deleted/);
-  assert.match(evidence, /Suspected replacement:/);
+  assert.match(evidence, /superseded duplicate:.*replaced by abcdef12/i);
+  assert.match(evidence, /unresolved\/unverified replacement job · ref replac…/);
   assert.match(evidence, /<details><summary>Exact audit, replacement, and archive evidence<\/summary>/);
   assert.match(evidence, /Copy exact evidence/);
   const summary = evidence.split("<details>")[0] || "";
@@ -260,11 +261,29 @@ test("stale evidence is accessible, exact evidence is collapsed/copyable, and de
   assert.match(controls, />Confirm superseded<|>Confirm superseded<\/button>/);
   stale.staleCandidate.state = "superseded";
   stale.staleCandidate.confirmation = "confirmed_superseded";
-  stale.staleCandidate.archive = { archivedAt: 2, patchPath: ".neocode/runtime/stale-archives/stale/dirty.patch", evidencePath: ".neocode/runtime/stale-archives/stale/evidence.json", diffSha256: "archive-diff", porcelainSha256: "porcelain-sha", dirty: true, untrackedFiles: [] };
+  stale.staleCandidate.archive = { schemaVersion: 1, archivedAt: 2, archivePath: ".neocode/runtime/stale-archives/stale/1", patchPath: ".neocode/runtime/stale-archives/stale/1/dirty.patch", evidencePath: ".neocode/runtime/stale-archives/stale/1/evidence.json", diffSha256: "archive-diff", patchBytes: 1, evidenceSha256: "evidence-sha", evidenceBytes: 1, porcelainSha256: "porcelain-sha", dirty: true, untrackedFiles: [] };
   const archived = renderToStaticMarkup(<StaleEvidence job={stale} />);
   assert.match(archived, /Confirmed superseded — evidence archived/);
   assert.match(archived, /dirty diff and inventory metadata were archived/);
   assert.match(archived, /archive-diff/);
+});
+
+test("stale reason summaries preserve ordinary semantics and resolve replacement job titles", () => {
+  const stale = sidebarJob("blocked", "interrupted", "unmerged");
+  stale.id = "reason-job";
+  stale.staleCandidate = {
+    state: "pending", nominatedAt: 1, nominatedBy: "coordinator", reason: "This implementation is an older duplicate because the replacement fixes timeout recovery.",
+    suspectedReplacementJobId: "replacement-1234", evidenceSource: "audit", confirmation: "pending", resumeState: { status: "interrupted" },
+    audit: { path: "/hidden/path", branch: "branch", head: "head", dirty: false, porcelain: "", trackedDiffSha256: "tracked", contentFingerprint: "content", untrackedFiles: [] },
+  };
+  const replacement = sidebarJob("merged", "completed", "merged"); replacement.id = "replacement-1234"; replacement.title = "Fix timeout recovery";
+  const markup = renderToStaticMarkup(<StaleEvidence job={stale} jobs={[replacement]} />);
+  const summary = markup.split("<details>")[0] || "";
+  assert.match(summary, /older duplicate because the replacement fixes timeout recovery/);
+  assert.match(summary, /Fix timeout recovery · Integrated · verified/);
+  assert.doesNotMatch(summary, /replacement-1234|\/hidden\/path/);
+  assert.match(markup, /replacement-1234/);
+  assert.match(markup, /Copy exact evidence/);
 });
 
 test("review renders the complete handoff and owned lifecycle evidence", () => {

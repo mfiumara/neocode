@@ -177,6 +177,18 @@ function slug(value: string): string {
     .slice(0, 32) || "task";
 }
 
+export async function migrateStartupLegacyHandoffs(
+  jobs: AgentJob[],
+  refreshDiff: (job: AgentJob) => Promise<void>,
+  migrateHandoff: (job: AgentJob) => void | Promise<void>,
+): Promise<void> {
+  for (const job of jobs) {
+    if (job.staleCandidate?.state === "pending") continue;
+    if (job.status !== "completed" || job.handoff || job.review?.status !== "queued") continue;
+    await refreshDiff(job).then(() => migrateHandoff(job)).catch(() => undefined);
+  }
+}
+
 export class Orchestrator {
   private readonly jobs = new Map<string, AgentJob>();
   private readonly workers = new Map<string, RunningWorker>();
@@ -530,10 +542,11 @@ export class Orchestrator {
     // Old runtimes could have queued review metadata without the structured
     // handoff now required by coordinator-owned judging. Upgrade only that
     // passive queued state from a freshly read exact diff.
-    for (const job of this.listJobs()) {
-      if (job.status !== "completed" || job.handoff || job.review?.status !== "queued") continue;
-      await this.refreshDiff(job).then(() => this.completionPipeline.migrateLegacyHandoff(job)).catch(() => undefined);
-    }
+    await migrateStartupLegacyHandoffs(
+      this.listJobs(),
+      (job) => this.refreshDiff(job),
+      (job) => { this.completionPipeline.migrateLegacyHandoff(job); },
+    );
     this.completionPipeline.recover(this.listJobs().filter((job) => job.staleCandidate?.state !== "pending"));
     await this.resumeClaimedRemediations();
     // Observe current durable states after queue construction so startup
