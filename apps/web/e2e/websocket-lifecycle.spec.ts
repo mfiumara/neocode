@@ -3,8 +3,9 @@ import { createServer as createHttpServer } from "node:http";
 import { resolve } from "node:path";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { createLogger, createServer as createViteServer } from "vite";
+import { createLogger } from "vite";
 import { WebSocketServer } from "ws";
+import { startViteOnKernelPort } from "./vite-harness";
 
 const webRoot = resolve(import.meta.dirname, "..");
 const snapshot = {
@@ -63,7 +64,7 @@ test("real browser lifecycle closes Vite-proxied sockets cleanly", async ({ page
   };
   const harnessModule = "virtual:neocode-websocket-lifecycle";
   const resolvedHarnessModule = `\0${harnessModule}`;
-  const vite = await createViteServer({
+  const web = await startViteOnKernelPort({
     configFile: false,
     root: webRoot,
     customLogger: logger,
@@ -98,18 +99,12 @@ test("real browser lifecycle closes Vite-proxied sockets cleanly", async ({ page
     ],
     resolve: { alias: { "@": resolve(webRoot, "src") } },
     server: {
-      host: "127.0.0.1",
-      port: 0,
       proxy: { "/ws": { target: `ws://127.0.0.1:${backendPort}`, ws: true } },
     },
   });
 
   try {
-    await vite.listen();
-    const viteAddress = vite.httpServer?.address();
-    expect(viteAddress && typeof viteAddress === "object").toBeTruthy();
-    const vitePort = typeof viteAddress === "object" && viteAddress ? viteAddress.port : 0;
-    const url = `http://127.0.0.1:${vitePort}`;
+    const url = `http://127.0.0.1:${web.port}`;
 
     // Wait until the zero-delay connect task has fired and Vite has forwarded
     // the upgrade, then unmount while the browser WebSocket is still CONNECTING.
@@ -128,7 +123,7 @@ test("real browser lifecycle closes Vite-proxied sockets cleanly", async ({ page
     await page.reload();
     await connected(page);
     const loaded = page.waitForEvent("load");
-    vite.ws.send({ type: "full-reload" });
+    web.vite.ws.send({ type: "full-reload" });
     await loaded;
     await connected(page);
     await page.close();
@@ -143,6 +138,6 @@ test("real browser lifecycle closes Vite-proxied sockets cleanly", async ({ page
     http.closeAllConnections();
     if (http.listening) await new Promise<void>((resolveClose) => http.close(() => resolveClose()));
     await new Promise<void>((resolveClose) => wss.close(() => resolveClose()));
-    await vite.close();
+    await web.close();
   }
 });

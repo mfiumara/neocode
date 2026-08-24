@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { connect as connectTcp, type Socket } from "node:net";
 import test from "node:test";
-import { createLogger, createServer as createViteServer, type ViteDevServer } from "vite";
+import { createLogger } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
+import { startViteOnKernelPort, type IsolatedViteServer } from "../e2e/vite-harness";
 
 const floodPayload = Buffer.alloc(1024 * 1024);
 
@@ -66,10 +67,6 @@ function closed(socket: WebSocket): Promise<void> {
   return new Promise((resolve) => socket.once("close", () => resolve()));
 }
 
-async function closeVite(vite: ViteDevServer | undefined): Promise<void> {
-  if (vite) await vite.close();
-}
-
 /**
  * Inject a deliberately destructive raw-TCP reset to reproduce the reported
  * proxy failure. This is fault injection, not a model of normal browser close.
@@ -94,7 +91,7 @@ function abandonUpgrade(port: number): Promise<Socket> {
 
 test("Vite proxy reproduces synthetic reset EPIPE while clean transport reconnect and backend restart stay quiet", { timeout: 20_000 }, async () => {
   let backend = await listenBackend();
-  let vite: ViteDevServer | undefined;
+  let web: IsolatedViteServer | undefined;
   const errors: Array<{ message: string; code?: string }> = [];
   const recorded = (code: string, phrase?: string): boolean => errors.some((entry) =>
     entry.code === code && (!phrase || entry.message.includes(phrase)));
@@ -105,19 +102,14 @@ test("Vite proxy reproduces synthetic reset EPIPE while clean transport reconnec
   };
 
   try {
-    vite = await createViteServer({
+    web = await startViteOnKernelPort({
       configFile: false,
       customLogger: logger,
       server: {
-        host: "127.0.0.1",
-        port: 0,
         proxy: { "/ws": { target: `ws://127.0.0.1:${backend.port}`, ws: true } },
       },
     });
-    await vite.listen();
-    const address = vite.httpServer?.address();
-    assert.ok(address && typeof address === "object");
-    const proxyPort = address.port;
+    const proxyPort = web.port;
     const url = `ws://127.0.0.1:${proxyPort}/ws`;
 
     let abandoned: Socket | undefined;
@@ -186,7 +178,7 @@ test("Vite proxy reproduces synthetic reset EPIPE while clean transport reconnec
     await waitFor(() => recorded("ECONNREFUSED"), "observable target refusal");
     assert.ok(recorded("ECONNREFUSED", "ws proxy error"));
   } finally {
-    await closeVite(vite);
+    await web?.close();
     if (backend.http.listening) await closeBackend(backend);
   }
 });

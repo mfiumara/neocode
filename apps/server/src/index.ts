@@ -137,7 +137,9 @@ websocket.on("connection", (client) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`neocode server listening on http://127.0.0.1:${port}`);
+  const address = server.address();
+  const listeningPort = address && typeof address === "object" ? address.port : port;
+  console.log(`neocode server listening on http://127.0.0.1:${listeningPort}`);
   console.log(`workspace: ${cwd}`);
   if (verbose) console.log("verbose logging: enabled");
 });

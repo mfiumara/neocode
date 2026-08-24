@@ -3,29 +3,40 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { startViteOnKernelPort, type IsolatedViteServer } from "./vite-harness";
 
 const repo = resolve(import.meta.dirname, "../../..");
 const appRoot = resolve(process.env.NEOCODE_E2E_APP_ROOT || repo);
 const viteConfig = process.env.NEOCODE_E2E_VITE_CONFIG;
 const verifyCurrentBundle = process.env.NEOCODE_E2E_VERIFY_CURRENT_BUNDLE !== "false";
-const webPort = Number(process.env.NEOCODE_E2E_WEB_PORT || 14317);
-const serverPort = Number(process.env.NEOCODE_E2E_SERVER_PORT || 14318);
+let webPort = 0;
+let serverPort = 0;
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 let fixture = "";
 let server: ChildProcess;
-let web: ChildProcess;
+let web: IsolatedViteServer;
 
-function start(command: string, env: NodeJS.ProcessEnv, ready: RegExp): Promise<ChildProcess> {
+function startOnKernelPort(command: string, env: NodeJS.ProcessEnv): Promise<{ child: ChildProcess; port: number }> {
   return new Promise((resolveStart, reject) => {
     const child = spawn(command, { cwd: appRoot, env: { ...process.env, ...env }, shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
+    let settled = false;
     const onData = (chunk: Buffer) => {
       output += chunk.toString();
-      if (ready.test(output)) resolveStart(child);
+      const match = output.match(/http:\/\/127\.0\.0\.1:(\d+)/);
+      if (!settled && match) {
+        const port = Number(match[1]);
+        if (port > 0) {
+          settled = true;
+          resolveStart({ child, port });
+        }
+      }
     };
     child.stdout!.on("data", onData);
     child.stderr!.on("data", onData);
-    child.once("exit", (code) => reject(new Error(`${command} exited ${code} before startup:\n${output}`)));
+    child.once("exit", (code) => {
+      if (!settled) reject(new Error(`${command} exited ${code} before startup:\n${output}`));
+    });
   });
 }
 
@@ -41,12 +52,12 @@ async function stop(child?: ChildProcess): Promise<void> {
   ]);
 }
 
-async function startServer(): Promise<ChildProcess> {
-  return start("npm run start -w @neocode/server", {
-    NEOCODE_PORT: String(serverPort),
+async function startServer(port = 0): Promise<{ child: ChildProcess; port: number }> {
+  return startOnKernelPort("npm run start -w @neocode/server", {
+    NEOCODE_PORT: String(port),
     NEOCODE_CWD: fixture,
     NEOCODE_JANITOR_STARTUP: "false",
-  }, /neocode server listening/);
+  });
 }
 
 async function controlledPaste(page: Page, mode: "blank-item" | "files-fallback"): Promise<boolean> {
@@ -75,16 +86,24 @@ test.beforeAll(async () => {
     const git = spawn("git init -q -b main && git add README.md && git -c user.name=E2E -c user.email=e2e@example.test commit -qm init", { cwd: fixture, shell: true });
     git.once("exit", (code) => code === 0 ? resolveGit() : reject(new Error(`git fixture failed: ${code}`)));
   });
-  server = await startServer();
-  const configArgument = viteConfig ? ` --config ${JSON.stringify(resolve(viteConfig))}` : "";
-  web = await start(`npm run dev -w @neocode/web -- --host 127.0.0.1${configArgument}`, {
-    NEOCODE_WEB_PORT: String(webPort),
-    NEOCODE_SERVER_PORT: String(serverPort),
-  }, new RegExp(String(webPort)));
+  const startedServer = await startServer();
+  server = startedServer.child;
+  serverPort = startedServer.port;
+  web = await startViteOnKernelPort({
+    root: resolve(appRoot, "apps/web"),
+    configFile: viteConfig ? resolve(viteConfig) : undefined,
+    server: {
+      proxy: {
+        "/ws": { target: `ws://127.0.0.1:${serverPort}`, ws: true },
+        "/health": `http://127.0.0.1:${serverPort}`,
+      },
+    },
+  });
+  webPort = web.port;
 });
 
 test.afterAll(async () => {
-  await stop(web);
+  await web?.close();
   await stop(server);
   if (fixture) await rm(fixture, { recursive: true, force: true });
 });
@@ -171,7 +190,7 @@ test("narrow App keeps compaction status accessible across live context and reco
 
 test("integrated app pastes, opens, sends, validates, and restores image attachments", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: `http://127.0.0.1:${webPort}` });
-  await page.goto("/");
+  await page.goto(`http://127.0.0.1:${webPort}/`);
   await expect(page.locator("textarea")).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: "local" })).toHaveText(/local/);
 
@@ -242,7 +261,9 @@ test("integrated app pastes, opens, sends, validates, and restores image attachm
   // Restart the real server against the same fixture. A fresh snapshot proves
   // that validation accepted the WebSocket payload and durable restore kept it.
   await stop(server);
-  server = await startServer();
+  const restartedServer = await startServer(serverPort);
+  server = restartedServer.child;
+  expect(restartedServer.port).toBe(serverPort);
   await page.reload();
   const restored = page.locator("article.message.user").filter({ hasText: "image e2e persistence" });
   await expect(restored).toBeVisible({ timeout: 15_000 });
