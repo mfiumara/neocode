@@ -1,21 +1,23 @@
-started_utc=2026-08-24T08:10:28Z
-working_directory=/Users/mattiafiumara/repos/neocode/.worktrees/fix-vite-websocket-proxy-epipe-349f83f6
-implementation_identity=pre-evidence aggregate HEAD
+started_utc=2026-08-24T12:06:20Z
+working_directory_actual=/Users/mattiafiumara/repos/neocode/.worktrees/fix-vite-websocket-proxy-epipe-349f83f6
+working_directory_portable=<assigned-checkout>
+implementation_identity=rebased pre-evidence aggregate HEAD
+$ cd <assigned-checkout>
 
 $ git rev-parse HEAD
-7b6331a79866eb621f926b36ba1b12f5ee140cc8
+51d4ed6bc39f623d13ef05fb0ff6cb0f93cce50d
 [exit_status=0]
 
 $ git rev-parse HEAD^{tree}
-8719dda70b27f0fbfc03a4b9bfb6110da8fc0109
+de77e9a9bc613857418805c4daa332e14d5adf84
 [exit_status=0]
 
 $ git rev-parse main
-e825358a044796781db3da13dab95e47a6345427
+5de5fbfa10b17cf165bf157bc0281c8183fc197b
 [exit_status=0]
 
 $ git merge-base main HEAD
-e825358a044796781db3da13dab95e47a6345427
+5de5fbfa10b17cf165bf157bc0281c8183fc197b
 [exit_status=0]
 
 $ git show -s --format=author-name=%an%nauthor-email=%ae%ncommitter-name=%cn%ncommitter-email=%ce%ncommit=%H%ntree=%T%nsubject=%s HEAD
@@ -23,9 +25,9 @@ author-name=Mattia Fiumara
 author-email=mattia@schematik.io
 committer-name=Mattia Fiumara
 committer-email=mattia@schematik.io
-commit=7b6331a79866eb621f926b36ba1b12f5ee140cc8
-tree=8719dda70b27f0fbfc03a4b9bfb6110da8fc0109
-subject=Record literal WebSocket fix validation
+commit=51d4ed6bc39f623d13ef05fb0ff6cb0f93cce50d
+tree=de77e9a9bc613857418805c4daa332e14d5adf84
+subject=Reconcile dynamic-port E2E with context status
 [exit_status=0]
 
 $ git diff --name-status main...HEAD
@@ -39,19 +41,23 @@ M	apps/web/src/App.tsx
 M	apps/web/src/image-paste.browser.test.tsx
 A	apps/web/src/vite-websocket-proxy.integration.ts
 A	docs/validation/vite-websocket-proxy-epipe.md
+A	docs/validation/vite-websocket-proxy-epipe/implementation-git-packet.raw.txt
+A	docs/validation/vite-websocket-proxy-epipe/npm-run-build.raw.txt
+A	docs/validation/vite-websocket-proxy-epipe/npm-run-check.raw.txt
+A	docs/validation/vite-websocket-proxy-epipe/npm-test.raw.txt
 [exit_status=0]
 
 $ git diff --binary main...HEAD | shasum -a 256
-7d9216856d0910d07a7fbce674d690c99e7fb8072a51a36a8484fcb263d29de4  -
+d708b187e176057f1820eaf9be37fa81176f4dea1e0bf115f764b02b6ada080a  -
 [exit_status=0]
 
 $ git status --porcelain=v1 --untracked-files=all
 [exit_status=0]
 
-$ git -C /Users/mattiafiumara/repos/neocode status --porcelain=v1 --untracked-files=all
+$ git -C <root-checkout> status --porcelain=v1 --untracked-files=all
 [exit_status=0]
 
 $ git diff --check main...HEAD
 [exit_status=0]
 
-finished_utc=2026-08-24T08:10:29Z
+finished_utc=2026-08-24T12:06:20Z

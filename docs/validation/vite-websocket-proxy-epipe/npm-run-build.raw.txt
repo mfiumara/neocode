@@ -1,5 +1,7 @@
-started_utc=2026-08-24T08:10:12Z
-working_directory=/Users/mattiafiumara/repos/neocode/.worktrees/fix-vite-websocket-proxy-epipe-349f83f6
+started_utc=2026-08-24T12:06:06Z
+working_directory_actual=/Users/mattiafiumara/repos/neocode/.worktrees/fix-vite-websocket-proxy-epipe-349f83f6
+working_directory_portable=<assigned-checkout>
+$ cd <assigned-checkout>
 $ npm run build
 --- stdout+stderr begin ---
 
@@ -14,20 +16,20 @@ $ npm run build
 > @neocode/web@0.1.0 build
 > tsc --noEmit && vite build
 
-[36mvite v7.3.6 [32mbuilding client environment for production...[36m[39m
+vite v7.3.6 building client environment for production...
 transforming...
-[32m✓[39m 2171 modules transformed.
+✓ 2171 modules transformed.
 rendering chunks...
 computing gzip size...
-[2mdist/[22m[32mindex.html                 [39m[1m[2m  0.44 kB[22m[1m[22m[2m │ gzip:   0.28 kB[22m
-[2mdist/[22m[2massets/[22m[35mindex-DMsA48RN.css  [39m[1m[2m 36.65 kB[22m[1m[22m[2m │ gzip:   8.42 kB[22m
-[2mdist/[22m[2massets/[22m[36mindex-aivP5cXW.js   [39m[1m[33m573.58 kB[39m[22m[2m │ gzip: 180.41 kB[22m
-[33m
+dist/index.html                   0.44 kB │ gzip:   0.28 kB
+dist/assets/index-b1OGrphM.css   38.61 kB │ gzip:   8.81 kB
+dist/assets/index-5wPoKk_-.js   576.31 kB │ gzip: 181.17 kB
+
 (!) Some chunks are larger than 500 kB after minification. Consider:
 - Using dynamic import() to code-split the application
 - Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
-- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.[39m
-[32m✓ built in 914ms[39m
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 1.05s
 --- stdout+stderr end ---
 exit_status=0
-finished_utc=2026-08-24T08:10:15Z
+finished_utc=2026-08-24T12:06:10Z

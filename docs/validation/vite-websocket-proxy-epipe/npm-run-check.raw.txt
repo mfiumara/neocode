@@ -1,5 +1,7 @@
-started_utc=2026-08-24T08:10:03Z
-working_directory=/Users/mattiafiumara/repos/neocode/.worktrees/fix-vite-websocket-proxy-epipe-349f83f6
+started_utc=2026-08-24T12:05:57Z
+working_directory_actual=/Users/mattiafiumara/repos/neocode/.worktrees/fix-vite-websocket-proxy-epipe-349f83f6
+working_directory_portable=<assigned-checkout>
+$ cd <assigned-checkout>
 $ npm run check
 --- stdout+stderr begin ---
 
@@ -8,12 +10,12 @@ $ npm run check
 
 
 > neocode@0.1.0 check:git
-> node scripts/check-git-state.mjs
+> node scripts/check-git-state.mjs && node scripts/verify-lifecycle-evidence-commit.mjs
 
-verified diff base: e825358a044796781db3da13dab95e47a6345427
+verified diff base: 5de5fbfa10b17cf165bf157bc0281c8183fc197b
 $ git merge-base main HEAD
 main-merge-base output begin
-e825358a044796781db3da13dab95e47a6345427
+5de5fbfa10b17cf165bf157bc0281c8183fc197b
 main-merge-base output end
 main-merge-base exit: 0
 $ git diff --name-status main...HEAD
@@ -28,6 +30,10 @@ M	apps/web/src/App.tsx
 M	apps/web/src/image-paste.browser.test.tsx
 A	apps/web/src/vite-websocket-proxy.integration.ts
 A	docs/validation/vite-websocket-proxy-epipe.md
+A	docs/validation/vite-websocket-proxy-epipe/implementation-git-packet.raw.txt
+A	docs/validation/vite-websocket-proxy-epipe/npm-run-build.raw.txt
+A	docs/validation/vite-websocket-proxy-epipe/npm-run-check.raw.txt
+A	docs/validation/vite-websocket-proxy-epipe/npm-test.raw.txt
 main-name-status output end
 main-name-status exit: 0
 $ git show -s --format='author-name=%an%nauthor-email=%ae%ncommitter-name=%cn%ncommitter-email=%ce' HEAD
@@ -42,7 +48,7 @@ $ git diff --check main...HEAD
 main-diff-check output begin
 main-diff-check output end
 main-diff-check exit: 0
-$ git diff --check e825358a044796781db3da13dab95e47a6345427 HEAD
+$ git diff --check 5de5fbfa10b17cf165bf157bc0281c8183fc197b HEAD
 diff-check output begin
 diff-check output end
 diff-check exit: 0
@@ -50,6 +56,7 @@ $ git status --porcelain --untracked-files=normal
 clean-status output begin
 clean-status output end
 clean-status exit: 0
+lifecycle_evidence_state=pre-evidence-no-op
 
 > @neocode/server@0.1.0 check
 > tsc --noEmit
@@ -60,4 +67,4 @@ clean-status exit: 0
 
 --- stdout+stderr end ---
 exit_status=0
-finished_utc=2026-08-24T08:10:05Z
+finished_utc=2026-08-24T12:06:00Z
