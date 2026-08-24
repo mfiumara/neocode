@@ -1,0 +1,988 @@
+started_utc=2026-08-24T08:09:19Z
+working_directory=/Users/mattiafiumara/repos/neocode/.worktrees/fix-vite-websocket-proxy-epipe-349f83f6
+$ npm test
+--- stdout+stderr begin ---
+
+> neocode@0.1.0 test
+> npm run test:unit && npm run test:e2e
+
+
+> neocode@0.1.0 test:unit
+> npm run test --workspaces --if-present
+
+
+> @neocode/server@0.1.0 test
+> tsx --test src/**/*.test.ts
+
+TAP version 13
+# Subtest: summarizeToolArgs prioritizes useful arguments and stays concise
+ok 1 - summarizeToolArgs prioritizes useful arguments and stays concise
+  ---
+  duration_ms: 0.6295
+  type: 'test'
+  ...
+# Subtest: summarizeToolArgs omits credentials and nested or huge output
+ok 2 - summarizeToolArgs omits credentials and nested or huge output
+  ---
+  duration_ms: 0.078708
+  type: 'test'
+  ...
+# Subtest: tool activities expose transitions without results
+ok 3 - tool activities expose transitions without results
+  ---
+  duration_ms: 0.094375
+  type: 'test'
+  ...
+# Subtest: activity descriptions are normalized and capped
+ok 4 - activity descriptions are normalized and capped
+  ---
+  duration_ms: 0.04275
+  type: 'test'
+  ...
+# Subtest: timeline keeps a stable start across deltas and uses monotonic duration
+ok 5 - timeline keeps a stable start across deltas and uses monotonic duration
+  ---
+  duration_ms: 0.139042
+  type: 'test'
+  ...
+# Subtest: restored activity falls back to truthful wall-clock duration
+ok 6 - restored activity falls back to truthful wall-clock duration
+  ---
+  duration_ms: 0.042
+  type: 'test'
+  ...
+# Subtest: CI timeout process-group signal failure falls back without crashing the server
+ok 7 - CI timeout process-group signal failure falls back without crashing the server
+  ---
+  duration_ms: 10.653375
+  type: 'test'
+  ...
+# Subtest: completion records one handoff but performs no judge or merge decision
+ok 8 - completion records one handoff but performs no judge or merge decision
+  ---
+  duration_ms: 0.534667
+  type: 'test'
+  ...
+# Subtest: legacy queued reviews gain a durable exact-diff handoff before autonomous judging
+ok 9 - legacy queued reviews gain a durable exact-diff handoff before autonomous judging
+  ---
+  duration_ms: 4.568833
+  type: 'test'
+  ...
+# Subtest: worker, judge, and server cannot merge; judge and coordinator approval stay distinct
+ok 10 - worker, judge, and server cannot merge; judge and coordinator approval stay distinct
+  ---
+  duration_ms: 12.631125
+  type: 'test'
+  ...
+# Subtest: guarded integration remains serialized
+ok 11 - guarded integration remains serialized
+  ---
+  duration_ms: 11.902833
+  type: 'test'
+  ...
+# Subtest: feedback preserves worktree and creates a fresh handoff round
+ok 12 - feedback preserves worktree and creates a fresh handoff round
+  ---
+  duration_ms: 11.009042
+  type: 'test'
+  ...
+# Subtest: rejected handoff cannot be rejudged unchanged before a claimed repair and new handoff
+ok 13 - rejected handoff cannot be rejudged unchanged before a claimed repair and new handoff
+  ---
+  duration_ms: 10.979625
+  type: 'test'
+  ...
+# Subtest: CI-failed handoff cannot create unlimited unchanged action-required rounds
+ok 14 - CI-failed handoff cannot create unlimited unchanged action-required rounds
+  ---
+  duration_ms: 6.172583
+  type: 'test'
+  ...
+# Subtest: a failing branch is resumed, corrected, rechecked, and freshly judged on the next round
+ok 15 - a failing branch is resumed, corrected, rechecked, and freshly judged on the next round
+  ---
+  duration_ms: 11.099167
+  type: 'test'
+  ...
+# Subtest: unchanged failures are bounded per class and preserve complete evidence
+ok 16 - unchanged failures are bounded per class and preserve complete evidence
+  ---
+  duration_ms: 22.956833
+  type: 'test'
+  ...
+# Subtest: no-content completion commit does not reset the unchanged failure budget
+ok 17 - no-content completion commit does not reset the unchanged failure budget
+  ---
+  duration_ms: 11.837208
+  type: 'test'
+  ...
+# Subtest: successful infrastructure retry resolves durably and restart cannot reschedule terminal work
+ok 18 - successful infrastructure retry resolves durably and restart cannot reschedule terminal work
+  ---
+  duration_ms: 25.142792
+  type: 'test'
+  ...
+# Subtest: restart recovery does not duplicate a claimed source repair attempt
+ok 19 - restart recovery does not duplicate a claimed source repair attempt
+  ---
+  duration_ms: 6.065542
+  type: 'test'
+  ...
+# Subtest: conflict returns to worker handoff and fresh judge before retry
+ok 20 - conflict returns to worker handoff and fresh judge before retry
+  ---
+  duration_ms: 23.117084
+  type: 'test'
+  ...
+# Subtest: restart invalidates legacy server-owned auto-decision verdicts
+ok 21 - restart invalidates legacy server-owned auto-decision verdicts
+  ---
+  duration_ms: 0.188167
+  type: 'test'
+  ...
+# Subtest: restart recovery never replays a transient product decision
+ok 22 - restart recovery never replays a transient product decision
+  ---
+  duration_ms: 0.133334
+  type: 'test'
+  ...
+# Subtest: candidate and post-merge verification failures become evidence-complete action-required states
+ok 23 - candidate and post-merge verification failures become evidence-complete action-required states
+  ---
+  duration_ms: 21.965541
+  type: 'test'
+  ...
+# Subtest: target advancement invalidates concurrent approval before integration
+ok 24 - target advancement invalidates concurrent approval before integration
+  ---
+  duration_ms: 10.672208
+  type: 'test'
+  ...
+# Subtest: changed diff after approval blocks guarded integration
+ok 25 - changed diff after approval blocks guarded integration
+  ---
+  duration_ms: 11.91125
+  type: 'test'
+  ...
+# Subtest: actual review persists Git packet evidence but metadata alone cannot satisfy product CI
+ok 26 - actual review persists Git packet evidence but metadata alone cannot satisfy product CI
+  ---
+  duration_ms: 1178.774792
+  type: 'test'
+  ...
+# Subtest: local integration rebases untracked work and fast-forwards main without a merge commit
+ok 27 - local integration rebases untracked work and fast-forwards main without a merge commit
+  ---
+  duration_ms: 1951.711917
+  type: 'test'
+  ...
+# Subtest: a meaningful transition appends once and duplicate broadcasts do not wake twice
+ok 28 - a meaningful transition appends once and duplicate broadcasts do not wake twice
+  ---
+  duration_ms: 6.806
+  type: 'test'
+  ...
+# Subtest: busy coordinator queues durably and restart delivers the pending id exactly once
+ok 29 - busy coordinator queues durably and restart delivers the pending id exactly once
+  ---
+  duration_ms: 17.065042
+  type: 'test'
+  ...
+# Subtest: agent settlement completes a claimed wake even when prompt promise remains unresolved
+ok 30 - agent settlement completes a claimed wake even when prompt promise remains unresolved
+  ---
+  duration_ms: 11.0365
+  type: 'test'
+  ...
+# Subtest: restart redelivers the same event id after a crash between persisted claim and wake
+ok 31 - restart redelivers the same event id after a crash between persisted claim and wake
+  ---
+  duration_ms: 5.924875
+  type: 'test'
+  ...
+# Subtest: action-required diagnostics stay exact while a user prompt is busy and wake once afterward
+ok 32 - action-required diagnostics stay exact while a user prompt is busy and wake once afterward
+  ---
+  duration_ms: 17.942375
+  type: 'test'
+  ...
+# Subtest: backlog sweeps wake once per stable job state and survive a busy coordinator
+ok 33 - backlog sweeps wake once per stable job state and survive a busy coordinator
+  ---
+  duration_ms: 17.713916
+  type: 'test'
+  ...
+# Subtest: every lifecycle transition is appended without extra model chatter
+ok 34 - every lifecycle transition is appended without extra model chatter
+  ---
+  duration_ms: 10.863958
+  type: 'test'
+  ...
+# Subtest: accepted prompts render queued immediately with stable ordering and attachments
+ok 35 - accepted prompts render queued immediately with stable ordering and attachments
+  ---
+  duration_ms: 0.647958
+  type: 'test'
+  ...
+# Subtest: acknowledgement replaces queued state and settled or failed prompts are never shown queued
+ok 36 - acknowledgement replaces queued state and settled or failed prompts are never shown queued
+  ---
+  duration_ms: 0.090792
+  type: 'test'
+  ...
+# Subtest: restart recovery distinguishes every crash checkpoint without replaying completed responses
+ok 37 - restart recovery distinguishes every crash checkpoint without replaying completed responses
+  ---
+  duration_ms: 0.140833
+  type: 'test'
+  ...
+# Switched to a new branch 'feature'
+# Switched to a new branch 'feature'
+# Switched to a new branch 'feature'
+# Subtest: GitHub PR base discovery checks the complete feature range without main or HEAD^
+ok 38 - GitHub PR base discovery checks the complete feature range without main or HEAD^
+  ---
+  duration_ms: 982.359
+  type: 'test'
+  ...
+# Subtest: coordinator worktrees report literal main packet commands across the full feature range
+ok 39 - coordinator worktrees report literal main packet commands across the full feature range
+  ---
+  duration_ms: 1092.634125
+  type: 'test'
+  ...
+# Subtest: verified base checks report exact empty clean status and reject dirty candidates
+ok 40 - verified base checks report exact empty clean status and reject dirty candidates
+  ---
+  duration_ms: 806.975875
+  type: 'test'
+  ...
+# Subtest: normalizes a valid image and does not trust client metadata
+ok 41 - normalizes a valid image and does not trust client metadata
+  ---
+  duration_ms: 0.76425
+  type: 'test'
+  ...
+# Subtest: rejects spoofed image data
+ok 42 - rejects spoofed image data
+  ---
+  duration_ms: 0.28825
+  type: 'test'
+  ...
+# Subtest: bounds attachment count
+ok 43 - bounds attachment count
+  ---
+  duration_ms: 0.075084
+  type: 'test'
+  ...
+# Subtest: maps validated attachments to Pi multimodal prompt options
+ok 44 - maps validated attachments to Pi multimodal prompt options
+  ---
+  duration_ms: 0.387041
+  type: 'test'
+  ...
+# Subtest: WebSocket payload bound fits four maximum base64 images with metadata headroom
+ok 45 - WebSocket payload bound fits four maximum base64 images with metadata headroom
+  ---
+  duration_ms: 0.062084
+  type: 'test'
+  ...
+# Subtest: small non-overlapping changes are prioritized before broad conflicting changes
+ok 46 - small non-overlapping changes are prioritized before broad conflicting changes
+  ---
+  duration_ms: 0.380583
+  type: 'test'
+  ...
+# Subtest: aging lowers complexity priority without producing negative scores
+ok 47 - aging lowers complexity priority without producing negative scores
+  ---
+  duration_ms: 0.136333
+  type: 'test'
+  ...
+# Subtest: explicit isolation always wins
+ok 48 - explicit isolation always wins
+  ---
+  duration_ms: 0.352375
+  type: 'test'
+  ...
+# Subtest: auto prefers worktrees for mutating or ambiguous work
+ok 49 - auto prefers worktrees for mutating or ambiguous work
+  ---
+  duration_ms: 0.291417
+  type: 'test'
+  ...
+# Subtest: auto permits root for clearly non-mutating work
+ok 50 - auto permits root for clearly non-mutating work
+  ---
+  duration_ms: 0.05775
+  type: 'test'
+  ...
+# Subtest: worktree worker prompt reserves judging and integration authority for the main coordinator
+ok 51 - worktree worker prompt reserves judging and integration authority for the main coordinator
+  ---
+  duration_ms: 0.427334
+  type: 'test'
+  ...
+# Subtest: root isolation stays explicit but every shared-root background worker is read-only
+ok 52 - root isolation stays explicit but every shared-root background worker is read-only
+  ---
+  duration_ms: 0.183875
+  type: 'test'
+  ...
+# Subtest: concurrent prompt acceptances share failed durability and acknowledge none before a later retry
+ok 53 - concurrent prompt acceptances share failed durability and acknowledge none before a later retry
+  ---
+  duration_ms: 23.088917
+  type: 'test'
+  ...
+# Subtest: backend failure is durably terminal before broadcast and later FIFO work continues
+ok 54 - backend failure is durably terminal before broadcast and later FIFO work continues
+  ---
+  duration_ms: 60.761083
+  type: 'test'
+  ...
+# Subtest: terminal persistence failure fails closed without claiming a durable prompt failure
+ok 55 - terminal persistence failure fails closed without claiming a durable prompt failure
+  ---
+  duration_ms: 14.467167
+  type: 'test'
+  ...
+# Subtest: orchestrator queues genuinely busy prompts durably and drains FIFO exactly once
+ok 56 - orchestrator queues genuinely busy prompts durably and drains FIFO exactly once
+  ---
+  duration_ms: 78.17275
+  type: 'test'
+  ...
+# Subtest: verified worktree interruption is eligible for automatic resume
+ok 57 - verified worktree interruption is eligible for automatic resume
+  ---
+  duration_ms: 0.363125
+  type: 'test'
+  ...
+# Subtest: session open is preferred and corrupt session falls back fresh
+ok 58 - session open is preferred and corrupt session falls back fresh
+  ---
+  duration_ms: 0.488375
+  type: 'test'
+  ...
+# Subtest: durable generation token rejects duplicate and stale worker callbacks
+ok 59 - durable generation token rejects duplicate and stale worker callbacks
+  ---
+  duration_ms: 0.064625
+  type: 'test'
+  ...
+# Subtest: restart backoff is configurable, exponential, capped, and bounded
+ok 60 - restart backoff is configurable, exponential, capped, and bounded
+  ---
+  duration_ms: 0.105834
+  type: 'test'
+  ...
+# Subtest: root automatic recovery permits only clearly read-only auto isolation
+ok 61 - root automatic recovery permits only clearly read-only auto isolation
+  ---
+  duration_ms: 0.061708
+  type: 'test'
+  ...
+# Subtest: cancelled, failed, completed and review handoff jobs never auto-resume
+ok 62 - cancelled, failed, completed and review handoff jobs never auto-resume
+  ---
+  duration_ms: 0.105958
+  type: 'test'
+  ...
+# Subtest: missing, corrupt, or branch-mismatched worktrees need attention
+ok 63 - missing, corrupt, or branch-mismatched worktrees need attention
+  ---
+  duration_ms: 0.045542
+  type: 'test'
+  ...
+# Subtest: runtime state atomically round-trips all job and session metadata
+ok 64 - runtime state atomically round-trips all job and session metadata
+  ---
+  duration_ms: 15.113875
+  type: 'test'
+  ...
+# Subtest: durable coordinator queue survives refresh with context and transcript lifecycle
+ok 65 - durable coordinator queue survives refresh with context and transcript lifecycle
+  ---
+  duration_ms: 11.277417
+  type: 'test'
+  ...
+# Subtest: durable transcripts preserve image data used by restored clickable threads
+ok 66 - durable transcripts preserve image data used by restored clickable threads
+  ---
+  duration_ms: 10.705542
+  type: 'test'
+  ...
+# Subtest: all flush waiters covered by one failed write reject and a distinct save can recover
+ok 67 - all flush waiters covered by one failed write reject and a distinct save can recover
+  ---
+  duration_ms: 14.054875
+  type: 'test'
+  ...
+# Subtest: streaming saves coalesce to the latest complete snapshot
+ok 68 - streaming saves coalesce to the latest complete snapshot
+  ---
+  duration_ms: 12.062958
+  type: 'test'
+  ...
+# Subtest: invalid or cross-workspace state is ignored
+ok 69 - invalid or cross-workspace state is ignored
+  ---
+  duration_ms: 2.537458
+  type: 'test'
+  ...
+# Subtest: 10,000 durable messages produce a bounded initial snapshot window without data loss
+ok 70 - 10,000 durable messages produce a bounded initial snapshot window without data loss
+  ---
+  duration_ms: 12.1255
+  type: 'test'
+  ...
+# Subtest: cursor pages reconstruct exact order with no overlap
+ok 71 - cursor pages reconstruct exact order with no overlap
+  ---
+  duration_ms: 41.476084
+  type: 'test'
+  ...
+# Subtest: durable coordinator and worker histories use bounded snapshots and capped lossless WebSocket pages
+ok 72 - durable coordinator and worker histories use bounded snapshots and capped lossless WebSocket pages
+  ---
+  duration_ms: 117.664833
+  type: 'test'
+  ...
+# Subtest: removes a merged clean registered worktree and retains its branch
+ok 73 - removes a merged clean registered worktree and retains its branch
+  ---
+  duration_ms: 1146.247042
+  type: 'test'
+  ...
+# Subtest: removes a clean worktree whose commits were integrated with rewritten hashes
+ok 74 - removes a clean worktree whose commits were integrated with rewritten hashes
+  ---
+  duration_ms: 1178.9345
+  type: 'test'
+  ...
+# Subtest: removes a clean superseded checkout while retaining its committed branch
+ok 75 - removes a clean superseded checkout while retaining its committed branch
+  ---
+  duration_ms: 744.788292
+  type: 'test'
+  ...
+# Subtest: refuses completed but unmerged work
+ok 76 - refuses completed but unmerged work
+  ---
+  duration_ms: 676.704459
+  type: 'test'
+  ...
+# Subtest: refuses tracked changes
+ok 77 - refuses tracked changes
+  ---
+  duration_ms: 612.932417
+  type: 'test'
+  ...
+# Subtest: refuses untracked changes
+ok 78 - refuses untracked changes
+  ---
+  duration_ms: 608.413458
+  type: 'test'
+  ...
+# Subtest: refuses interrupted jobs
+ok 79 - refuses interrupted jobs
+  ---
+  duration_ms: 569.854166
+  type: 'test'
+  ...
+# Subtest: refuses failed jobs
+ok 80 - refuses failed jobs
+  ---
+  duration_ms: 579.756792
+  type: 'test'
+  ...
+# Subtest: refuses conflicts
+ok 81 - refuses conflicts
+  ---
+  duration_ms: 578.4545
+  type: 'test'
+  ...
+# Subtest: refuses active review
+ok 82 - refuses active review
+  ---
+  duration_ms: 576.440333
+  type: 'test'
+  ...
+# Subtest: refuses active integration
+ok 83 - refuses active integration
+  ---
+  duration_ms: 576.862042
+  type: 'test'
+  ...
+# Subtest: refuses changed durable path
+ok 84 - refuses changed durable path
+  ---
+  duration_ms: 579.473333
+  type: 'test'
+  ...
+# Subtest: refuses changed durable branch
+ok 85 - refuses changed durable branch
+  ---
+  duration_ms: 575.424958
+  type: 'test'
+  ...
+# Subtest: refuses moved completion head
+ok 86 - refuses moved completion head
+  ---
+  duration_ms: 783.30375
+  type: 'test'
+  ...
+# Subtest: refuses a worktree on a branch other than durable metadata
+ok 87 - refuses a worktree on a branch other than durable metadata
+  ---
+  duration_ms: 601.080417
+  type: 'test'
+  ...
+# Subtest: refuses unregistered and unknown worktree paths
+ok 88 - refuses unregistered and unknown worktree paths
+  ---
+  duration_ms: 601.05
+  type: 'test'
+  ...
+# Subtest: refuses jobs before grace and jobs missing durable completion metadata
+ok 89 - refuses jobs before grace and jobs missing durable completion metadata
+  ---
+  duration_ms: 581.309458
+  type: 'test'
+  ...
+# Subtest: removes a clean completed no-op wrapper without risking unique work
+ok 90 - removes a clean completed no-op wrapper without risking unique work
+  ---
+  duration_ms: 339.140541
+  type: 'test'
+  ...
+1..90
+# tests 90
+# suites 0
+# pass 90
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 12011.951666
+
+> @neocode/web@0.1.0 test
+> tsx --test src/vite-websocket-proxy.integration.ts && tsx --test src/*.test.ts src/*.test.tsx
+
+TAP version 13
+# Subtest: Vite proxy reproduces synthetic reset EPIPE while clean transport reconnect and backend restart stay quiet
+ok 1 - Vite proxy reproduces synthetic reset EPIPE while clean transport reconnect and backend restart stay quiet
+  ---
+  duration_ms: 361.995417
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 604.412417
+TAP version 13
+# Subtest: the composer exposes send and an accessible image-picker fallback without a keyboard mode badge
+ok 1 - the composer exposes send and an accessible image-picker fallback without a keyboard mode badge
+  ---
+  duration_ms: 17.158833
+  type: 'test'
+  ...
+# Subtest: the workspace command-palette label uses Command/Ctrl-K
+ok 2 - the workspace command-palette label uses Command/Ctrl-K
+  ---
+  duration_ms: 4.399416
+  type: 'test'
+  ...
+# Subtest: sidebar renders current lifecycle execution as a labelled spinner only while connected
+ok 3 - sidebar renders current lifecycle execution as a labelled spinner only while connected
+  ---
+  duration_ms: 1.325292
+  type: 'test'
+  ...
+# Subtest: sidebar keeps queued and terminal worker labels authoritative over stale lifecycle state
+ok 4 - sidebar keeps queued and terminal worker labels authoritative over stale lifecycle state
+  ---
+  duration_ms: 1.368583
+  type: 'test'
+  ...
+# Subtest: review renders the complete handoff and owned lifecycle evidence
+ok 5 - review renders the complete handoff and owned lifecycle evidence
+  ---
+  duration_ms: 10.979917
+  type: 'test'
+  ...
+# Subtest: renders common markdown constructs
+ok 6 - renders common markdown constructs
+  ---
+  duration_ms: 12.377791
+  type: 'test'
+  ...
+# Subtest: does not interpret transcript HTML
+ok 7 - does not interpret transcript HTML
+  ---
+  duration_ms: 1.616959
+  type: 'test'
+  ...
+# Subtest: filters unsafe URLs and hardens safe links
+ok 8 - filters unsafe URLs and hardens safe links
+  ---
+  duration_ms: 2.487708
+  type: 'test'
+  ...
+# Subtest: does not load remote markdown images
+ok 9 - does not load remote markdown images
+  ---
+  duration_ms: 1.199583
+  type: 'test'
+  ...
+# Subtest: lifecycle events are compact by default and retain expandable raw evidence
+ok 10 - lifecycle events are compact by default and retain expandable raw evidence
+  ---
+  duration_ms: 4.3885
+  type: 'test'
+  ...
+# Subtest: structured cards resolve durable titles, semantic judge state, and short evidence references
+ok 11 - structured cards resolve durable titles, semantic judge state, and short evidence references
+  ---
+  duration_ms: 1.377833
+  type: 'test'
+  ...
+# Subtest: accessible disclosure renders full diagnostics only when expanded
+ok 12 - accessible disclosure renders full diagnostics only when expanded
+  ---
+  duration_ms: 54.421666
+  type: 'test'
+  ...
+# Subtest: transcript activity renders only while its coordinator or worker is active
+ok 13 - transcript activity renders only while its coordinator or worker is active
+  ---
+  duration_ms: 488.662
+  type: 'test'
+  ...
+# Subtest: live elapsed time is monotonic after anchoring
+ok 14 - live elapsed time is monotonic after anchoring
+  ---
+  duration_ms: 0.340708
+  type: 'test'
+  ...
+# Subtest: duration formatting is concise and deterministic
+ok 15 - duration formatting is concise and deterministic
+  ---
+  duration_ms: 0.123042
+  type: 'test'
+  ...
+# Subtest: Command/Ctrl-K opens the command palette
+ok 16 - Command/Ctrl-K opens the command palette
+  ---
+  duration_ms: 0.400334
+  type: 'test'
+  ...
+# Subtest: unrelated and additionally modified keys do not open the palette
+ok 17 - unrelated and additionally modified keys do not open the palette
+  ---
+  duration_ms: 0.0645
+  type: 'test'
+  ...
+# Subtest: backtick remains a NORMAL-mode palette shortcut
+ok 18 - backtick remains a NORMAL-mode palette shortcut
+  ---
+  duration_ms: 0.05375
+  type: 'test'
+  ...
+# Subtest: uses a file DataTransferItem even when macOS leaves its MIME blank
+ok 19 - uses a file DataTransferItem even when macOS leaves its MIME blank
+  ---
+  duration_ms: 0.572375
+  type: 'test'
+  ...
+# Subtest: falls back to clipboardData.files when items has no usable file
+ok 20 - falls back to clipboardData.files when items has no usable file
+  ---
+  duration_ms: 0.2385
+  type: 'test'
+  ...
+# Subtest: sniffs and normalizes image bytes rather than trusting clipboard MIME
+ok 21 - sniffs and normalizes image bytes rather than trusting clipboard MIME
+  ---
+  duration_ms: 0.477
+  type: 'test'
+  ...
+# Subtest: keeps accompanying plain text detectable and rejects spoofed images visibly
+ok 22 - keeps accompanying plain text detectable and rejects spoofed images visibly
+  ---
+  duration_ms: 0.5275
+  type: 'test'
+  ...
+# Subtest: the React composer preserves image prompts and deduplicates durable lifecycle truth after reconnect
+ok 23 - the React composer preserves image prompts and deduplicates durable lifecycle truth after reconnect
+  ---
+  duration_ms: 1123.702833
+  type: 'test'
+  ...
+# Subtest: completed unmerged, review, conflict, and interrupted jobs remain actionable
+ok 24 - completed unmerged, review, conflict, and interrupted jobs remain actionable
+  ---
+  duration_ms: 0.444417
+  type: 'test'
+  ...
+# Subtest: verified integration, supersession, and non-actionable terminal failures are Done
+ok 25 - verified integration, supersession, and non-actionable terminal failures are Done
+  ---
+  duration_ms: 0.178541
+  type: 'test'
+  ...
+# Subtest: active state covers worker repair, checks, judging, integration, and normal workers
+ok 26 - active state covers worker repair, checks, judging, integration, and normal workers
+  ---
+  duration_ms: 0.518625
+  type: 'test'
+  ...
+# Subtest: a recovered running worker wins over preserved settled review evidence
+ok 27 - a recovered running worker wins over preserved settled review evidence
+  ---
+  duration_ms: 0.172458
+  type: 'test'
+  ...
+# Subtest: a recovered running worker wins over preserved conflicted integration evidence
+ok 28 - a recovered running worker wins over preserved conflicted integration evidence
+  ---
+  duration_ms: 0.06725
+  type: 'test'
+  ...
+# Subtest: settled and disconnected lifecycle state never appears active
+ok 29 - settled and disconnected lifecycle state never appears active
+  ---
+  duration_ms: 0.134292
+  type: 'test'
+  ...
+# Subtest: top-level queued and terminal labels override stale transient lifecycle metadata
+ok 30 - top-level queued and terminal labels override stale transient lifecycle metadata
+  ---
+  duration_ms: 0.093459
+  type: 'test'
+  ...
+# Subtest: unvisited threads initially select their newest row
+ok 31 - unvisited threads initially select their newest row
+  ---
+  duration_ms: 0.489833
+  type: 'test'
+  ...
+# Subtest: coordinator and worker navigation are independent
+ok 32 - coordinator and worker navigation are independent
+  ---
+  duration_ms: 0.058417
+  type: 'test'
+  ...
+# Subtest: saved rows clamp safely when a transcript shrinks
+ok 33 - saved rows clamp safely when a transcript shrinks
+  ---
+  duration_ms: 0.042833
+  type: 'test'
+  ...
+# Subtest: appending rows does not move an existing cursor
+ok 34 - appending rows does not move an existing cursor
+  ---
+  duration_ms: 0.034291
+  type: 'test'
+  ...
+# Subtest: the real browser keeps the transcript endpoint above a resized composer
+ok 35 - the real browser keeps the transcript endpoint above a resized composer
+  ---
+  duration_ms: 2064.558958
+  type: 'test'
+  ...
+# Subtest: real browser virtualizes, measures, paginates, navigates, and preserves reading position
+ok 36 - real browser virtualizes, measures, paginates, navigates, and preserves reading position
+  ---
+  duration_ms: 12283.274166
+  type: 'test'
+  ...
+# Subtest: pages prepend in server order and deduplicate replayed boundaries
+ok 37 - pages prepend in server order and deduplicate replayed boundaries
+  ---
+  duration_ms: 0.746292
+  type: 'test'
+  ...
+# Subtest: atomic reconnect preserves a disjoint reader cache while adopting the server gap cursor
+ok 38 - atomic reconnect preserves a disjoint reader cache while adopting the server gap cursor
+  ---
+  duration_ms: 0.418625
+  type: 'test'
+  ...
+# Subtest: partial overlap, downtime append, replay, and repeated reconnect retain continuity once
+ok 39 - partial overlap, downtime append, replay, and repeated reconnect retain continuity once
+  ---
+  duration_ms: 0.133416
+  type: 'test'
+  ...
+# Subtest: every durable id remains reachable exactly once after a no-overlap reconnect
+ok 40 - every durable id remains reachable exactly once after a no-overlap reconnect
+  ---
+  duration_ms: 4.265292
+  type: 'test'
+  ...
+# Subtest: repeated disjoint reconnects and straddling pages preserve exact durable order
+ok 41 - repeated disjoint reconnects and straddling pages preserve exact durable order
+  ---
+  duration_ms: 1.697625
+  type: 'test'
+  ...
+# Subtest: lifecycle context includes readable summary and full raw evidence
+ok 42 - lifecycle context includes readable summary and full raw evidence
+  ---
+  duration_ms: 0.198084
+  type: 'test'
+  ...
+# Subtest: stable row keys survive timestamp merges with jobs above and below the viewport
+ok 43 - stable row keys survive timestamp merges with jobs above and below the viewport
+  ---
+  duration_ms: 0.115042
+  type: 'test'
+  ...
+# Subtest: durable queued acknowledgement deduplicates an optimistic row in place
+ok 44 - durable queued acknowledgement deduplicates an optimistic row in place
+  ---
+  duration_ms: 0.726125
+  type: 'test'
+  ...
+# Subtest: multiple queued prompts retain server ordering and settled updates do not duplicate
+ok 45 - multiple queued prompts retain server ordering and settled updates do not duplicate
+  ---
+  duration_ms: 0.100583
+  type: 'test'
+  ...
+# Subtest: disjoint reconnect clears paged-out pending state without dropping cached ranges
+ok 46 - disjoint reconnect clears paged-out pending state without dropping cached ranges
+  ---
+  duration_ms: 0.161959
+  type: 'test'
+  ...
+# Subtest: bounded settlement authority preserves recent correlated failures
+ok 47 - bounded settlement authority preserves recent correlated failures
+  ---
+  duration_ms: 0.056542
+  type: 'test'
+  ...
+# Subtest: prompt lifecycle labels distinguish pending, processing, and failure
+ok 48 - prompt lifecycle labels distinguish pending, processing, and failure
+  ---
+  duration_ms: 0.112167
+  type: 'test'
+  ...
+# Subtest: known lifecycle IDs render durable titles and semantic action labels first
+ok 49 - known lifecycle IDs render durable titles and semantic action labels first
+  ---
+  duration_ms: 0.615917
+  type: 'test'
+  ...
+# Subtest: judge and failure lifecycle transitions use concrete semantic labels
+ok 50 - judge and failure lifecycle transitions use concrete semantic labels
+  ---
+  duration_ms: 0.294583
+  type: 'test'
+  ...
+# Subtest: unknown lifecycle IDs have a readable short-reference fallback
+ok 51 - unknown lifecycle IDs have a readable short-reference fallback
+  ---
+  duration_ms: 0.259708
+  type: 'test'
+  ...
+# Subtest: known IDs resolve in lifecycle sentences that do not match a fixed template
+ok 52 - known IDs resolve in lifecycle sentences that do not match a fixed template
+  ---
+  duration_ms: 0.263167
+  type: 'test'
+  ...
+# Subtest: ordinary system and tool text shortens commit, diff, and fingerprint hashes
+ok 53 - ordinary system and tool text shortens commit, diff, and fingerprint hashes
+  ---
+  duration_ms: 0.10625
+  type: 'test'
+  ...
+# Subtest: mixed known and unknown IDs stay readable and retain their exact original
+ok 54 - mixed known and unknown IDs stay readable and retain their exact original
+  ---
+  duration_ms: 0.103917
+  type: 'test'
+  ...
+# Subtest: ordinary prose and user-authored identifiers are not hidden
+ok 55 - ordinary prose and user-authored identifiers are not hidden
+  ---
+  duration_ms: 0.36425
+  type: 'test'
+  ...
+# Subtest: review free-form fields stay readable while exact identifiers remain collapsed
+ok 56 - review free-form fields stay readable while exact identifiers remain collapsed
+  ---
+  duration_ms: 5.786042
+  type: 'test'
+  ...
+# Subtest: CI check summaries hide exact commands and hashes in closed technical details
+ok 57 - CI check summaries hide exact commands and hashes in closed technical details
+  ---
+  duration_ms: 1.052792
+  type: 'test'
+  ...
+# Subtest: exact hashes and identifiers remain available only in collapsed technical evidence
+ok 58 - exact hashes and identifiers remain available only in collapsed technical evidence
+  ---
+  duration_ms: 14.88725
+  type: 'test'
+  ...
+# Subtest: follows output only inside the bottom threshold
+ok 59 - follows output only inside the bottom threshold
+  ---
+  duration_ms: 0.418375
+  type: 'test'
+  ...
+# Subtest: scrolls a row below the transcript viewport above its bottom margin
+ok 60 - scrolls a row below the transcript viewport above its bottom margin
+  ---
+  duration_ms: 0.090208
+  type: 'test'
+  ...
+# Subtest: scrolls upward and leaves an already visible row alone
+ok 61 - scrolls upward and leaves an already visible row alone
+  ---
+  duration_ms: 0.056875
+  type: 'test'
+  ...
+1..61
+# tests 61
+# suites 0
+# pass 61
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 12437.91675
+
+> neocode@0.1.0 test:e2e
+> npm exec --workspace @neocode/web playwright install chromium && npm run test:e2e -w @neocode/web
+
+
+> @neocode/web@0.1.0 test:e2e
+> playwright test
+
+
+[2mRunning [22m2[2m tests using [22m1[2m worker[22m
+
+E2E_NATIVE_CLIPBOARD=passed
+[2m10:09:49 AM[22m [31m[1m[vite][22m[39m [31mws proxy error:[39m
+Error: connect ECONNREFUSED 127.0.0.1:53773
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1638:16)
+    at TCPConnectWrap.callbackTrampoline (node:internal/async_hooks:130:17)
+  [32m✓[39m  [2m1 [22m[chromium] › e2e/image-paste.spec.ts:111:1 › integrated app pastes, opens, sends, validates, and restores image attachments[2m (1.8s)[22m
+  [32m✓[39m  [2m2 [22m[chromium] › e2e/websocket-lifecycle.spec.ts:33:1 › real browser lifecycle closes Vite-proxied sockets cleanly[2m (1.7s)[22m
+
+[32m  2 passed[39m[2m (5.3s)[22m
+--- stdout+stderr end ---
+exit_status=0
+finished_utc=2026-08-24T08:09:51Z
