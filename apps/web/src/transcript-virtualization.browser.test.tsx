@@ -201,6 +201,10 @@ test("real browser virtualizes, measures, paginates, navigates, and preserves re
     serverHasOlder = true;
     const reconnectSnapshot = coordinatorSnapshot(serverHistory.slice(-100), job);
     peer!.send(JSON.stringify({ type: "snapshot", snapshot: reconnectSnapshot } satisfies ServerMessage));
+    // First observe the authoritative disjoint snapshot in the virtual row
+    // model; checking the anchor before this transition can pass against the
+    // old DOM and race the subsequent restoration.
+    await waitFor(async () => evaluate<boolean>("+document.querySelector('.transcript-window').dataset.rowCount > 10002"));
     await waitFor(async () => evaluate<boolean>(`(() => { const v=document.querySelector('.transcript-viewport'); const row=document.querySelector('[data-row-key="${reconnectAnchor.key}"]'); return !!row && Math.abs(row.getBoundingClientRect().top-v.getBoundingClientRect().top-${reconnectAnchor.offset}) < 3 })()`));
     const afterReconnect = await evaluate<{ key: string; offset: number }>(`(() => { const v=document.querySelector('.transcript-viewport'); const row=document.querySelector('[data-row-key="${reconnectAnchor.key}"]'); return {key:row?.dataset.rowKey || '',offset:row?.getBoundingClientRect().top-v.getBoundingClientRect().top} })()`);
     assert.equal(afterReconnect.key, reconnectAnchor.key);
