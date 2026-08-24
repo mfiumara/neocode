@@ -29,7 +29,8 @@ export function jobActiveState(job: AgentJob, activityReady = true): JobActiveSt
   if (job.status === "running") {
     return { kind: "worker", label: job.review ? "Worker repairing" : "Worker working" };
   }
-  if (review === "ci_running") return job.review?.reviewBaseRef
+  if (review === "ci_running") return job.review?.reviewBaseRef && job.handoff?.round !== undefined
+    && job.review.preparedHandoffRound === job.handoff.round
     ? { kind: "checks", label: "Running product checks" }
     : { kind: "review", label: "Preparing review" };
   if (review === "post_merge_ci") return { kind: "checks", label: "Running checks" };

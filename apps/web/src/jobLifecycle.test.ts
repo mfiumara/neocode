@@ -41,7 +41,7 @@ test("active state requires genuine worker execution and covers synchronized coo
   assert.equal(jobActiveState(reviewed("worker_resumed")), undefined, "stale resumed metadata is not live worker authority");
   assert.equal(jobActiveState(reviewed("worker_resumed"), false), undefined);
   assert.deepEqual(jobActiveState(reviewed("ci_running")), { kind: "review", label: "Preparing review" });
-  const checking = reviewed("ci_running"); checking.review!.reviewBaseRef = "prepared";
+  const checking = reviewed("ci_running"); checking.handoff = { report: "done", requirements: [], diffSha256: "hash", branch: checking.branch, worktree: checking.worktree, tests: [], risks: [], round: 2, createdAt: 2 }; checking.review!.reviewBaseRef = "prepared"; checking.review!.preparedHandoffRound = 2;
   assert.deepEqual(jobActiveState(checking), { kind: "checks", label: "Running product checks" });
   assert.deepEqual(jobActiveState(reviewed("judging")), { kind: "review", label: "Under review" });
   assert.deepEqual(jobActiveState(reviewed("merging")), { kind: "integration", label: "Integrating" });

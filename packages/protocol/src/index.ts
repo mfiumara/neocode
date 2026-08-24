@@ -50,6 +50,10 @@ export interface ActionRequired {
 
 export interface CheckEvidence {
   command: string;
+  /** Coordinator-owned classification; absent only on legacy records. */
+  purpose?: "product_ci" | "preparation";
+  /** Exact worker handoff round this evidence evaluated. */
+  handoffRound?: number;
   ok: boolean;
   exitCode: number | null;
   durationMs: number;
@@ -102,6 +106,10 @@ export interface JobReview {
   targetBranch: string;
   /** Exact target commit onto which the candidate was most recently rebased for review. */
   reviewBaseRef?: string;
+  /** Handoff round for which reviewBaseRef was successfully prepared. */
+  preparedHandoffRound?: number;
+  /** Handoff round represented by the current review.ci collection. */
+  ciHandoffRound?: number;
   updatedAt: number;
   transitions: ReviewTransition[];
   ci?: CheckEvidence[];

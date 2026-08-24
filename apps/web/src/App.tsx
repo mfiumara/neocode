@@ -1385,6 +1385,7 @@ export function ReviewView({ job, jobs = [job] }: { job: AgentJob; jobs?: AgentJ
         <summary>{action.failureClass.replaceAll("_", " ")} · {action.state} · repair {action.attempt}/{action.maxAttempts}</summary>
         <pre>{action.evidence.detail}</pre>
         {action.feedback && <p><strong>Coordinator feedback:</strong> {action.feedback}</p>}
+        {!!action.evidence.checks?.length && <p className="muted">Historical remediation check evidence{action.evidence.checks[0]?.handoffRound ? ` · handoff round ${action.evidence.checks[0].handoffRound}` : ""}</p>}
         <CheckList checks={action.evidence.checks} />
       </details>)}</div>
     </> : null}

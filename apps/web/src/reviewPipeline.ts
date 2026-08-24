@@ -31,9 +31,10 @@ function transitionDuration(job: AgentJob, start: ReviewStatus[], finish: Review
 function isProductCheck(command: string): boolean {
   return /^npm run (?:test|check|build)$/.test(command);
 }
-function productChecks(job: AgentJob) { return (job.review?.ci || []).filter((check) => isProductCheck(check.command)); }
-function checkSummary(job: AgentJob, historical = false, queued = false): string {
-  const checks = productChecks(job);
+function productChecks(job: AgentJob) {
+  return (job.review?.ci || []).filter((check) => check.purpose === "product_ci" || (!check.purpose && isProductCheck(check.command)));
+}
+function checkSummary(checks: NonNullable<AgentJob["review"]>["ci"] = [], historical = false, queued = false): string {
   if (!checks.length) return queued ? "Product CI queued; no product command durably started" : "No product commands recorded";
   const summary = `${checks.filter((check) => check.ok).length}/${checks.length} product checks passed`;
   return historical ? `Historical prior-round evidence: ${summary}` : summary;
@@ -78,8 +79,10 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
   const genuineWorker = activityReady && !authoritativeTerminal && job.status === "running";
   const reviewActive = activityReady && !authoritativeTerminal && job.status === "completed" &&
     ["ci_running", "judging", "merging", "post_merge_ci"].includes(status || "");
-  const preparationRunning = status === "ci_running" && !review?.reviewBaseRef;
-  const productCiRunning = reviewActive && status === "ci_running" && !!review?.reviewBaseRef;
+  const handoffRound = job.handoff?.round;
+  const preparedForCurrentRound = !!review?.reviewBaseRef && handoffRound !== undefined && review?.preparedHandoffRound === handoffRound;
+  const preparationRunning = status === "ci_running" && !preparedForCurrentRound;
+  const productCiRunning = reviewActive && status === "ci_running" && preparedForCurrentRound;
   const active = genuineWorker || reviewActive;
   const action = review?.remediation?.actions.find((item) => item.id === review.remediation?.currentActionId)
     || review?.remediation?.actions.find((item) => item.state !== "resolved");
@@ -88,7 +91,7 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
   const conflictActionRequired = rebaseConflict && action?.failureClass === "conflict" && ["pending", "exhausted"].includes(action.state);
   const freshHandoffAfterBase = !!review?.reviewBaseRef && !!job.handoff
     && ["handoff_received", "queued"].includes(status || "")
-    && (review?.judgeHandoffRound || 0) < job.handoff.round;
+    && review?.preparedHandoffRound !== job.handoff.round;
   const targetAdvanced = !!review?.reviewBaseRef && ["handoff_received", "queued"].includes(status || "")
     && review?.transitions.some((item) => item.status === "handoff_received"
       && /main advanced|target advanced|prior approval invalidated/i.test(item.detail || ""));
@@ -163,10 +166,13 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
   }
 
   const phase = status ? rank[status] : 0;
-  const checks = productChecks(job);
+  const allProductChecks = productChecks(job);
+  const checks = allProductChecks.filter((check) => handoffRound !== undefined
+    && (check.handoffRound === handoffRound || (check.handoffRound === undefined && review?.ciHandoffRound === handoffRound)));
+  const historicalChecks = allProductChecks.filter((check) => !checks.includes(check));
   const post = review?.postMergeCi || [];
   const judge = latestJudgeEvidence(job);
-  const preparationComplete = !!review?.reviewBaseRef && !preparationInvalidated;
+  const preparationComplete = preparedForCurrentRound && !preparationInvalidated;
   const ciActionBlocked = ["worker_ci", "candidate_ci"].includes(action?.failureClass || "") && action?.state !== "resolved";
   const ciTone: PipelineTone = productCiRunning ? "active"
     : status === "ci_failed" ? "failed"
@@ -180,7 +186,7 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
   const stages: ReviewPipelineStage[] = [
     { id: "handoff", label: "Worker handoff", summary: job.handoff ? `Received round ${job.handoff.round}` : "Awaiting fresh handoff", tone: job.handoff ? "complete" : genuineWorker ? "active" : "waiting", at: job.handoff?.createdAt },
     { id: "preparation", label: "Coordinator Git preparation", summary: preparationInvalidated ? "Target or handoff advanced; rebase, preparation, and fresh approval required" : preparationComplete ? "Candidate prepared on target base" : rebaseConflict ? "Rebase conflict recorded" : status === "ci_running" ? reviewActive ? "Preparing candidate on target base" : "Preparation recorded; live activity unsynchronized" : "Awaiting coordinator", tone: preparationComplete ? "complete" : rebaseConflict ? "blocked" : preparationRunning && reviewActive ? "active" : "waiting" },
-    { id: "ci", label: "Product CI", summary: productCiRunning && !checks.length ? "Product CI running; no completed product commands recorded" : checkSummary(job, status === "ci_running" && checks.length > 0, preparationRunning), tone: ciTone, at: preparationRunning ? undefined : transitionAt(job, ["ci_running", "ci_failed", "judging"]), durationMs: status === "ci_running" ? undefined : checks.length ? checks.reduce((sum, check) => sum + check.durationMs, 0) : transitionDuration(job, ["ci_running"], ["ci_failed", "judging"]) },
+    { id: "ci", label: "Product CI", summary: checks.length ? checkSummary(checks) : historicalChecks.length ? checkSummary(historicalChecks, true, preparationRunning) : productCiRunning ? "Product CI running; no completed product commands recorded" : checkSummary([], false, preparationRunning), tone: ciTone, at: preparationRunning ? undefined : transitionAt(job, ["ci_running", "ci_failed", "judging"]), durationMs: checks.length ? checks.reduce((sum, check) => sum + check.durationMs, 0) : status === "ci_running" ? undefined : transitionDuration(job, ["ci_running"], ["ci_failed", "judging"]) },
     { id: "judge", label: "Independent judge", summary: status === "judging" && !reviewActive && !judge && !interruptedJudgeAction(job) ? "Independent judging recorded; live activity unsynchronized" : judgeSummary(job, status === "judging" && !!judge), tone: status === "judging" ? reviewActive ? "active" : "waiting" : interruptedJudgeAction(job) ? "blocked" : status === "rejected" || judge?.approved === false ? "failed" : judge?.approved ? "complete" : "waiting", at: transitionAt(job, ["judging", "approved", "rejected"]), durationMs: status === "judging" ? undefined : transitionDuration(job, ["judging"], ["approved", "rejected"]) },
     { id: "repair", label: "Feedback and repair", summary: action ? `${action.failureClass.replaceAll("_", " ")} · ${action.state} · ${action.attempt}/${action.maxAttempts}` : status === "feedback_sent" ? "Feedback sent; awaiting worker" : "No active repair", tone: genuineWorker && !!review ? "active" : action?.state === "pending" || action?.state === "exhausted" ? "blocked" : action?.state === "resolved" ? "complete" : "waiting", at: action?.updatedAt, durationMs: action ? Math.max(0, action.updatedAt - action.createdAt) : undefined },
     { id: "merge", label: "Authorized merge", summary: superseded ? "Integration not required" : review?.mergeCommit ? "Merge recorded" : review?.coordinatorAuthorizedAt ? "Explicitly authorized" : status === "approved" || status === "merge_queued" ? "Awaiting explicit coordinator authorization" : "Not authorized", tone: superseded || review?.mergeCommit ? "complete" : status === "merging" && reviewActive ? "active" : mergeBlocked ? "blocked" : "waiting", at: review?.coordinatorAuthorizedAt || transitionAt(job, ["approved", "merge_queued", "merging"]), durationMs: transitionDuration(job, ["merging"], ["post_merge_ci", "merged", "blocked", "failed"]) },

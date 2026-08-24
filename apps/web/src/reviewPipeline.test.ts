@@ -72,6 +72,7 @@ test("preparation completes only with durable base evidence and early CI remains
   assert.equal(stage(early, "preparation").tone, "active");
   assert.match(stage(early, "preparation").summary, /preparing candidate/i);
   early.review!.reviewBaseRef = "prepared-base";
+  early.review!.preparedHandoffRound = 1;
   assert.equal(stage(early, "preparation").tone, "complete");
 });
 
@@ -87,18 +88,33 @@ test("pre-CI preparation transitions to actual product CI and excludes informati
   assert.doesNotMatch(stage(value, "ci").summary, /2\/2/);
 
   value.review!.reviewBaseRef = "prepared-main";
+  value.review!.preparedHandoffRound = 1;
   assert.equal(stage(value, "preparation").tone, "complete");
   assert.equal(stage(value, "ci").tone, "active");
   assert.match(stage(value, "ci").summary, /no completed product commands/i);
-  value.review!.ci.push({ command: "npm run test", ok: false, exitCode: 1, durationMs: 40, output: "prior failure" });
+  value.review!.ciHandoffRound = 1;
+  value.review!.ci.push({ command: "npm run test", purpose: "product_ci", handoffRound: 1, ok: false, exitCode: 1, durationMs: 40, output: "current completed failure" });
   assert.equal(stage(value, "ci").tone, "active");
-  assert.match(stage(value, "ci").summary, /Historical prior-round evidence: 0\/1/);
+  assert.match(stage(value, "ci").summary, /^0\/1 product checks passed/);
+  assert.equal(stage(value, "ci").durationMs, 40);
+});
+
+test("legacy records use only the narrow product-command fallback and remain historical without round authority", () => {
+  const value = job("approved");
+  value.review!.ci = [
+    { command: "npm run check", ok: true, exitCode: 0, durationMs: 12, output: "passed" },
+    { command: "custom legacy shell", ok: true, exitCode: 0, durationMs: 9, output: "passed" },
+    { command: "git diff --check main HEAD", ok: true, exitCode: 0, durationMs: 3, output: "" },
+  ];
+  assert.match(stage(value, "ci").summary, /Historical prior-round evidence: 1\/1/);
+  assert.doesNotMatch(stage(value, "ci").summary, /2\/2|3\/3/);
 });
 
 test("durable stage durations use checks, transitions, and remediation timestamps", () => {
   const value = job("rejected");
   value.review!.transitions = [{ status: "ci_running", at: 3_000 }, { status: "judging", at: 4_000 }, { status: "rejected", at: 5_500 }];
-  value.review!.ci = [{ command: "npm run test", ok: true, exitCode: 0, durationMs: 700, output: "" }];
+  value.review!.ciHandoffRound = 1;
+  value.review!.ci = [{ command: "npm run test", purpose: "product_ci", handoffRound: 1, ok: true, exitCode: 0, durationMs: 700, output: "" }];
   value.review!.judge = verdict("No");
   value.review!.remediation = { maxAttempts: 2, rounds: {}, actions: [{ id: "a", failureClass: "judge_changes", fingerprint: "f", state: "pending", attempt: 1, maxAttempts: 2, createdAt: 5_500, updatedAt: 6_250, evidence: { detail: "repair" } }] };
   assert.equal(stage(value, "ci").durationMs, 700);
@@ -175,7 +191,9 @@ test("target advancement and a fresh handoff invalidate an older prepared base",
 });
 
 test("fresh active rounds label retained checks and verdicts as historical", () => {
-  const ci = job("ci_running"); ci.review!.reviewBaseRef = "prepared"; ci.review!.ci = [{ command: "npm run test", ok: false, exitCode: 1, durationMs: 20, output: "old" }];
+  const ci = job("ci_running"); ci.handoff!.round = 2; ci.review!.reviewBaseRef = "round-1-base"; ci.review!.preparedHandoffRound = 1; ci.review!.ciHandoffRound = 1; ci.review!.ci = [{ command: "npm run test", purpose: "product_ci", handoffRound: 1, ok: false, exitCode: 1, durationMs: 20, output: "old" }];
+  assert.equal(stage(ci, "preparation").tone, "active");
+  assert.equal(stage(ci, "ci").tone, "waiting");
   assert.match(stage(ci, "ci").summary, /^Historical prior-round evidence/);
   assert.equal(stage(ci, "ci").durationMs, undefined);
   const judging = job("judging"); judging.review!.judge = verdict("Old rejection");

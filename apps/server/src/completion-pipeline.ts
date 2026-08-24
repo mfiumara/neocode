@@ -268,10 +268,10 @@ export class CompletionPipeline {
       if (mode === "post") {
         const checks = await this.adapter.runCi(this.rootCwd || job.isolation.path);
         const productChecks = this.productCiEvidence(checks);
-        job.review!.postMergeCi = checks; this.publish(job);
+        job.review!.postMergeCi = this.classifyChecks(checks, productChecks, job.handoff?.round); this.publish(job);
         if (!productChecks.length || checks.some((check) => !check.ok)) {
           this.requireAction(job, "post_merge_ci", "post_ci_failed",
-            !productChecks.length ? "No post-merge product CI checks detected" : "Post-merge CI failed", checks);
+            !productChecks.length ? "No post-merge product CI checks detected" : "Post-merge CI failed", job.review!.postMergeCi);
           return;
         }
         this.resolveInfrastructureRetry(job);
@@ -281,14 +281,17 @@ export class CompletionPipeline {
       if (mode === "judge") {
         this.transition(job, "ci_running", "Coordinator started guarded rebase and CI for independent review", "coordinator");
         await this.adapter.prepareForReview?.(job);
+        job.review!.preparedHandoffRound = job.handoff?.round;
         this.publish(job);
         const ci = await this.adapter.runCi(job.isolation.path);
         const productChecks = this.productCiEvidence(ci);
-        job.review!.ci = ci; this.publish(job);
+        job.review!.ci = this.classifyChecks(ci, productChecks, job.handoff?.round);
+        job.review!.ciHandoffRound = job.handoff?.round;
+        this.publish(job);
         if (!productChecks.length || ci.some((check) => !check.ok)) {
           const transient = productChecks.some((check) => check.timedOut || check.exitCode === null);
           this.requireAction(job, transient ? "infrastructure" : "worker_ci", "ci_failed",
-            !productChecks.length ? "No product CI checks configured; Git metadata alone cannot authorize review" : "Worker CI failed", ci);
+            !productChecks.length ? "No product CI checks configured; Git metadata alone cannot authorize review" : "Worker CI failed", job.review!.ci);
           return;
         }
         this.transition(job, "ci_running", `CI passed: ${ci.map((check) => check.command).join(", ")}`, "server");
@@ -324,7 +327,8 @@ export class CompletionPipeline {
         job.review!.mergeCommit = result.commit;
         if (result.completionCommit && job.completion) job.completion.head = result.completionCommit;
         if (result.candidateCi) {
-          job.review!.postMergeCi = result.candidateCi;
+          const productChecks = this.productCiEvidence(result.candidateCi);
+          job.review!.postMergeCi = this.classifyChecks(result.candidateCi, productChecks, job.handoff?.round);
           this.publish(job);
           this.resolveInfrastructureRetry(job);
           this.transition(job, "merged", `Guarded rebased fast-forward verified as ${result.commit}; exact candidate checks passed before main changed`, "server");
@@ -333,10 +337,10 @@ export class CompletionPipeline {
         this.transition(job, "post_merge_ci", "Merge completed; running serialized post-merge checks", "server");
         const checks = await this.adapter.runCi(this.rootCwd || job.isolation.path);
         const productChecks = this.productCiEvidence(checks);
-        job.review!.postMergeCi = checks; this.publish(job);
+        job.review!.postMergeCi = this.classifyChecks(checks, productChecks, job.handoff?.round); this.publish(job);
         if (!productChecks.length || checks.some((check) => !check.ok)) {
           this.requireAction(job, "post_merge_ci", "post_ci_failed",
-            !productChecks.length ? "No post-merge product CI checks detected" : "Post-merge CI failed", checks);
+            !productChecks.length ? "No post-merge product CI checks detected" : "Post-merge CI failed", job.review!.postMergeCi);
           return;
         }
         this.resolveInfrastructureRetry(job);
@@ -454,6 +458,11 @@ export class CompletionPipeline {
 
   private productCiEvidence(checks: CheckEvidence[]): CheckEvidence[] {
     return this.adapter.productCiEvidence?.(checks) ?? checks;
+  }
+
+  private classifyChecks(checks: CheckEvidence[], productChecks: CheckEvidence[], handoffRound?: number): CheckEvidence[] {
+    const product = new Set(productChecks);
+    return checks.map((check) => ({ ...check, purpose: product.has(check) ? "product_ci" : "preparation", handoffRound }));
   }
 
   private transition(job: AgentJob, status: ReviewStatus, detail?: string, owner: "worker" | "coordinator" | "judge" | "server" = "server"): void {

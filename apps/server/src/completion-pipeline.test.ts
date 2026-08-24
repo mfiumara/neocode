@@ -454,6 +454,16 @@ test("actual review persists Git packet evidence but metadata alone cannot satis
     assert.match(unconfigured.review?.error || "", /Git metadata alone cannot authorize review/);
     assert.equal(judgeCalls, 0, "Git packet checks alone never launch a judge");
     assert.ok((unconfigured.review?.ci?.length || 0) >= 7, "Git packet remains durable even when product CI is absent");
+    assert.equal(unconfigured.review?.preparedHandoffRound, unconfigured.handoff?.round);
+    assert.equal(unconfigured.review?.ciHandoffRound, unconfigured.handoff?.round);
+    assert.ok(unconfigured.review?.ci?.every((check) => check.purpose === "preparation" && check.handoffRound === unconfigured.handoff?.round));
+    const defaultClassification = noProductAdapter.productCiEvidence([
+      { command: "npm run test", ok: true, exitCode: 0, durationMs: 1, output: "" },
+      { command: "npm run check", ok: true, exitCode: 0, durationMs: 1, output: "" },
+      { command: "npm run build", ok: true, exitCode: 0, durationMs: 1, output: "" },
+      { command: "git diff --check main HEAD", ok: true, exitCode: 0, durationMs: 1, output: "" },
+    ]);
+    assert.deepEqual(defaultClassification.map((check) => check.command), ["npm run test", "npm run check", "npm run build"]);
     assert.throws(() => blocked.requestMerge(unconfigured, coordinatorMergeCapability), /judge approval/);
 
     const configuredAdapter = new LocalReviewAdapter(root, {
@@ -476,7 +486,11 @@ test("actual review persists Git packet evidence but metadata alone cannot satis
       "git diff --name-status main...HEAD", CANONICAL_DIFF_COMMAND,
       "git status --porcelain", "git diff --check main...HEAD",
     ]);
-    assert.ok(packet.every((check) => check.ok && check.exitCode === 0));
+    assert.ok(packet.every((check) => check.ok && check.exitCode === 0 && check.purpose === "preparation"));
+    assert.ok(reviewed.review?.ci?.find((check) => check.command === "true" && check.purpose === "product_ci"), "configured custom CI is authoritatively classified as product");
+    assert.ok(reviewed.review?.ci?.every((check) => check.handoffRound === reviewed.handoff?.round));
+    assert.equal(reviewed.review?.preparedHandoffRound, reviewed.handoff?.round);
+    assert.equal(reviewed.review?.ciHandoffRound, reviewed.handoff?.round);
     assert.equal(packet[0]?.output.trim().split("\n").length, 3, "main, HEAD, and parent are persisted");
     assert.match(packet[1]?.output || "", /^[0-9a-f]{40}\n$/);
     assert.match(packet[2]?.output || "", /^[0-9a-f]{40}\n$/);
