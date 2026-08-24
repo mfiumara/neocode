@@ -78,9 +78,13 @@ test("preparation completes only with durable base evidence and early CI remains
 
 test("pre-CI preparation transitions to actual product CI and excludes informational Git checks", () => {
   const value = job("ci_running");
+  value.handoff!.round = 2;
+  value.review!.reviewBaseRef = "round-1-base";
+  value.review!.preparedHandoffRound = 1;
+  value.review!.ciHandoffRound = 1;
   value.review!.ci = [
-    { command: "git diff --check main HEAD", ok: true, exitCode: 0, durationMs: 10, output: "" },
-    { command: "git status --porcelain", ok: true, exitCode: 0, durationMs: 10, output: "" },
+    { command: "git diff --check main HEAD", purpose: "preparation", handoffRound: 1, ok: true, exitCode: 0, durationMs: 10, output: "" },
+    { command: "git status --porcelain", purpose: "preparation", handoffRound: 1, ok: true, exitCode: 0, durationMs: 10, output: "" },
   ];
   assert.equal(stage(value, "preparation").tone, "active");
   assert.equal(stage(value, "ci").tone, "waiting");
@@ -88,12 +92,12 @@ test("pre-CI preparation transitions to actual product CI and excludes informati
   assert.doesNotMatch(stage(value, "ci").summary, /2\/2/);
 
   value.review!.reviewBaseRef = "prepared-main";
-  value.review!.preparedHandoffRound = 1;
+  value.review!.preparedHandoffRound = 2;
   assert.equal(stage(value, "preparation").tone, "complete");
   assert.equal(stage(value, "ci").tone, "active");
   assert.match(stage(value, "ci").summary, /no completed product commands/i);
-  value.review!.ciHandoffRound = 1;
-  value.review!.ci.push({ command: "npm run test", purpose: "product_ci", handoffRound: 1, ok: false, exitCode: 1, durationMs: 40, output: "current completed failure" });
+  value.review!.ciHandoffRound = 2;
+  value.review!.ci.push({ command: "npm run test", purpose: "product_ci", handoffRound: 2, ok: false, exitCode: 1, durationMs: 40, output: "current completed failure" });
   assert.equal(stage(value, "ci").tone, "active");
   assert.match(stage(value, "ci").summary, /^0\/1 product checks passed/);
   assert.equal(stage(value, "ci").durationMs, 40);
