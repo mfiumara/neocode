@@ -3,9 +3,10 @@ import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ServerMessage, TranscriptMessage } from "@neocode/protocol";
+import type { AgentJob, ServerMessage, TranscriptMessage } from "@neocode/protocol";
+import { CoordinatorNotificationQueue } from "./coordinator-notifications.js";
 import { Orchestrator, workerSystemPrompt } from "./orchestrator.js";
-import { RuntimeStateStore, type DurableCoordinatorPrompt } from "./runtime-state.js";
+import { RuntimeStateStore, type CoordinatorNotificationState, type DurableCoordinatorPrompt } from "./runtime-state.js";
 
 test("worktree worker prompt reserves judging and integration authority for the main coordinator", () => {
   const prompt = workerSystemPrompt("base", {
@@ -179,6 +180,74 @@ test("terminal persistence failure fails closed without claiming a durable promp
     const restored = await new RuntimeStateStore(root).load();
     assert.equal(restored?.coordinator.messages.find((message) => message.id === "failure-closed")?.promptState, "queued");
     assert.equal(restored?.coordinator.pendingPrompts?.[0]?.messageId, "failure-closed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("notification claim reservation serializes a real queued user prompt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "neocode-notification-user-race-"));
+  const calls: string[] = [];
+  const coordinator = { isIdle: true, async prompt(content: string) { calls.push(content); } };
+  type Harness = {
+    coordinator: typeof coordinator;
+    coordinatorTurnInFlight: boolean;
+    coordinatorNotifications?: CoordinatorNotificationQueue;
+    pendingCoordinatorPrompts: DurableCoordinatorPrompt[];
+    schedulePromptDrain(): void;
+    stateStore: RuntimeStateStore;
+  };
+  try {
+    const orchestrator = new Orchestrator(root, () => undefined, { startup: false, intervalMs: 0, sweepIntervalMs: 0 });
+    const harness = orchestrator as unknown as Harness;
+    harness.coordinator = coordinator;
+    const current: AgentJob = {
+      id: "race-job", title: "Race", prompt: "race", status: "completed", branch: "race", worktree: "/tmp/race",
+      isolation: { requested: "worktree", mode: "worktree", path: "/tmp/race" }, baseRef: "base",
+      createdAt: 1, updatedAt: 2, messages: [],
+      review: { hookToken: "hook", status: "ci_failed", attempt: 1, targetBranch: "main", updatedAt: 2, transitions: [],
+        remediation: { maxAttempts: 3, rounds: {}, currentActionId: "action",
+          actions: [{ id: "action", failureClass: "worker_ci", fingerprint: "race", state: "pending", attempt: 0,
+            maxAttempts: 3, createdAt: 2, updatedAt: 2, evidence: { detail: "exact" } }] } },
+    };
+    const notificationState: CoordinatorNotificationState = { events: [], lastSignals: {} };
+    let persistCount = 0;
+    let claimBlocked = false;
+    let releaseClaim!: () => void;
+    const queue = new CoordinatorNotificationQueue(notificationState, {
+      append: () => undefined, currentJob: () => current,
+      isIdle: () => coordinator.isIdle,
+      reserveTurn: () => {
+        if (harness.coordinatorTurnInFlight) return undefined;
+        harness.coordinatorTurnInFlight = true;
+        return () => { harness.coordinatorTurnInFlight = false; };
+      },
+      turnReleased: () => harness.schedulePromptDrain(),
+      persist: async () => {
+        if (++persistCount === 2) {
+          claimBlocked = true;
+          await new Promise<void>((resolve) => { releaseClaim = resolve; });
+        }
+      },
+      wake: async (event, started) => { const prompt = coordinator.prompt(event.text); started(); await prompt; },
+    });
+    harness.coordinatorNotifications = queue;
+    queue.observe(current);
+    await waitFor(() => claimBlocked);
+
+    await orchestrator.prompt("user FIFO", [], [], "user-race");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(calls, [], "accepted user prompt cannot enter the reserved lifecycle turn");
+    queue.agentSettled();
+    assert.equal(notificationState.events[0]!.wakeState, "claimed", "unrelated settlement cannot acknowledge a not-started wake");
+
+    current.review!.remediation!.actions[0]!.state = "repairing";
+    releaseClaim();
+    await waitFor(() => harness.pendingCoordinatorPrompts.length === 0);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0]!, /^user FIFO/);
+    assert.equal(notificationState.events[0]!.wakeState, "delivered", "stale wake settles without a model turn");
+    await harness.stateStore.flush();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

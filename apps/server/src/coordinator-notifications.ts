@@ -8,12 +8,28 @@ import type {
 
 export interface CoordinatorNotificationHooks {
   append(event: CoordinatorWorkerEvent): void;
-  persist(): void;
+  /** Resolve only when the notification checkpoint is durably committed. */
+  persist(): void | Promise<void>;
   isIdle(): boolean;
-  wake(event: CoordinatorWorkerEvent): Promise<void>;
+  /** Synchronously reserve the shared coordinator turn; undefined means busy/capacity-limited. */
+  reserveTurn?(event: CoordinatorWorkerEvent): (() => void) | undefined;
+  turnReleased?(): void;
+  /** Invoke started only after the lifecycle prompt was accepted by the session. */
+  wake(event: CoordinatorWorkerEvent, started: () => void): Promise<void>;
+  /** Return the authoritative durable job, rather than a broadcast snapshot. */
+  currentJob?(jobId: string): AgentJob | undefined;
 }
 
-function signalFor(job: AgentJob): { kind: CoordinatorWorkerEventKind; detail?: string; wake: boolean; signature?: string } | undefined {
+interface WorkerSignal {
+  kind: CoordinatorWorkerEventKind;
+  detail?: string;
+  wake: boolean;
+  signature?: string;
+  actionId?: string;
+  actionState?: "pending" | "repairing" | "resolved" | "exhausted";
+}
+
+function signalFor(job: AgentJob): WorkerSignal | undefined {
   const remediation = job.review?.remediation;
   const action = remediation?.actions.find((entry) => entry.id === remediation.currentActionId);
   if (action && (action.state === "pending" || action.state === "exhausted")) {
@@ -26,6 +42,8 @@ function signalFor(job: AgentJob): { kind: CoordinatorWorkerEventKind; detail?: 
       }),
       wake: action.state === "pending",
       signature: `action_required:${action.id}:${action.state}`,
+      actionId: action.id,
+      actionState: action.state,
     };
   }
   const transition = job.review?.transitions.at(-1);
@@ -41,27 +59,71 @@ function signalFor(job: AgentJob): { kind: CoordinatorWorkerEventKind; detail?: 
   return undefined;
 }
 
+function signatureFor(job: AgentJob, signal: WorkerSignal): string {
+  const lastTransition = job.review?.transitions.at(-1);
+  return signal.signature || (lastTransition
+    ? `${signal.kind}:${lastTransition.status}:${lastTransition.at}:${lastTransition.owner || "server"}`
+    : `${signal.kind}:${job.updatedAt}`);
+}
+
+function backlogSignature(job: AgentJob): string {
+  const action = job.review?.remediation?.actions.find((entry) => entry.id === job.review?.remediation?.currentActionId);
+  return ["priority-v2", job.status, job.updatedAt, job.completion?.head, job.review?.status,
+    job.review?.transitions.at(-1)?.at, action?.id, action?.state, job.integration?.status].join(":");
+}
+
+function backlogWakeCurrent(job: AgentJob): boolean {
+  if (job.isolation.mode !== "worktree" || job.integration?.status === "merged" || job.integration?.status === "superseded") return false;
+  if (job.status === "interrupted") return job.recoverable === true;
+  if (job.status === "needs_attention") return true;
+  if (job.status !== "completed" || job.review?.status === "merged") return false;
+  return !new Set(["ci_running", "judging", "merge_queued", "merging", "post_merge_ci"]).has(job.review?.status || "");
+}
+
 function concise(value: string | undefined, limit = 240): string | undefined {
   if (!value) return undefined;
   const text = value.replace(/\s+/g, " ").trim();
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
 
+function legacyActionId(event: CoordinatorWorkerEvent): string | undefined {
+  if (event.actionId) return event.actionId;
+  try {
+    const outer = JSON.parse(event.text.slice(event.text.indexOf("{"))) as { detail?: string };
+    if (!outer.detail) return undefined;
+    return (JSON.parse(outer.detail) as { actionId?: string }).actionId;
+  } catch { return undefined; }
+}
+
 export class CoordinatorNotificationQueue {
   private draining = false;
+  private persistenceBlocked = false;
+  private activeEventId?: string;
+  private settlement?: Promise<void>;
+  private releaseTurn?: () => void;
+  private stopped = false;
 
   constructor(
     readonly state: CoordinatorNotificationState,
     private readonly hooks: CoordinatorNotificationHooks,
-  ) {}
+  ) {
+    this.state.settledEventIds ??= {};
+    // Upgrade old durable rows into the permanent idempotency checkpoint.
+    for (const event of state.events) {
+      if (event.wakeState === "delivered" || event.wakeDeliveredAt !== undefined) {
+        this.state.settledEventIds[event.id] ??= event.wakeDeliveredAt || event.createdAt;
+      }
+    }
+  }
 
-  observe(job: AgentJob): boolean {
+  observe(snapshot: AgentJob): boolean {
+    // Broadcasts and reconnect snapshots are hints only. Classification always
+    // uses the current durable aggregate, so an old pending action cannot undo
+    // a repairing/resolved action.
+    const job = this.hooks.currentJob?.(snapshot.id) || snapshot;
     const signal = signalFor(job);
     if (!signal) return false;
-    const lastTransition = job.review?.transitions.at(-1);
-    const signature = signal.signature || (lastTransition
-      ? `${signal.kind}:${lastTransition.status}:${lastTransition.at}:${lastTransition.owner || "server"}`
-      : `${signal.kind}:${job.updatedAt}`);
+    const signature = signatureFor(job, signal);
     if (this.state.lastSignals[job.id] === signature) return false;
     this.state.lastSignals[job.id] = signature;
     const eventId = randomUUID();
@@ -85,26 +147,18 @@ export class CoordinatorNotificationQueue {
       messageId: randomUUID(),
       wakeRequested: signal.wake,
       wakeState: signal.wake ? "pending" : undefined,
+      signalSignature: signature,
+      actionId: signal.actionId,
+      actionState: signal.actionState,
     };
-    this.state.events.push(event);
-    // Bound delivered history only. An action-required wake may never be
-    // discarded merely because the coordinator stayed busy for a long time.
-    while (this.state.events.length > 500) {
-      const removable = this.state.events.findIndex((entry) => !entry.wakeRequested || entry.wakeState === "delivered" || entry.wakeDeliveredAt !== undefined);
-      if (removable < 0) break;
-      this.state.events.splice(removable, 1);
-    }
-    this.hooks.append(event);
-    this.hooks.persist();
-    void this.drain();
+    this.enqueue(event);
     return true;
   }
 
   /** Queue one durable autonomous review for a stable backlog state. */
-  requestBacklogSweep(job: AgentJob): boolean {
-    const action = job.review?.remediation?.actions.find((entry) => entry.id === job.review?.remediation?.currentActionId);
-    const signature = ["priority-v2", job.status, job.updatedAt, job.completion?.head, job.review?.status,
-      job.review?.transitions.at(-1)?.at, action?.id, action?.state, job.integration?.status].join(":");
+  requestBacklogSweep(snapshot: AgentJob): boolean {
+    const job = this.hooks.currentJob?.(snapshot.id) || snapshot;
+    const signature = backlogSignature(job);
     const key = `backlog:${job.id}`;
     if (this.state.lastSignals[key] === signature) return false;
     this.state.lastSignals[key] = signature;
@@ -116,7 +170,7 @@ export class CoordinatorNotificationQueue {
       state: "backlog_sweep",
       detail: `status=${job.status} review=${job.review?.status || "none"} integration=${job.integration?.status || "none"} branch=${job.branch} worktree=${job.isolation.path}`,
     };
-    const event: CoordinatorWorkerEvent = {
+    this.enqueue({
       id: eventId,
       jobId: job.id,
       kind: "backlog_sweep",
@@ -127,70 +181,173 @@ export class CoordinatorNotificationQueue {
       messageId: randomUUID(),
       wakeRequested: true,
       wakeState: "pending",
-    };
+      signalSignature: signature,
+    });
+    return true;
+  }
+
+  private enqueue(event: CoordinatorWorkerEvent): void {
+    // A restored/corrupt duplicate row with the same stable id never creates a
+    // second transcript entry or model turn.
+    if (this.state.events.some((entry) => entry.id === event.id) || this.state.settledEventIds?.[event.id]) return;
     this.state.events.push(event);
     while (this.state.events.length > 500) {
-      const removable = this.state.events.findIndex((entry) => !entry.wakeRequested || entry.wakeState === "delivered" || entry.wakeDeliveredAt !== undefined);
+      const removable = this.state.events.findIndex((entry) => !entry.wakeRequested || this.isSettled(entry));
       if (removable < 0) break;
       this.state.events.splice(removable, 1);
     }
     this.hooks.append(event);
-    this.hooks.persist();
-    void this.drain();
-    return true;
+    void this.persistThenDrain();
   }
 
-  hasPendingWake(): boolean {
-    return this.state.events.some((entry) => entry.wakeRequested
-      && entry.wakeState !== "delivered" && entry.wakeDeliveredAt === undefined);
-  }
-
-  /** Called only from Pi's agent_settled event, never as a startup poll. */
-  agentSettled(): void {
-    // Pi can emit agent_settled before prompt() resolves (or even reject that
-    // promise after producing the response). This event proves that a claimed
-    // wake was handled; startup polling must not make the same assumption.
-    const claimed = this.state.events.find((entry) => entry.wakeState === "claimed" && entry.wakeDeliveredAt === undefined);
-    if (claimed && this.hooks.isIdle()) {
-      claimed.wakeState = "delivered";
-      claimed.wakeDeliveredAt = Date.now();
-      this.hooks.persist();
-      this.draining = false;
+  private async persistThenDrain(): Promise<void> {
+    try {
+      await this.hooks.persist();
+    } catch {
+      this.persistenceBlocked = true;
+      return;
     }
     void this.drain();
   }
 
+  hasPendingWake(): boolean {
+    return this.state.events.some((entry) => entry.wakeRequested && !this.isSettled(entry));
+  }
+
+  /** Called only from Pi's agent_settled event, never as a startup poll. */
+  agentSettled(): void {
+    const event = this.activeEventId && this.state.events.find((entry) => entry.id === this.activeEventId);
+    if (event && !this.isSettled(event)) {
+      this.settlement ??= this.commitSettlement(event);
+      void this.settlement.then(() => this.drain(), () => undefined);
+    } else void this.drain();
+  }
+
   settled(): void { void this.drain(); }
 
+  /** Release synchronous turn ownership during backend shutdown without starting more work. */
+  shutdown(): void { this.stopped = true; this.releaseReservation(false); }
+
+  private releaseReservation(notify = true): void {
+    const release = this.releaseTurn;
+    this.releaseTurn = undefined;
+    if (!release) return;
+    release();
+    if (notify) this.hooks.turnReleased?.();
+  }
+
+  private isSettled(event: CoordinatorWorkerEvent): boolean {
+    return this.state.settledEventIds?.[event.id] !== undefined
+      || event.wakeState === "delivered" || event.wakeDeliveredAt !== undefined;
+  }
+
+  private isCurrent(event: CoordinatorWorkerEvent): boolean {
+    if (!this.hooks.currentJob) return true;
+    const job = this.hooks.currentJob(event.jobId);
+    if (!job) return false;
+    if (event.kind === "action_required") {
+      const actionId = legacyActionId(event);
+      const current = job.review?.remediation?.actions.find((entry) => entry.id === job.review?.remediation?.currentActionId);
+      return !!actionId && current?.id === actionId && current.state === "pending";
+    }
+    if (event.kind === "backlog_sweep") {
+      return event.signalSignature ? backlogSignature(job) === event.signalSignature : backlogWakeCurrent(job);
+    }
+    if (event.signalSignature) {
+      const signal = signalFor(job);
+      return !!signal && signatureFor(job, signal) === event.signalSignature;
+    }
+    // Legacy rows predate source signatures. Reclassify their wake kind from
+    // current durable state instead of trusting historical payload metadata.
+    if (event.kind === "failed") return job.status === "failed";
+    if (event.kind === "needs_attention") return job.status === "needs_attention";
+    if (event.kind === "handoff") return signalFor(job)?.kind === "handoff";
+    return false;
+  }
+
+  private async commitSettlement(event: CoordinatorWorkerEvent): Promise<void> {
+    const deliveredAt = Date.now();
+    event.wakeState = "delivered";
+    event.wakeDeliveredAt = deliveredAt;
+    this.state.settledEventIds ??= {};
+    this.state.settledEventIds[event.id] = deliveredAt;
+    try {
+      await this.hooks.persist();
+    } catch (error) {
+      // Never spin another model turn in this process after an acknowledgement
+      // failure. The old durable claim remains eligible after a true restart.
+      this.persistenceBlocked = true;
+      throw error;
+    }
+  }
+
   private async drain(): Promise<void> {
-    if (this.draining || !this.hooks.isIdle()) return;
-    const event = this.state.events.find((entry) => entry.wakeRequested
-      && entry.wakeState !== "delivered" && entry.wakeDeliveredAt === undefined);
+    if (this.stopped || this.draining || this.persistenceBlocked || !this.hooks.isIdle()) return;
+    const event = this.state.events.find((entry) => entry.wakeRequested && !this.isSettled(entry));
     if (!event) return;
     this.draining = true;
-    // Persist only a claim before the external side effect. If the process
-    // crashes here, restart redelivers the same stable event id; completion is
-    // persisted only after wake resolves.
-    event.wakeState = "claimed";
-    event.wakeClaimedAt = Date.now();
-    this.hooks.persist();
-    let delivered = false;
+    let wakeFailed = false;
     try {
-      await this.hooks.wake(event);
-      event.wakeState = "delivered";
-      event.wakeDeliveredAt = Date.now();
-      this.hooks.persist();
-      delivered = true;
-    } catch {
-      // agent_settled may already have authoritatively completed this claim.
-      if (event.wakeState !== "delivered" && event.wakeDeliveredAt === undefined) {
-        event.wakeState = "pending";
-        delete event.wakeClaimedAt;
-        this.hooks.persist();
+      if (!this.isCurrent(event)) {
+        // Keep text/raw evidence byte-for-byte intact; only settle its obsolete
+        // wake after comparing with the authoritative job/action aggregate.
+        await this.commitSettlement(event);
+        return;
       }
+
+      // Turn ownership is synchronous and precedes the first asynchronous claim
+      // write, so a queued user prompt cannot enter Pi during this TOCTOU window.
+      const reservation = this.hooks.reserveTurn?.(event);
+      if (this.hooks.reserveTurn && !reservation) return;
+      this.releaseTurn = reservation || (() => undefined);
+      if (!this.isCurrent(event)) {
+        await this.commitSettlement(event);
+        return;
+      }
+      event.wakeState = "claimed";
+      event.wakeClaimedAt = Date.now();
+      try {
+        await this.hooks.persist();
+      } catch {
+        this.persistenceBlocked = true;
+        return;
+      }
+      if (this.stopped) return;
+
+      // The action may advance while the durable claim flush is blocked. The
+      // authoritative re-read immediately before prompt() closes that gap.
+      if (!this.isCurrent(event)) {
+        await this.commitSettlement(event);
+        return;
+      }
+
+      try {
+        await this.hooks.wake(event, () => { this.activeEventId = event.id; });
+        if (this.activeEventId !== event.id) throw new Error("Lifecycle wake was rejected before it started");
+        this.settlement ??= this.commitSettlement(event);
+        await this.settlement;
+      } catch {
+        wakeFailed = true;
+        if (this.settlement) await this.settlement;
+        else {
+          // A rejected-before-start wake cannot be acknowledged by an unrelated
+          // agent_settled event. Restore redelivery eligibility durably.
+          event.wakeState = "pending";
+          delete event.wakeClaimedAt;
+          try { await this.hooks.persist(); } catch { this.persistenceBlocked = true; }
+        }
+      } finally {
+        this.activeEventId = undefined;
+        this.settlement = undefined;
+      }
+    } catch {
+      // Settlement persistence failures deliberately stop live retries. A
+      // restart from the last committed checkpoint remains redeliverable.
+      this.persistenceBlocked = true;
     } finally {
+      this.releaseReservation();
       this.draining = false;
-      if (delivered && this.hooks.isIdle()) void this.drain();
+      if (!wakeFailed && !this.persistenceBlocked && this.isSettled(event) && this.hooks.isIdle()) void this.drain();
     }
   }
 }

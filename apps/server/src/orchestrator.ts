@@ -285,8 +285,7 @@ export class Orchestrator {
         if (entry.piSessionFile) this.piSessionFiles.set(entry.job.id, entry.piSessionFile);
       }
       if (restored.coordinatorNotifications) {
-        this.notificationState.events.push(...restored.coordinatorNotifications.events);
-        Object.assign(this.notificationState.lastSignals, restored.coordinatorNotifications.lastSignals);
+        this.restoreCoordinatorNotificationState(restored.coordinatorNotifications);
       } else {
         // Upgrading an existing runtime must not replay every historical terminal job.
         for (const job of this.jobs.values()) this.notificationState.lastSignals[job.id] = `baseline:${job.updatedAt}`;
@@ -471,33 +470,7 @@ export class Orchestrator {
     });
     this.completionPipeline = new CompletionPipeline(reviewAdapter, (job) => this.publishJob(job), targetBranch, this.cwd, this.operationLock, this.#coordinatorMergeCapability);
     await this.reconcileIntegratedJobs(targetBranch);
-    this.coordinatorNotifications = new CoordinatorNotificationQueue(this.notificationState, {
-      append: (event) => this.appendCoordinatorWorkerEvent(event),
-      persist: () => this.persist(),
-      isIdle: () => this.coordinatorStatus === "idle" && this.coordinator.isIdle,
-      wake: async (event) => {
-        if (this.coordinatorTurnInFlight) throw new Error("Coordinator turn is already reserved");
-        const activeLanes = this.activeReviewLaneIds();
-        if (!activeLanes.has(event.jobId) && activeLanes.size >= this.maintenanceConfig.reviewConcurrency) {
-          throw new Error("Review and remediation lanes are at capacity");
-        }
-        // Direct handoff/action wakes and backlog sweeps use the same bounded
-        // lane accounting. Otherwise quick coordinator turns can launch an
-        // unbounded number of asynchronous judges and repair workers.
-        this.sweepJobIds.add(event.jobId);
-        this.coordinatorTurnInFlight = true;
-        try {
-          await this.coordinator.prompt(
-            `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\n${event.kind === "backlog_sweep"
-              ? "Autonomous backlog sweep: inspect this exact job and take its next safe lifecycle action now. Do not merely summarize it. Resume a verified interrupted worker, start a fresh judge for a completed handoff, remediate exact failures in the same worktree, or guarded-merge only a fresh approval. Process only this job."
-              : "Resume coordinator-owned reconciliation now: inspect the handoff, start an independent judge when appropriate, and report each decision concisely. Never merge without a fresh exact-diff approval."}`,
-          );
-        } finally {
-          this.coordinatorTurnInFlight = false;
-          this.schedulePromptDrain();
-        }
-      },
-    });
+    this.initializeCoordinatorNotifications();
     // Old runtimes could have queued review metadata without the structured
     // handoff now required by coordinator-owned judging. Upgrade only that
     // passive queued state from a freshly read exact diff.
@@ -509,9 +482,9 @@ export class Orchestrator {
     await this.resumeClaimedRemediations();
     // Observe current durable states after queue construction so startup
     // recovery is visible without replaying side effects.
-    for (const job of this.listJobs()) this.coordinatorNotifications.observe(job);
+    for (const job of this.listJobs()) this.coordinatorNotifications!.observe(job);
     this.persist();
-    if (!this.pendingCoordinatorPrompts.length) this.coordinatorNotifications.settled();
+    if (!this.pendingCoordinatorPrompts.length) this.coordinatorNotifications!.settled();
     await this.resumeRestoredJobs();
     if (this.maintenanceConfig.startup) this.startCleanup("startup");
     if (this.maintenanceConfig.intervalMs > 0) {
@@ -613,7 +586,7 @@ export class Orchestrator {
       this.promptDrain = undefined;
       const head = this.pendingCoordinatorPrompts[0];
       if (head && !this.coordinatorPromptDrainBlocked && !this.acceptingCoordinatorPromptIds.has(head.messageId)
-        && this.coordinatorStatus !== "running" && this.coordinator.isIdle) this.schedulePromptDrain();
+        && !this.coordinatorTurnInFlight && this.coordinatorStatus !== "running" && this.coordinator.isIdle) this.schedulePromptDrain();
     });
   }
 
@@ -755,6 +728,7 @@ export class Orchestrator {
     await this.janitorRun;
 
     this.setCoordinatorActivity(undefined, "interrupted");
+    this.coordinatorNotifications?.shutdown();
 
     await this.coordinator.abort().catch(() => undefined);
     for (const [jobId, worker] of this.workers) {
@@ -1643,6 +1617,9 @@ export class Orchestrator {
       coordinatorNotifications: {
         events: [...this.notificationState.events],
         lastSignals: { ...this.notificationState.lastSignals },
+        // This permanent checkpoint is intentionally detached from compactable
+        // event rows. Without it, restart can replay a duplicate stable ID.
+        settledEventIds: { ...this.notificationState.settledEventIds },
       },
       // RuntimeStateStore snapshots this envelope synchronously before its
       // first write await. Avoid cloning every large diff/transcript twice on
@@ -1657,6 +1634,41 @@ export class Orchestrator {
 
   private async pathExists(path: string): Promise<boolean> {
     return stat(path).then(() => true, () => false);
+  }
+
+  /** Shared production construction kept isolated so restart tests exercise the real hooks. */
+  private initializeCoordinatorNotifications(): void {
+    this.coordinatorNotifications = new CoordinatorNotificationQueue(this.notificationState, {
+      append: (event) => this.appendCoordinatorWorkerEvent(event),
+      persist: () => { this.persist(); return this.stateStore.flush(); },
+      currentJob: (jobId) => this.jobs.get(jobId),
+      isIdle: () => this.coordinatorStatus === "idle" && this.coordinator.isIdle,
+      reserveTurn: (event) => {
+        if (this.coordinatorTurnInFlight) return undefined;
+        const activeLanes = this.activeReviewLaneIds();
+        if (!activeLanes.has(event.jobId) && activeLanes.size >= this.maintenanceConfig.reviewConcurrency) return undefined;
+        this.coordinatorTurnInFlight = true;
+        this.sweepJobIds.add(event.jobId);
+        return () => { this.coordinatorTurnInFlight = false; };
+      },
+      turnReleased: () => this.schedulePromptDrain(),
+      wake: async (event, started) => {
+        const prompt = this.coordinator.prompt(
+          `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\n${event.kind === "backlog_sweep"
+            ? "Autonomous backlog sweep: inspect this exact job and take its next safe lifecycle action now. Do not merely summarize it. Resume a verified interrupted worker, start a fresh judge for a completed handoff, remediate exact failures in the same worktree, or guarded-merge only a fresh approval. Process only this job."
+            : "Resume coordinator-owned reconciliation now: inspect the handoff, start an independent judge when appropriate, and report each decision concisely. Never merge without a fresh exact-diff approval."}`,
+        );
+        started();
+        await prompt;
+      },
+    });
+  }
+
+  /** Initialization migration kept isolated so restart tests exercise exact restoration semantics. */
+  private restoreCoordinatorNotificationState(restored: CoordinatorNotificationState): void {
+    this.notificationState.events.push(...restored.events);
+    Object.assign(this.notificationState.lastSignals, restored.lastSignals);
+    Object.assign(this.notificationState.settledEventIds ??= {}, restored.settledEventIds || {});
   }
 
   private async reconcileRestoredJobs(): Promise<void> {

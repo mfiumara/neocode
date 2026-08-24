@@ -29,11 +29,18 @@ export interface CoordinatorWorkerEvent {
   wakeState?: "pending" | "claimed" | "delivered";
   wakeClaimedAt?: number;
   wakeDeliveredAt?: number;
+  /** Durable source-state correlation used to reject stale broadcasts at wake time. */
+  signalSignature?: string;
+  /** Original remediation classification; raw text remains immutable audit evidence. */
+  actionId?: string;
+  actionState?: "pending" | "repairing" | "resolved" | "exhausted";
 }
 
 export interface CoordinatorNotificationState {
   events: CoordinatorWorkerEvent[];
   lastSignals: Record<string, string>;
+  /** Permanent exactly-once settlement checkpoint keyed by stable event id. */
+  settledEventIds?: Record<string, number>;
 }
 
 export interface DurableCoordinatorPrompt {
