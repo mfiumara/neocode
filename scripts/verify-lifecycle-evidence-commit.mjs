@@ -78,7 +78,7 @@ for (const phrase of ["unbounded permanent settled-ID growth", "conservative uns
 }
 
 const captures = [
-  ["NPM-TEST", "npm test", "Npm-Test", ["> neocode@0.1.0 test", "# fail 0", "1 passed"]],
+  ["NPM-TEST", "npm test", "Npm-Test", ["> neocode@0.1.0 test", "# fail 0", "2 passed"]],
   ["NPM-RUN-CHECK", "npm run check", "Npm-Run-Check", ["> neocode@0.1.0 check", "lifecycle_evidence_state=pre-evidence-no-op", "> @neocode/server@0.1.0 check", "> @neocode/web@0.1.0 check"]],
   ["NPM-RUN-BUILD", "npm run build", "Npm-Run-Build", ["> neocode@0.1.0 build", "> @neocode/server@0.1.0 build", "> @neocode/web@0.1.0 build", "✓ built in"]],
 ];
