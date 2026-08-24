@@ -210,6 +210,7 @@ export class Orchestrator {
   private coordinatorAborting = false;
   private modelChangeInProgress = false;
   private coordinatorCompacting = false;
+  private coordinatorCompactionRun?: Promise<void>;
   private coordinatorContextUnknownAfterCompaction = false;
   private coordinatorCompaction?: CoordinatorCompactionStatus;
   private disposing = false;
@@ -770,20 +771,30 @@ export class Orchestrator {
   }
 
   /** Compact only the coordinator's active SDK model context; durable Neocode messages are untouched. */
-  async compactCoordinator(): Promise<void> {
-    if (!this.manualCompactionAvailable()) {
-      if (this.disposing) throw new Error("The coordinator is shutting down.");
-      if (this.coordinatorTurnInFlight) throw new Error("Wait for the current coordinator turn to settle before compacting context.");
-      if (this.modelChangeInProgress) throw new Error("Wait for the coordinator model change to finish before compacting context.");
-      if (this.coordinatorCompacting) throw new Error("Coordinator context compaction is already in progress.");
-      if (this.pendingCoordinatorPrompts.length || this.activeCoordinatorPromptId || this.acceptingCoordinatorPromptIds.size) {
-        throw new Error("Wait for all queued coordinator prompts to finish before compacting context.");
+  compactCoordinator(): Promise<void> {
+    try {
+      if (!this.manualCompactionAvailable()) {
+        if (this.disposing) throw new Error("The coordinator is shutting down.");
+        if (this.coordinatorTurnInFlight) throw new Error("Wait for the current coordinator turn to settle before compacting context.");
+        if (this.modelChangeInProgress) throw new Error("Wait for the coordinator model change to finish before compacting context.");
+        if (this.coordinatorCompacting) throw new Error("Coordinator context compaction is already in progress.");
+        if (this.pendingCoordinatorPrompts.length || this.activeCoordinatorPromptId || this.acceptingCoordinatorPromptIds.size) {
+          throw new Error("Wait for all queued coordinator prompts to finish before compacting context.");
+        }
+        throw new Error("Manual context compaction is available only while the coordinator is idle.");
       }
-      throw new Error("Manual context compaction is available only while the coordinator is idle.");
+      // Claim the gate before entering SDK code so another command cannot race it.
+      this.coordinatorCompacting = true;
+      this.publishCoordinatorContext();
+      const run = this.runCoordinatorCompaction();
+      this.coordinatorCompactionRun = run;
+      return run;
+    } catch (error) {
+      return Promise.reject(error);
     }
-    // Claim the gate before entering SDK code so another command cannot race it.
-    this.coordinatorCompacting = true;
-    this.publishCoordinatorContext();
+  }
+
+  private async runCoordinatorCompaction(): Promise<void> {
     let compactError: unknown;
     try {
       await this.coordinator.compact();
@@ -805,9 +816,10 @@ export class Orchestrator {
             ? compactError.message
             : "Context compaction ended without a terminal SDK event.",
         };
-        this.publishCoordinatorContext();
+        if (!this.disposing) this.publishCoordinatorContext();
       }
-      this.schedulePromptDrain();
+      this.coordinatorCompactionRun = undefined;
+      if (!this.disposing) this.schedulePromptDrain();
     }
   }
 
@@ -839,10 +851,23 @@ export class Orchestrator {
 
   async dispose(): Promise<void> {
     this.disposing = true;
+    const compactionShutdown = this.coordinatorCompactionRun;
+    if (compactionShutdown) this.coordinator.abortCompaction();
+    if (this.coordinatorCompacting) {
+      this.coordinatorCompacting = false;
+      const completedAt = Date.now();
+      this.coordinatorCompaction = {
+        state: "aborted",
+        reason: this.coordinatorCompaction?.reason ?? "manual",
+        startedAt: this.coordinatorCompaction?.startedAt ?? completedAt,
+        completedAt,
+      };
+    }
+    // This is the final safe context publication. SDK events are invalidated
+    // immediately afterward and the full compaction continuation is joined.
     this.publishCoordinatorContext();
     this.coordinatorUnsubscribe?.();
     this.coordinatorUnsubscribe = undefined;
-    if (this.coordinatorCompacting) this.coordinator.abortCompaction();
     const notificationShutdown = this.coordinatorNotifications?.shutdown() ?? Promise.resolve();
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
@@ -856,7 +881,7 @@ export class Orchestrator {
     // Aborting releases any Pi prompt awaited by the prompt or notification
     // drains. Await those owned continuations before the final durable write.
     await this.coordinator.abort().catch(() => undefined);
-    await Promise.allSettled([this.promptDrain, notificationShutdown]);
+    await Promise.allSettled([this.promptDrain, notificationShutdown, compactionShutdown]);
     for (const [jobId, worker] of this.workers) {
       worker.cancelled = true;
       await worker.session.abort().catch(() => undefined);
@@ -1039,6 +1064,7 @@ export class Orchestrator {
     let emitted = false;
     let lastAssistantMessageId: string | undefined;
     this.coordinatorUnsubscribe = this.coordinator.subscribe((event) => {
+      if (this.disposing) return;
       if (event.type === "agent_start") {
         lastAssistantMessageId = undefined;
         this.coordinatorStatus = "running";

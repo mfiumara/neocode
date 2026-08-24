@@ -10,6 +10,7 @@ import type { AgentJob, CheckEvidence, JudgeEvidence } from "@neocode/protocol";
 import {
   CANONICAL_DIFF_COMMAND,
   CompletionPipeline,
+  detectedCommands,
   LocalReviewAdapter,
   PipelineError,
   runBounded,
@@ -21,6 +22,15 @@ import { executeCoordinatorGuardedMerge } from "./orchestrator.js";
 const execFileAsync = promisify(execFile);
 const coordinatorMergeCapability = Symbol("test coordinator merge capability");
 const pass: CheckEvidence = { command: "test", ok: true, exitCode: 0, durationMs: 1, output: "ok" };
+
+test("default product CI uses literal npm test with canonical check and build spelling", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "neocode-detected-ci-"));
+  try {
+    await writeFile(join(cwd, "package.json"), JSON.stringify({ scripts: { test: "test", check: "check", build: "build" } }));
+    await writeFile(join(cwd, "package-lock.json"), "{}\n");
+    assert.deepEqual(await detectedCommands(cwd), ["npm ci", "npm test", "npm run check", "npm run build"]);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
 
 test("CI timeout process-group signal failure falls back without crashing the server", async () => {
   const originalKill = process.kill;

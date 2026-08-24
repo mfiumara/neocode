@@ -16,7 +16,7 @@ interface FakeSession {
   compact: () => Promise<any>;
   prompt: (content: string) => Promise<void>;
   getContextUsage: () => FakeSession["usage"];
-  subscribe: (listener: (event: any) => void) => void;
+  subscribe: (listener: (event: any) => void) => () => void;
   abort: () => Promise<void>;
   abortCompaction: () => void;
   dispose: () => void;
@@ -38,7 +38,10 @@ async function fixture(compact?: (session: FakeSession) => Promise<any>) {
     },
     usage: { tokens: 48_000, contextWindow: 128_000, percent: 37.5 },
     getContextUsage() { return this.usage; },
-    subscribe(listener) { this.listener = listener; },
+    subscribe(listener) {
+      this.listener = listener;
+      return () => { if (this.listener === listener) this.listener = undefined; };
+    },
     compact: async () => undefined,
     prompt: async () => undefined,
     abort: async () => undefined,
@@ -177,6 +180,53 @@ test("manual compaction rejects queued work and reports SDK failures without a s
     failed.internal.modelChoices = () => [];
     assert.equal(failed.orchestrator.snapshot().coordinator.context.compaction?.willRetry, true, "reconnect snapshot retains retry intent");
   } finally { await cleanupFixture(failed); }
+});
+
+test("dispose joins resolving and rejecting manual compaction before session disposal", async (t) => {
+  for (const outcome of ["resolve", "reject"] as const) await t.test(outcome, async () => {
+    let settle!: () => void;
+    const compactGate = new Promise<void>((resolve, reject) => {
+      settle = () => outcome === "resolve" ? resolve() : reject(new Error("compaction aborted"));
+    });
+    const value = await fixture(() => compactGate);
+    const order: string[] = [];
+    let drainsAfterDispose = 0;
+    let savesAfterDispose = 0;
+    value.session.abortCompaction = () => { order.push("abort-compaction"); };
+    value.session.dispose = () => { order.push("session-dispose"); };
+    value.internal.schedulePromptDrain = () => {
+      if (value.internal.disposing) drainsAfterDispose += 1;
+    };
+    const compact = value.orchestrator.compactCoordinator();
+    const compactSettlement = outcome === "resolve"
+      ? compact.then(() => order.push("compact-settled"))
+      : assert.rejects(compact, /compaction aborted/).then(() => order.push("compact-settled"));
+    const contextBeforeDispose = value.events.filter((event) => event.type === "coordinator_context").length;
+    let disposalReturned = false;
+    const disposal = value.orchestrator.dispose().then(() => { disposalReturned = true; order.push("dispose-returned"); });
+    await Promise.resolve();
+    assert.equal(disposalReturned, false, "dispose must remain blocked by SDK compact()");
+    assert.equal(order[0], "abort-compaction");
+    const finalSafeContextCount = value.events.filter((event) => event.type === "coordinator_context").length;
+    assert.equal(finalSafeContextCount, contextBeforeDispose + 1, "shutdown publishes one truthful aborted state before invalidation");
+    assert.equal(latestContext(value.events).compaction?.state, "aborted");
+
+    settle();
+    await Promise.all([compactSettlement, disposal]);
+    assert.ok(order.indexOf("compact-settled") < order.indexOf("session-dispose"));
+    assert.ok(order.indexOf("session-dispose") < order.indexOf("dispose-returned"));
+    assert.equal(value.events.filter((event) => event.type === "coordinator_context").length, finalSafeContextCount);
+    assert.equal(drainsAfterDispose, 0);
+
+    const save = value.internal.stateStore.save.bind(value.internal.stateStore);
+    value.internal.stateStore.save = (...args: unknown[]) => { savesAfterDispose += 1; return save(...args); };
+    value.session.listener?.({ type: "compaction_end", reason: "manual", aborted: outcome === "reject", result: undefined });
+    assert.equal(savesAfterDispose, 0);
+    assert.equal(value.events.filter((event) => event.type === "coordinator_context").length, finalSafeContextCount,
+      "late SDK events are unsubscribed after the barrier");
+    await rm(value.cwd, { recursive: true, force: true });
+    await assert.rejects(access(value.cwd));
+  });
 });
 
 test("production lifecycle wake reservation shares compaction, model, disposal, and turn gates", async () => {

@@ -89,6 +89,86 @@ test.afterAll(async () => {
   if (fixture) await rm(fixture, { recursive: true, force: true });
 });
 
+test("narrow App keeps compaction status accessible across live context and reconnect snapshots", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.addInitScript(() => {
+    const NativeSocket = window.WebSocket;
+    class ContextSocket {
+      static OPEN = 1;
+      static instances: ContextSocket[] = [];
+      readyState = ContextSocket.OPEN;
+      onopen?: () => void;
+      onmessage?: (event: { data: string }) => void;
+      onerror?: () => void;
+      onclose?: () => void;
+      constructor(_url: string) {
+        ContextSocket.instances.push(this);
+        setTimeout(() => this.onopen?.(), 0);
+      }
+      send() { /* transport assertions only need server-to-client messages */ }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    class RoutedSocket {
+      static CONNECTING = NativeSocket.CONNECTING;
+      static OPEN = NativeSocket.OPEN;
+      static CLOSING = NativeSocket.CLOSING;
+      static CLOSED = NativeSocket.CLOSED;
+      constructor(url: string | URL, protocols?: string | string[]) {
+        if (new URL(String(url), location.href).pathname === "/ws") return new ContextSocket(String(url)) as unknown as RoutedSocket;
+        return (protocols === undefined ? new NativeSocket(url) : new NativeSocket(url, protocols)) as unknown as RoutedSocket;
+      }
+    }
+    Object.defineProperty(window, "WebSocket", { configurable: true, value: RoutedSocket });
+    Object.defineProperty(window, "__contextSockets", { configurable: true, value: ContextSocket.instances });
+  });
+  const context = (tokens: number | null, contextWindow: number, state: "completed" | "failed", error?: string) => ({
+    usage: { tokens, contextWindow, percent: tokens === null ? null : tokens / contextWindow * 100, updatedAt: Date.now() },
+    autoCompactionEnabled: true,
+    manualCompactionAvailable: true,
+    compaction: { state, reason: "manual", startedAt: 1, completedAt: 2, willRetry: state === "failed", error },
+  });
+  const snapshot = (contextState: ReturnType<typeof context>) => ({
+    cwd: "/transport", coordinator: {
+      status: "idle", activityHistory: [], messages: [],
+      settings: { variant: "build", thinkingLevel: "off", availableVariants: ["build"], availableThinkingLevels: ["off"] },
+      model: null, models: [], context: contextState,
+    }, jobs: [], maintenance: { state: "idle" },
+  });
+  const send = async (message: unknown) => page.evaluate((payload) => {
+    const sockets = (window as unknown as { __contextSockets: Array<{ onmessage?: (event: { data: string }) => void }> }).__contextSockets;
+    sockets.at(-1)!.onmessage?.({ data: JSON.stringify(payload) });
+  }, message);
+
+  await page.goto("/");
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __contextSockets: unknown[] }).__contextSockets.length)).toBeGreaterThan(0);
+  const initialSocketCount = await page.evaluate(() => (window as unknown as { __contextSockets: unknown[] }).__contextSockets.length);
+  await send({ type: "snapshot", snapshot: snapshot(context(50_000, 128_000, "failed", "first failure")) });
+  const status = page.locator("#compaction-status");
+  await expect(status).toBeVisible();
+  await expect(status).toHaveAttribute("role", "status");
+  await expect(status).toHaveText("Compaction failed · SDK will retry: first failure");
+  expect(await status.evaluate((node) => ({ display: getComputedStyle(node).display, height: node.getBoundingClientRect().height })))
+    .toMatchObject({ display: "block" });
+  expect(await status.evaluate((node) => node.getBoundingClientRect().height)).toBeGreaterThan(0);
+  await expect(page.getByRole("button", { name: "Compact coordinator model context" })).toHaveText("Compact");
+
+  await send({ type: "coordinator_context", context: context(null, 128_000, "completed") });
+  await expect(status).toHaveText("Compaction completed");
+  await expect(page.locator(".context-usage strong")).toHaveText("unknown / 128,000");
+  await expect(page.getByRole("button", { name: "Compact coordinator model context" })).toHaveText("Compact");
+
+  await page.evaluate(() => {
+    const sockets = (window as unknown as { __contextSockets: Array<{ close(): void }> }).__contextSockets;
+    sockets.at(-1)!.close();
+  });
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __contextSockets: unknown[] }).__contextSockets.length), { timeout: 3_000 }).toBe(initialSocketCount + 1);
+  await send({ type: "snapshot", snapshot: snapshot(context(99_000, 200_000, "failed", "refreshed failure")) });
+  await expect(page.locator(".context-usage strong")).toHaveText("99,000 / 200,000");
+  await expect(status).toHaveText("Compaction failed · SDK will retry: refreshed failure");
+  await expect(status).toBeVisible();
+  await expect(page.getByRole("button", { name: "Compact coordinator model context" })).toHaveText("Compact");
+});
+
 test("integrated app pastes, opens, sends, validates, and restores image attachments", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: `http://127.0.0.1:${webPort}` });
   await page.goto("/");

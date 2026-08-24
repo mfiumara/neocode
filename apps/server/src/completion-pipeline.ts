@@ -732,7 +732,7 @@ export function candidateGitPacketCommands(targetBranch = "main"): string[] {
   ];
 }
 
-async function detectedCommands(cwd: string): Promise<string[]> {
+export async function detectedCommands(cwd: string): Promise<string[]> {
   try {
     const value = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")) as { scripts?: Record<string, string> };
     const commands: string[] = [];
@@ -742,7 +742,8 @@ async function detectedCommands(cwd: string): Promise<string[]> {
     } catch {
       // Without a lockfile we cannot prove a reproducible dependency graph.
     }
-    commands.push(...["test", "check", "build"]
+    if (value.scripts?.test) commands.push("npm test");
+    commands.push(...["check", "build"]
       .filter((name) => value.scripts?.[name])
       .map((name) => `npm run ${name}`));
     return commands;

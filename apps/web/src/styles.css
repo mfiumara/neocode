@@ -300,8 +300,9 @@ kbd { padding: 1px 4px; border: 1px solid #363940; background: #17191d; font-siz
   .model-selector > span { display: none; }
   .model-selector { max-width: 35vw; }
   .coordinator-header-controls { width: 100%; justify-content: flex-start; overflow-x: auto; }
+  .context-indicator { flex-wrap: wrap; }
   .context-usage { min-width: 126px; }
-  .compaction-status { display: none; }
+  .compaction-status { flex: 1 1 100%; max-width: none; overflow: visible; text-overflow: clip; white-space: normal; }
   .workspace-grid { grid-template-columns: 1fr; }
   .rail { display: none; }
   .topbar { grid-template-columns: 1fr auto; }
