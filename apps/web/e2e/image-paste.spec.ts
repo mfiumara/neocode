@@ -158,7 +158,7 @@ test("narrow App keeps compaction status accessible across live context and reco
     sockets.at(-1)!.onmessage?.({ data: JSON.stringify(payload) });
   }, message);
 
-  await page.goto("/");
+  await page.goto(`http://127.0.0.1:${webPort}/`);
   await expect.poll(() => page.evaluate(() => (window as unknown as { __contextSockets: unknown[] }).__contextSockets.length)).toBeGreaterThan(0);
   const initialSocketCount = await page.evaluate(() => (window as unknown as { __contextSockets: unknown[] }).__contextSockets.length);
   await send({ type: "snapshot", snapshot: snapshot(context(50_000, 128_000, "failed", "first failure")) });

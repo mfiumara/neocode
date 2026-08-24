@@ -27,7 +27,7 @@ async function waitFor(check: () => boolean, description: string, timeout = 5_00
 }
 
 async function connected(page: Page): Promise<void> {
-  await expect(page.getByRole("status")).toHaveText(/local/);
+  await expect(page.getByRole("status").filter({ hasText: "local" })).toHaveText(/local/);
 }
 
 test("real browser lifecycle closes Vite-proxied sockets cleanly", async ({ page }) => {
