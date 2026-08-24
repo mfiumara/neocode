@@ -368,6 +368,23 @@ test("generic blocked and failed states surface concise human-readable reasons",
   }
 });
 
+test("terminal disposition suppresses stale post-merge repair metadata without mutating audit history", () => {
+  for (const integration of ["merged", "superseded"] as const) {
+    const value = job("ci_running", "needs_attention");
+    value.integration = { status: integration, ...(integration === "merged" ? { verifiedAt: 8_000 } : { disposition: "superseded" as const }) };
+    value.review!.activeRetry = { target: "post_merge", startedAt: 7_000 };
+    value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "stale-post", actions: [{ id: "stale-post", failureClass: "post_merge_ci", fingerprint: "f", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: 6_000, updatedAt: 7_000, evidence: { detail: "exact stale diagnostics", mergeCommit: "merged-head" } }] };
+    const pipeline = reviewPipeline(value);
+    assert.equal(pipeline.headline, "Verified outcome");
+    assert.match(pipeline.guidance, integration === "merged" ? /complete and verified/ : /durably marked as superseded/);
+    assert.equal(pipeline.active, false);
+    assert.equal(pipeline.stages.some((item) => item.tone === "active" || item.tone === "blocked"), false);
+    assert.match(stage(value, "repair").summary, /No active repair.*terminal disposition/i);
+    assert.doesNotMatch(pipeline.stages.map((item) => item.summary).join(" "), /stale-post|post_merge_ci.*repairing|exact stale diagnostics/);
+    assert.equal(value.review!.remediation!.actions[0]!.state, "repairing", "presentation never mutates stale audit evidence");
+  }
+});
+
 test("top-level authority and reconnect suppress stale active phases while recovered work wins", () => {
   const interrupted = job("judging", "interrupted");
   assert.equal(reviewPipeline(interrupted).active, false);

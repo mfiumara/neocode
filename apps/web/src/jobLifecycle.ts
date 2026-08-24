@@ -62,8 +62,14 @@ export function isDoneJob(job: AgentJob): boolean {
 export function jobLifecycleLabel(job: AgentJob): string {
   const integration = job.integration?.status;
   const review = job.review?.status;
-  // Current worker disposition is authoritative over review/integration
-  // metadata retained from an earlier attempt.
+  // Verified integration and explicit supersession are terminal authority even
+  // when legacy snapshots retain a stale worker/remediation disposition.
+  if (integration === "merged") {
+    const prefix = job.integration?.disposition === "already_integrated" ? "Already integrated" : "Integrated";
+    return job.cleanup?.status === "removed" ? `${prefix} · cleaned` : `${prefix} · verified`;
+  }
+  if (integration === "superseded") return job.cleanup?.status === "removed" ? "Not required · cleaned" : "Not required · superseded";
+  // Otherwise the current worker disposition overrides transient review data.
   if (job.status === "queued") return "Queued";
   if (job.status === "interrupted") return job.recoverable === false ? "Interrupted" : "Interrupted · recoverable";
   if (job.status === "needs_attention") return "Needs attention";
@@ -71,11 +77,6 @@ export function jobLifecycleLabel(job: AgentJob): string {
   if (job.status === "cancelled") return "Cancelled";
   if (job.status === "completed" && job.isolation.mode === "root") return "Completed";
 
-  if (integration === "merged") {
-    const prefix = job.integration?.disposition === "already_integrated" ? "Already integrated" : "Integrated";
-    return job.cleanup?.status === "removed" ? `${prefix} · cleaned` : `${prefix} · verified`;
-  }
-  if (integration === "superseded") return job.cleanup?.status === "removed" ? "Not required · cleaned" : "Not required · superseded";
   const currentRoundJudgeClaim = job.handoff?.round !== undefined
     && job.review?.judgeHandoffRound === job.handoff.round
     && ["queued", "handoff_received"].includes(review || "");

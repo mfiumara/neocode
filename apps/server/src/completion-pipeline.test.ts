@@ -446,11 +446,22 @@ test("candidate and post-merge verification failures become evidence-complete ac
   postPipeline.requestMerge(post, coordinatorMergeCapability); await postPipeline.idle();
   assert.equal(post.review?.status, "post_ci_failed");
   assert.equal(post.review?.remediation?.actions.at(-1)?.failureClass, "post_merge_ci");
+  const postActionId = post.review?.remediation?.actions.at(-1)?.id;
   assert.equal(post.review?.remediation?.actions.at(-1)?.evidence.mergeCommit, "commit-post-fail");
+  assert.equal(post.review?.remediation?.actions.at(-1)?.state, "pending", "failed verification remains action-required");
   assert.notEqual(post.integration?.status, "merged", "post-merge failure must never appear Done");
   postPipeline.retryInfrastructure(post, "retry post-merge runner");
   while ((post.review?.status as string) !== "merged") await new Promise((resolve) => setTimeout(resolve, 5));
   assert.ok(postPublished.some((value) => value.review?.activeRetry?.target === "post_merge" && value.review.status === "ci_running"));
+  const terminalIndex = postPublished.findIndex((value) => value.review?.status === "merged" || value.integration?.status === "merged");
+  assert.ok(terminalIndex >= 0, "terminal state is durably published");
+  for (const published of postPublished.slice(terminalIndex)) {
+    assert.equal(published.review?.remediation?.actions.find((action) => action.id === postActionId)?.state, "resolved");
+    assert.equal(published.review?.remediation?.currentActionId, undefined);
+    assert.equal(published.review?.activeRetry, undefined);
+  }
+  assert.equal(post.review?.remediation?.actions.find((action) => action.id === postActionId)?.state, "resolved");
+  assert.equal(post.review?.remediation?.currentActionId, undefined);
   assert.equal(post.review?.activeRetry, undefined);
 });
 

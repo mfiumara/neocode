@@ -282,6 +282,7 @@ export class CompletionPipeline {
           return;
         }
         this.resolveInfrastructureRetry(job);
+        this.resolvePostMergeRetry(job);
         this.transition(job, "merged", `Post-merge verification passed for ${job.review!.mergeCommit}: ${checks.map((check) => check.command).join(", ")}`, "server");
         return;
       }
@@ -439,6 +440,16 @@ export class CompletionPipeline {
       action.updatedAt = Date.now();
       delete job.review!.remediation!.currentActionId;
     }
+  }
+
+  private resolvePostMergeRetry(job: AgentJob): void {
+    const action = this.currentAction(job);
+    if (action?.state !== "repairing" || action.failureClass !== "post_merge_ci"
+      || !action.evidence.mergeCommit || action.evidence.mergeCommit !== job.review?.mergeCommit) return;
+    // The terminal transition publishes this exact correlated mutation.
+    action.state = "resolved";
+    action.updatedAt = Date.now();
+    delete job.review!.remediation!.currentActionId;
   }
 
   private scheduleInfrastructureRetry(job: AgentJob): void {

@@ -212,6 +212,22 @@ test("judge conclusion sanitizer preserves prose and collapses exact technical s
   assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
 });
 
+test("terminal panel keeps stale repairing post-merge action only in collapsed evidence", () => {
+  for (const integration of ["merged", "superseded"] as const) {
+    const value = sidebarJob("ci_running", "needs_attention", integration);
+    value.review!.activeRetry = { target: "post_merge", startedAt: 4 };
+    value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "stale-post-action", actions: [{ id: "stale-post-action", failureClass: "post_merge_ci", fingerprint: "stale-fingerprint", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: 3, updatedAt: 4, evidence: { detail: "exact stale post-merge diagnostic", mergeCommit: "exact-merge" } }] };
+    const markup = renderToStaticMarkup(<ReviewStatusPanel job={value} />);
+    const primary = markup.split('<details class="technical-evidence">')[0]!;
+    assert.match(primary, /Verified outcome/);
+    assert.match(primary, /No active repair; terminal disposition is authoritative/);
+    assert.doesNotMatch(primary, /Retrying|repairing|stale-post-action|exact stale post-merge diagnostic|aria-current="step"/i);
+    assert.match(markup, /stale-post-action/);
+    assert.match(markup, /exact stale post-merge diagnostic/);
+    assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
+  }
+});
+
 test("compact panel does not show an active marker for stale review metadata", () => {
   const markup = renderToStaticMarkup(<ReviewStatusPanel job={sidebarJob("judging")} activityReady={false} />);
   assert.match(markup, /Review status recorded/);

@@ -104,8 +104,12 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
   const merged = job.integration?.status === "merged" || status === "merged";
   const authoritativeTerminal = merged || superseded;
   const genuineWorker = activityReady && !authoritativeTerminal && job.status === "running";
-  const action = review?.remediation?.actions.find((item) => item.id === review.remediation?.currentActionId)
+  const retainedAction = review?.remediation?.actions.find((item) => item.id === review.remediation?.currentActionId)
     || review?.remediation?.actions.find((item) => item.state !== "resolved");
+  // Terminal authority is presentation-only precedence. Retain stale action
+  // evidence in the model for collapsed audit output, but never present it as
+  // current work or next-action guidance.
+  const action = authoritativeTerminal ? undefined : retainedAction;
   const activeRetry = activityReady && !authoritativeTerminal && job.status === "completed" && status === "ci_running"
     && action?.state === "repairing" ? review?.activeRetry : undefined;
   const retryRound = action ? review?.remediation?.rounds[action.failureClass] : undefined;
@@ -147,7 +151,11 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
   let headline = "Awaiting worker handoff";
   let guidance = job.status === "running" ? "Worker is still preparing a handoff." : "No fresh handoff is available for coordinator review.";
   // Top-level worker and verified terminal dispositions override stale review phases.
-  if (["queued", "interrupted", "needs_attention", "failed", "cancelled"].includes(job.status)) {
+  if (merged) {
+    headline = "Verified outcome"; guidance = "Integration is complete and verified.";
+  } else if (superseded) {
+    headline = "Verified outcome"; guidance = "This work is durably marked as superseded; integration is not required.";
+  } else if (["queued", "interrupted", "needs_attention", "failed", "cancelled"].includes(job.status)) {
     headline = job.status === "queued" ? "Awaiting worker" : "Review blocked";
     guidance = job.status === "interrupted" ? action?.state === "repairing"
       ? `${actionSubject(action.failureClass)} repair is claimed but the worker is interrupted; awaiting coordinator recovery.`
@@ -158,10 +166,6 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
       : job.status === "failed" ? "Worker failed before review could continue."
       : job.status === "cancelled" ? "Worker was cancelled."
       : "Worker is queued and has not produced a fresh handoff.";
-  } else if (merged) {
-    headline = "Verified outcome"; guidance = "Integration is complete and verified.";
-  } else if (superseded) {
-    headline = "Verified outcome"; guidance = "This work is durably marked as superseded; integration is not required.";
   } else if (genuineWorker) {
     headline = review ? "Repairing now" : "Worker active";
     guidance = conflictRepairing ? "Worker is resolving a rebase conflict in the same worktree."
@@ -259,7 +263,7 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
     { id: "preparation", label: "Coordinator Git preparation", summary: reviewRetry ? "Retrying preparation and prerequisite checks" : scheduledReviewRetry ? "Review prerequisite retry scheduled after backoff" : preparationInvalidated ? "Target or handoff advanced; rebase, preparation, and fresh approval required" : preparationComplete ? "Candidate prepared on target base" : rebaseConflict ? "Rebase conflict recorded" : status === "ci_running" ? reviewActive ? "Preparing candidate on target base" : "Preparation recorded; live activity unsynchronized" : "Awaiting coordinator", tone: reviewRetry ? "active" : preparationComplete ? "complete" : rebaseConflict ? "blocked" : preparationRunning && reviewActive ? "active" : "waiting" },
     { id: "ci", label: "Product CI", summary: checks.length ? checkSummary(checks) : historicalChecks.length ? checkSummary(historicalChecks, true, preparationRunning) : productCiRunning ? "Product CI running; no completed product commands recorded" : checkSummary([], false, preparationRunning), tone: ciTone, at: preparationRunning ? undefined : transitionAt(job, ["ci_running", "ci_failed", "judging"]), durationMs: checks.length ? checks.reduce((sum, check) => sum + check.durationMs, 0) : status === "ci_running" ? undefined : transitionDuration(job, ["ci_running"], ["ci_failed", "judging"]) },
     { id: "judge", label: "Independent judge", summary: reviewRetry ? "Independent judge queued behind retry prerequisite checks" : scheduledReviewRetry ? "Independent judge queued behind scheduled retry backoff" : currentRoundJudgeClaim ? "Current handoff claimed; awaiting judge launch or serialized coordinator execution" : status === "judging" && !reviewActive && !judge && !interruptedJudgeAction(job) ? "Independent judging recorded; live activity unsynchronized" : judgeSummary(job), tone: reviewRetry || scheduledReviewRetry || currentRoundJudgeClaim ? "waiting" : status === "judging" ? judge ? judge.approved ? "complete" : "failed" : reviewActive ? "active" : "waiting" : interruptedJudgeAction(job) ? "blocked" : status === "rejected" || judge?.approved === false ? "failed" : judge?.approved ? "complete" : "waiting", at: transitionAt(job, ["judging", "approved", "rejected"]), durationMs: status === "judging" ? undefined : transitionDuration(job, ["judging"], ["approved", "rejected"]) },
-    { id: "repair", label: "Feedback and repair", summary: scheduledRetry ? `Coordinator retry backoff · ${action!.attempt}/${action!.maxAttempts}` : action ? `${action.failureClass.replaceAll("_", " ")} · ${action.state} · ${action.attempt}/${action.maxAttempts}` : status === "feedback_sent" ? "Feedback sent; awaiting worker" : "No active repair", tone: genuineWorker && !!review ? "active" : action?.state === "pending" || action?.state === "exhausted" ? "blocked" : action?.state === "resolved" ? "complete" : "waiting", at: action?.updatedAt, durationMs: action ? Math.max(0, action.updatedAt - action.createdAt) : undefined },
+    { id: "repair", label: "Feedback and repair", summary: authoritativeTerminal ? "No active repair; terminal disposition is authoritative" : scheduledRetry ? `Coordinator retry backoff · ${action!.attempt}/${action!.maxAttempts}` : action ? `${action.failureClass.replaceAll("_", " ")} · ${action.state} · ${action.attempt}/${action.maxAttempts}` : status === "feedback_sent" ? "Feedback sent; awaiting worker" : "No active repair", tone: authoritativeTerminal ? "complete" : genuineWorker && !!review ? "active" : action?.state === "pending" || action?.state === "exhausted" ? "blocked" : action?.state === "resolved" ? "complete" : "waiting", at: action?.updatedAt, durationMs: action ? Math.max(0, action.updatedAt - action.createdAt) : undefined },
     { id: "merge", label: "Authorized merge", summary: superseded ? "Integration not required" : review?.mergeCommit ? "Merge recorded" : review?.coordinatorAuthorizedAt ? "Explicitly authorized" : status === "approved" || status === "merge_queued" ? "Awaiting explicit coordinator authorization" : "Not authorized", tone: superseded || review?.mergeCommit ? "complete" : status === "merging" && reviewActive ? "active" : mergeBlocked ? "blocked" : "waiting", at: review?.coordinatorAuthorizedAt || transitionAt(job, ["approved", "merge_queued", "merging"]), durationMs: transitionDuration(job, ["merging"], ["post_merge_ci", "merged", "blocked", "failed"]) },
     { id: "verification", label: "Post-merge verification", summary: merged ? "Verified terminal outcome" : superseded ? "Superseded terminal outcome" : postMergeRetry ? "Retrying post-merge verification; prior evidence retained as historical" : scheduledPostMergeRetry ? "Post-merge verification retry scheduled after backoff; prior evidence retained as historical" : post.length ? `${post.filter((item) => item.ok).length}/${post.length} post-merge checks passed` : "Not started", tone: authoritativeTerminal ? "complete" : postMergeRetry ? "active" : scheduledPostMergeRetry ? "waiting" : status === "post_merge_ci" ? post.length ? post.some((check) => !check.ok) ? "failed" : "complete" : reviewActive ? "active" : "waiting" : (!!post.length && post.every((check) => check.ok)) ? "complete" : status === "post_ci_failed" ? "failed" : action?.failureClass === "post_merge_ci" && action.state !== "resolved" ? "blocked" : "waiting", at: job.integration?.verifiedAt || transitionAt(job, ["post_merge_ci", "post_ci_failed", "merged"]), durationMs: post.length ? post.reduce((sum, check) => sum + check.durationMs, 0) : transitionDuration(job, ["post_merge_ci"], ["post_ci_failed", "merged"]) },
   ];

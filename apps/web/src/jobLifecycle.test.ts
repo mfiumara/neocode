@@ -102,6 +102,17 @@ test("settled and disconnected lifecycle state never appears active", () => {
   assert.equal(jobActiveState(historical), undefined, "historical transient transitions are ignored");
 });
 
+test("verified and superseded terminal labels override stale remediation disposition", () => {
+  for (const [integration, label] of [["merged", "Integrated · verified"], ["superseded", "Not required · superseded"]] as const) {
+    const value = reviewed("ci_running", "needs_attention"); value.integration = { status: integration };
+    value.review!.activeRetry = { target: "post_merge", startedAt: 3 };
+    value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "stale", actions: [{ id: "stale", failureClass: "post_merge_ci", fingerprint: "f", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: 2, updatedAt: 3, evidence: { detail: "stale", mergeCommit: "merged" } }] };
+    assert.equal(jobActiveState(value), undefined);
+    assert.equal(jobLifecycleLabel(value), label);
+    assert.equal(isDoneJob(value), true);
+  }
+});
+
 test("top-level queued and terminal labels override stale transient lifecycle metadata", () => {
   for (const [value, label] of [
     [reviewed("judging", "queued"), "Queued"],
