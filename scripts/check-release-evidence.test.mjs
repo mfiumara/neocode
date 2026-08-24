@@ -5,7 +5,7 @@ import { EMPTY_SHA256, parseEvidenceMessage, validateEvidenceRecord } from "./ch
 function fixture() {
   const cwd = "/repo/.worktrees/candidate";
   const record = {
-    version: 1, testedParent: "parent", testedTree: "tree", base: "base", mergeBase: "base", cwd,
+    version: 1, testedParent: "parent", testedTree: "tree", base: "base", mergeBase: "base", cwd, rootCwd: "/repo",
     commands: ["npm test", "npm run check", "npm run build"].map((command, index) => ({
       command, cwd, startedUtc: `2026-08-24T08:0${index}:00Z`, finishedUtc: `2026-08-24T08:0${index}:01Z`, exit: 0,
       stdoutSha256: "a".repeat(64), stdoutBytes: 10, stderrSha256: "b".repeat(64), stderrBytes: 0,
@@ -14,7 +14,7 @@ function fixture() {
     rootPorcelain: { beforeSha256: EMPTY_SHA256, beforeBytes: 0, afterSha256: EMPTY_SHA256, afterBytes: 0 },
     risks: ["Dirty manifest fingerprint omissions remain durably ambiguous.", "Existing Vite chunk-size warning remains."],
   };
-  const facts = { subject: "Record trusted literal validation evidence", parent: "parent", headTree: "tree", parentTree: "tree", base: "base", mergeBase: "base", cwd, candidatePorcelain: "", rootPorcelain: "" };
+  const facts = { subject: "Record trusted literal validation evidence", parent: "parent", headTree: "tree", parentTree: "tree", base: "base", mergeBase: "base", cwd, rootCwd: "/repo", candidatePorcelain: "", rootPorcelain: "" };
   return { record, facts };
 }
 

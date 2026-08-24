@@ -12,12 +12,12 @@ function validUtc(value) { return typeof value === "string" && UTC.test(value) &
 
 export function validateEvidenceRecord(record, facts) {
   if (!record || record.version !== 1) fail("missing or unsupported record");
-  for (const key of ["testedParent", "testedTree", "base", "mergeBase", "cwd"]) if (typeof record[key] !== "string" || !record[key]) fail(`missing ${key}`);
+  for (const key of ["testedParent", "testedTree", "base", "mergeBase", "cwd", "rootCwd"]) if (typeof record[key] !== "string" || !record[key]) fail(`missing ${key}`);
   if (facts.subject !== "Record trusted literal validation evidence") fail("final commit subject is not recognized");
   if (facts.parent !== record.testedParent) fail("tested parent does not match final parent");
   if (facts.headTree !== facts.parentTree || facts.headTree !== record.testedTree) fail("final commit is non-empty or tree does not match tested parent");
   if (facts.base !== record.base || facts.mergeBase !== record.mergeBase) fail("base or merge-base mismatch");
-  if (facts.cwd !== record.cwd) fail("tested cwd mismatch");
+  if (facts.cwd !== record.cwd || facts.rootCwd !== record.rootCwd) fail("tested candidate/root cwd mismatch");
   if (!Array.isArray(record.commands) || record.commands.length !== COMMANDS.length) fail("literal command records are incomplete");
   for (let index = 0; index < COMMANDS.length; index += 1) {
     const command = record.commands[index];
@@ -64,7 +64,7 @@ export function verifyHead(cwd = process.cwd()) {
     subject: git(["show", "-s", "--format=%s", "HEAD"], cwd),
     parent: git(["rev-parse", "HEAD^"], cwd), headTree: git(["rev-parse", "HEAD^{tree}"], cwd),
     parentTree: git(["rev-parse", "HEAD^^{tree}"], cwd), base: git(["rev-parse", "main"], cwd),
-    mergeBase: git(["merge-base", "main", "HEAD"], cwd), cwd: git(["rev-parse", "--show-toplevel"], cwd),
+    mergeBase: git(["merge-base", "main", "HEAD"], cwd), cwd: git(["rev-parse", "--show-toplevel"], cwd), rootCwd: root,
     candidatePorcelain: git(["status", "--porcelain=v1", "--untracked-files=all"], cwd),
     rootPorcelain: git(["status", "--porcelain=v1", "--untracked-files=all"], root),
   });
