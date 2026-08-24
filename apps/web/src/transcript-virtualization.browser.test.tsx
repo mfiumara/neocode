@@ -178,15 +178,18 @@ test("real browser virtualizes, measures, paginates, navigates, and preserves re
     await evaluate("document.querySelector('.message-meta button')?.click(); true");
     assert.equal(await evaluate<boolean>("!!document.querySelector('.context-chips button')"), true);
 
-    const beforeSwitch = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]; return {key:r.e.dataset.rowKey,offset:r.r.top-v.getBoundingClientRect().top} })()");
+    // Use the row containing the viewport center as the visual anchor. The
+    // first intersecting row is boundary-sensitive: sub-pixel clipping can
+    // legitimately alternate between adjacent rows without moving content.
+    const beforeSwitch = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const vr=v.getBoundingClientRect(); const center=vr.top+vr.height/2; const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).find(x=>x.r.top<=center&&x.r.bottom>center); return {key:r.e.dataset.rowKey,offset:r.r.top-vr.top} })()");
     await evaluate("document.querySelector('.job-row')?.click(); true");
     await waitFor(async () => evaluate<boolean>("document.querySelector('h1')?.textContent === 'Browser worker'"));
     await evaluate("document.querySelector('.thread-row')?.click(); true");
     await waitFor(async () => evaluate<boolean>("document.querySelector('h1')?.textContent === 'Coordinator'"));
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const restored = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]; return {key:r.e.dataset.rowKey,offset:r.r.top-v.getBoundingClientRect().top} })()");
+    await waitFor(async () => evaluate<boolean>(`(() => { const v=document.querySelector('.transcript-viewport'); const row=document.querySelector('[data-row-key="${beforeSwitch.key}"]'); return !!row && Math.abs(row.getBoundingClientRect().top-v.getBoundingClientRect().top-${beforeSwitch.offset}) < 3 })()`));
+    const restored = await evaluate<{ key: string; offset: number }>(`(() => { const v=document.querySelector('.transcript-viewport'); const row=document.querySelector('[data-row-key="${beforeSwitch.key}"]'); return {key:row?.dataset.rowKey || '',offset:row?.getBoundingClientRect().top-v.getBoundingClientRect().top} })()`);
     assert.equal(restored.key, beforeSwitch.key);
-    assert.ok(Math.abs(restored.offset - beforeSwitch.offset) < 3, `thread anchor offset was not restored: ${beforeSwitch.offset} -> ${restored.offset}`);
+    assert.ok(Math.abs(restored.offset - beforeSwitch.offset) < 3, `thread center anchor offset was not restored: ${beforeSwitch.offset} -> ${restored.offset}`);
 
     // Reconnect with a disjoint tail while deep in history. The cached reader
     // range and exact visual anchor remain while capped pages fill the gap.
@@ -198,11 +201,11 @@ test("real browser virtualizes, measures, paginates, navigates, and preserves re
     serverHasOlder = true;
     const reconnectSnapshot = coordinatorSnapshot(serverHistory.slice(-100), job);
     peer!.send(JSON.stringify({ type: "snapshot", snapshot: reconnectSnapshot } satisfies ServerMessage));
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    const afterReconnect = await evaluate<{ key: string; offset: number }>("(() => { const v=document.querySelector('.transcript-viewport'); const r=[...v.querySelectorAll('[data-row-key]')].map(e=>({e,r:e.getBoundingClientRect()})).filter(x=>x.r.bottom>v.getBoundingClientRect().top&&x.r.top<v.getBoundingClientRect().bottom).sort((a,b)=>a.r.top-b.r.top)[0]; return {key:r.e.dataset.rowKey,offset:r.r.top-v.getBoundingClientRect().top} })()");
+    await waitFor(async () => evaluate<boolean>(`(() => { const v=document.querySelector('.transcript-viewport'); const row=document.querySelector('[data-row-key="${reconnectAnchor.key}"]'); return !!row && Math.abs(row.getBoundingClientRect().top-v.getBoundingClientRect().top-${reconnectAnchor.offset}) < 3 })()`));
+    const afterReconnect = await evaluate<{ key: string; offset: number }>(`(() => { const v=document.querySelector('.transcript-viewport'); const row=document.querySelector('[data-row-key="${reconnectAnchor.key}"]'); return {key:row?.dataset.rowKey || '',offset:row?.getBoundingClientRect().top-v.getBoundingClientRect().top} })()`);
     assert.equal(afterReconnect.key, reconnectAnchor.key);
     assert.ok(Math.abs(afterReconnect.offset - reconnectAnchor.offset) < 3,
-      `disjoint reconnect moved ${reconnectAnchor.key}: ${reconnectAnchor.offset} -> ${afterReconnect.offset}`);
+      `disjoint reconnect moved center anchor ${reconnectAnchor.key}: ${reconnectAnchor.offset} -> ${afterReconnect.offset}`);
     for (let guard = 0; serverHasOlder && guard < 50; guard += 1) {
       const previous = pageResponses;
       await new Promise((resolve) => setTimeout(resolve, 60));

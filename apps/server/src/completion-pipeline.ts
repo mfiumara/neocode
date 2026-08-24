@@ -585,9 +585,8 @@ export class LocalReviewAdapter implements ReviewAdapter {
 
   productCiEvidence(checks: CheckEvidence[]): CheckEvidence[] {
     const explicit = this.options.command || process.env.NEOCODE_CI_COMMAND;
-    return explicit
-      ? checks.filter((check) => check.command === explicit)
-      : checks.filter((check) => /^(?:npm test|npm run (?:check|build))$/.test(check.command));
+    return checks.filter((check) => check.command === explicit
+      || /^(?:npm test|npm run (?:check|build))$/.test(check.command));
   }
 
   readDiff(job: AgentJob): Promise<string> {

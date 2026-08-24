@@ -32,6 +32,34 @@ test("default product CI uses literal npm test with canonical check and build sp
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
+test("recognized executed npm test remains product CI despite custom or environment configuration", async () => {
+  const failedTest: CheckEvidence = { command: "npm test", ok: false, exitCode: 1, durationMs: 2, output: "deterministic failure" };
+  const custom = new LocalReviewAdapter("/root", { targetBranch: "main", command: "custom-ci", judge: async (_job, _diff, hash) => verdict(hash) });
+  assert.deepEqual(custom.productCiEvidence([failedTest]).map((check) => check.command), ["npm test"]);
+
+  const previous = process.env.NEOCODE_CI_COMMAND;
+  process.env.NEOCODE_CI_COMMAND = "stale-environment-ci";
+  try {
+    const environment = new LocalReviewAdapter("/root", { targetBranch: "main", judge: async (_job, _diff, hash) => verdict(hash) });
+    assert.deepEqual(environment.productCiEvidence([failedTest]).map((check) => check.command), ["npm test"]);
+  } finally {
+    if (previous === undefined) delete process.env.NEOCODE_CI_COMMAND;
+    else process.env.NEOCODE_CI_COMMAND = previous;
+  }
+
+  class ConfiguredFailureAdapter extends FakeAdapter {
+    override async runCi(): Promise<CheckEvidence[]> { this.ciCalls += 1; return [failedTest]; }
+    productCiEvidence(checks: CheckEvidence[]): CheckEvidence[] { return custom.productCiEvidence(checks); }
+  }
+  const value = job("recognized-failure");
+  const pipeline = new CompletionPipeline(new ConfiguredFailureAdapter(), () => undefined, "main", "/root", undefined, coordinatorMergeCapability);
+  pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle();
+  assert.equal(value.review?.status, "ci_failed");
+  assert.match(value.review?.error || "", /Worker CI failed/);
+  assert.doesNotMatch(value.review?.error || "", /No product CI checks configured/);
+  assert.equal(value.review?.ci?.[0]?.purpose, "product_ci");
+});
+
 test("CI timeout process-group signal failure falls back without crashing the server", async () => {
   const originalKill = process.kill;
   process.kill = (() => {
