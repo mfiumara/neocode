@@ -308,6 +308,7 @@ export async function migrateStaleManifest(
     };
     let job = suffix ? jobs.get(suffix) : undefined;
     if (!job) job = [...jobs.values()].find((entry) => entry.branch === item.branch);
+    const wasExisting = !!job;
     if (job) {
       const samePath = await Promise.all([
         authorizedWorktree(context.workspaceRoot, job.isolation.path),
@@ -321,6 +322,9 @@ export async function migrateStaleManifest(
         const lineCount = live.porcelain ? live.porcelain.split("\n").length : 0;
         const exactUntracked = item.untrackedFiles === undefined
           || JSON.stringify(item.untrackedFiles) === JSON.stringify(live.untrackedFiles);
+        if (wasExisting && live.dirty && (!item.contentFingerprint || !item.trackedDiffSha256 || !item.untrackedFiles)) {
+          result.ambiguous.push(`${item.path}: dirty durable job lacks exact manifest content fingerprints`); continue;
+        }
         if (live.head !== item.head || (item.dirty !== null && live.dirty !== item.dirty)
           || (item.statusLines != null && lineCount !== item.statusLines)
           || (item.trackedDiffSha256 !== undefined && live.trackedDiffSha256 !== item.trackedDiffSha256)
