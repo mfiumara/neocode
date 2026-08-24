@@ -29,12 +29,16 @@ export function jobActiveState(job: AgentJob, activityReady = true): JobActiveSt
   if (job.status === "running") {
     return { kind: "worker", label: job.review ? "Worker repairing" : "Worker working" };
   }
-  if (review === "ci_running") return job.review?.reviewBaseRef && job.handoff?.round !== undefined
-    && job.review.preparedHandoffRound === job.handoff.round
-    ? { kind: "checks", label: "Running product checks" }
-    : { kind: "review", label: "Preparing review" };
+  if (review === "ci_running") {
+    const round = job.handoff?.round;
+    if (round !== undefined && job.review?.ciHandoffRound === round) return undefined;
+    return job.review?.reviewBaseRef && round !== undefined && job.review.preparedHandoffRound === round
+      ? { kind: "checks", label: "Running product checks" }
+      : { kind: "review", label: "Preparing review" };
+  }
   if (review === "post_merge_ci") return { kind: "checks", label: "Running checks" };
-  if (review === "judging") return { kind: "review", label: "Under review" };
+  if (review === "judging") return job.review?.judge && job.handoff?.round !== undefined
+    && job.review.judgeHandoffRound === job.handoff.round ? undefined : { kind: "review", label: "Under review" };
   if (review === "merging") return { kind: "integration", label: "Integrating" };
 
   // Other current review statuses are settled or awaiting a decision. An

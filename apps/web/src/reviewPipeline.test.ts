@@ -98,9 +98,36 @@ test("pre-CI preparation transitions to actual product CI and excludes informati
   assert.match(stage(value, "ci").summary, /no completed product commands/i);
   value.review!.ciHandoffRound = 2;
   value.review!.ci.push({ command: "npm run test", purpose: "product_ci", handoffRound: 2, ok: false, exitCode: 1, durationMs: 40, output: "current completed failure" });
-  assert.equal(stage(value, "ci").tone, "active");
+  assert.equal(stage(value, "ci").tone, "failed");
+  assert.match(reviewPipeline(value).guidance, /completed with failures.*awaiting durable remediation/i);
   assert.match(stage(value, "ci").summary, /^0\/1 product checks passed/);
   assert.equal(stage(value, "ci").durationMs, 40);
+});
+
+test("published successful current-round checks complete before judge launch without live activity", () => {
+  const value = job("ci_running");
+  value.review!.reviewBaseRef = "prepared"; value.review!.preparedHandoffRound = 1; value.review!.ciHandoffRound = 1;
+  value.review!.ci = [
+    { command: "npm run test", purpose: "product_ci", handoffRound: 1, ok: true, exitCode: 0, durationMs: 30, output: "passed" },
+    { command: "npm run check", purpose: "product_ci", handoffRound: 1, ok: true, exitCode: 0, durationMs: 20, output: "passed" },
+  ];
+  value.review!.transitions = [{ status: "ci_running", at: 2_000, owner: "coordinator" }, { status: "ci_running", at: 3_000, owner: "server", detail: "CI passed: npm run test, npm run check" }];
+  const pipeline = reviewPipeline(value);
+  assert.equal(stage(value, "ci").tone, "complete");
+  assert.equal(stage(value, "ci").durationMs, 50);
+  assert.match(pipeline.guidance, /completed.*preparing the next review stage/i);
+  assert.equal(pipeline.stages.some((item) => item.tone === "active"), false);
+});
+
+test("current-round verdict published during judging is terminal evidence, not a spinner", () => {
+  for (const approved of [true, false]) {
+    const value = job("judging"); value.review!.judgeHandoffRound = 1; value.review!.judge = verdict(approved ? "Current approval" : "Current rejection", approved);
+    const pipeline = reviewPipeline(value);
+    assert.equal(stage(value, "judge").tone, approved ? "complete" : "failed");
+    assert.match(stage(value, "judge").summary, new RegExp(approved ? "Approved: Current approval" : "Rejected: Current rejection"));
+    assert.equal(pipeline.stages.some((item) => item.tone === "active"), false);
+    assert.match(pipeline.guidance, /awaiting durable coordinator transition/i);
+  }
 });
 
 test("legacy records use only the narrow product-command fallback and remain historical without round authority", () => {
@@ -135,7 +162,7 @@ test("latest judge survives remediation and superseded outcomes remain terminal"
   ] };
   assert.equal(latestJudgeEvidence(value), undefined);
   assert.equal(latestHistoricalJudgeEvidence(value), preserved);
-  assert.match(stage(value, "judge").summary, /prior-round verdict retained/);
+  assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*Fresh approval required/);
   assert.equal(stage(value, "judge").tone, "waiting");
 
   value.integration = { status: "superseded" };
@@ -155,7 +182,7 @@ test("fresh handoff and pre-judge CI never promote resolved prior remediation ve
     value.review!.reviewBaseRef = "base";
     value.review!.remediation = { maxAttempts: 2, rounds: {}, actions: [{ id: "old", failureClass: "judge_changes", fingerprint: "f", state: "resolved", attempt: 1, maxAttempts: 2, createdAt: 2, updatedAt: 3, evidence: { detail: "old rejection", judge: verdict("Prior rejected verdict") } }] };
     assert.equal(latestJudgeEvidence(value), undefined);
-    assert.match(stage(value, "judge").summary, /Awaiting independent judge.*prior-round verdict/i);
+    assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*Prior rejected verdict/i);
     assert.equal(stage(value, "judge").tone, "waiting");
   }
 });
@@ -216,7 +243,7 @@ test("fresh active rounds label retained checks and verdicts as historical", () 
   assert.match(stage(ci, "ci").summary, /^Historical prior-round evidence/);
   assert.equal(stage(ci, "ci").durationMs, undefined);
   const judging = job("judging"); judging.review!.judge = verdict("Old rejection");
-  assert.match(stage(judging, "judge").summary, /Awaiting independent judge.*prior-round verdict/i);
+  assert.match(stage(judging, "judge").summary, /Latest prior-round verdict.*Old rejection/i);
   assert.equal(stage(judging, "judge").tone, "active");
 });
 

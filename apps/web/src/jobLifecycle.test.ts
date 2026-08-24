@@ -43,7 +43,12 @@ test("active state requires genuine worker execution and covers synchronized coo
   assert.deepEqual(jobActiveState(reviewed("ci_running")), { kind: "review", label: "Preparing review" });
   const checking = reviewed("ci_running"); checking.handoff = { report: "done", requirements: [], diffSha256: "hash", branch: checking.branch, worktree: checking.worktree, tests: [], risks: [], round: 2, createdAt: 2 }; checking.review!.reviewBaseRef = "prepared"; checking.review!.preparedHandoffRound = 2;
   assert.deepEqual(jobActiveState(checking), { kind: "checks", label: "Running product checks" });
-  assert.deepEqual(jobActiveState(reviewed("judging")), { kind: "review", label: "Under review" });
+  checking.review!.ciHandoffRound = 2;
+  assert.equal(jobActiveState(checking), undefined, "published current checks are no longer live");
+  const judging = reviewed("judging");
+  assert.deepEqual(jobActiveState(judging), { kind: "review", label: "Under review" });
+  judging.handoff = checking.handoff; judging.review!.judgeHandoffRound = 2; judging.review!.judge = { approved: true, summary: "done", requirements: [], model: { provider: "test", id: "judge" }, diffSha256: "hash", raw: "{}" };
+  assert.equal(jobActiveState(judging), undefined, "published current verdict is no longer live");
   assert.deepEqual(jobActiveState(reviewed("merging")), { kind: "integration", label: "Integrating" });
   assert.deepEqual(jobActiveState(job("running")), { kind: "worker", label: "Worker working" });
 });
