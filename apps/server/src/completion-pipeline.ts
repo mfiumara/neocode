@@ -268,7 +268,9 @@ export class CompletionPipeline {
       if (mode === "post") {
         const checks = await this.adapter.runCi(this.rootCwd || job.isolation.path);
         const productChecks = this.productCiEvidence(checks);
-        job.review!.postMergeCi = this.classifyChecks(checks, productChecks, job.handoff?.round); this.publish(job);
+        job.review!.postMergeCi = this.classifyChecks(checks, productChecks, job.handoff?.round);
+        delete job.review!.activeRetry;
+        this.publish(job);
         if (!productChecks.length || checks.some((check) => !check.ok)) {
           this.requireAction(job, "post_merge_ci", "post_ci_failed",
             !productChecks.length ? "No post-merge product CI checks detected" : "Post-merge CI failed", job.review!.postMergeCi);
@@ -287,6 +289,7 @@ export class CompletionPipeline {
         const productChecks = this.productCiEvidence(ci);
         job.review!.ci = this.classifyChecks(ci, productChecks, job.handoff?.round);
         job.review!.ciHandoffRound = job.handoff?.round;
+        delete job.review!.activeRetry;
         this.publish(job);
         if (!productChecks.length || ci.some((check) => !check.ok)) {
           const transient = productChecks.some((check) => check.timedOut || check.exitCode === null);
@@ -337,7 +340,9 @@ export class CompletionPipeline {
         this.transition(job, "post_merge_ci", "Merge completed; running serialized post-merge checks", "server");
         const checks = await this.adapter.runCi(this.rootCwd || job.isolation.path);
         const productChecks = this.productCiEvidence(checks);
-        job.review!.postMergeCi = this.classifyChecks(checks, productChecks, job.handoff?.round); this.publish(job);
+        job.review!.postMergeCi = this.classifyChecks(checks, productChecks, job.handoff?.round);
+        delete job.review!.activeRetry;
+        this.publish(job);
         if (!productChecks.length || checks.some((check) => !check.ok)) {
           this.requireAction(job, "post_merge_ci", "post_ci_failed",
             !productChecks.length ? "No post-merge product CI checks detected" : "Post-merge CI failed", job.review!.postMergeCi);
@@ -347,6 +352,7 @@ export class CompletionPipeline {
         this.transition(job, "merged", `Guarded merge verified as ${result.commit}; post-merge checks passed: ${checks.map((check) => check.command).join(", ")}`, "server");
       });
     } catch (error) {
+      delete job.review!.activeRetry;
       const code = error instanceof PipelineError ? error.code : "failed";
       const failureClass = error instanceof PipelineError && error.failureClass
         ? error.failureClass : code === "conflict" ? "conflict" : "infrastructure";
@@ -441,8 +447,10 @@ export class CompletionPipeline {
       this.scheduled.delete(action.id);
       if (this.currentAction(job)?.id !== action.id || action.state !== "repairing"
         || job.review?.status === "merged" || job.integration?.status === "merged") return;
+      const target = action.evidence.mergeCommit ? "post_merge" : "review";
+      job.review!.activeRetry = { target, startedAt: Date.now() };
       this.transition(job, "ci_running", `Infrastructure retry ${round.attempts}/${round.maxAttempts} after ${delay}ms backoff`, "coordinator");
-      this.launch(job, action.evidence.mergeCommit ? "post" : "judge");
+      this.launch(job, target === "post_merge" ? "post" : "judge");
     }, delay);
     timer.unref?.();
   }
@@ -574,7 +582,7 @@ export class LocalReviewAdapter implements ReviewAdapter {
     const explicit = this.options.command || process.env.NEOCODE_CI_COMMAND;
     return explicit
       ? checks.filter((check) => check.command === explicit)
-      : checks.filter((check) => /^npm run (?:test|check|build)$/.test(check.command));
+      : checks.filter((check) => /^(?:npm test|npm run (?:check|build))$/.test(check.command));
   }
 
   readDiff(job: AgentJob): Promise<string> {
@@ -754,7 +762,7 @@ export async function detectedCommands(cwd: string): Promise<string[]> {
     if (value.scripts?.test) commands.push("npm test");
     commands.push(...["check", "build"]
       .filter((name) => value.scripts?.[name])
-      .map((name) => `npm run ${name}`));
+      .map((name) => name === "test" ? "npm test" : `npm run ${name}`));
     return commands;
   } catch { return []; }
 }

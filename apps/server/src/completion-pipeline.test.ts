@@ -12,6 +12,7 @@ import {
   CompletionPipeline,
   detectedCommands,
   LocalReviewAdapter,
+  detectedCommands,
   PipelineError,
   runBounded,
   type ReconcileResult,
@@ -304,10 +305,13 @@ test("successful infrastructure retry resolves durably and restart cannot resche
     const adapter = new FakeAdapter(); const value = job("infra-success");
     const transient: CheckEvidence = { command: "npm test", ok: false, exitCode: null, durationMs: 1, output: "runner disappeared", timedOut: true };
     adapter.runCi = async () => adapter.ciCalls++ === 0 ? [transient] : [pass];
-    const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root", undefined, coordinatorMergeCapability);
+    const published: AgentJob[] = [];
+    const pipeline = new CompletionPipeline(adapter, (job) => published.push(structuredClone(job)), "main", "/root", undefined, coordinatorMergeCapability);
     pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle();
     pipeline.retryInfrastructure(value, "ephemeral runner timeout");
     while (value.review?.status !== "approved") await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.ok(published.some((job) => job.review?.activeRetry?.target === "review" && job.review.status === "ci_running"), "review retry target is durably published before execution");
+    assert.equal(value.review.activeRetry, undefined, "completed retry evidence settles active retry authority");
     assert.equal(value.review.remediation?.actions[0]?.state, "resolved");
     assert.equal(value.review.remediation?.currentActionId, undefined);
     pipeline.requestMerge(value, coordinatorMergeCapability); await pipeline.idle();
@@ -383,18 +387,22 @@ test("candidate and post-merge verification failures become evidence-complete ac
   assert.equal(candidate.review?.remediation?.actions.at(-1)?.evidence.checks?.[0]?.output, candidateCheck.output);
   assert.notEqual(candidate.integration?.status, "merged");
 
-  const postAdapter = new FakeAdapter();
-  postAdapter.runCi = async (cwd) => cwd === "/root"
-    ? [{ command: "npm test", ok: false, exitCode: 1, durationMs: 3, output: "post merge regression" }]
+  const postAdapter = new FakeAdapter(); let rootChecks = 0;
+  postAdapter.runCi = async (cwd) => cwd === "/root" && rootChecks++ === 0
+    ? [{ command: "npm test", ok: false, exitCode: null, durationMs: 3, output: "post merge runner timed out", timedOut: true }]
     : [pass];
-  const post = job("post-fail");
-  const postPipeline = new CompletionPipeline(postAdapter, () => undefined, "main", "/root", undefined, coordinatorMergeCapability);
+  const post = job("post-fail"); const postPublished: AgentJob[] = [];
+  const postPipeline = new CompletionPipeline(postAdapter, (value) => postPublished.push(structuredClone(value)), "main", "/root", undefined, coordinatorMergeCapability);
   postPipeline.enqueue(post); postPipeline.startJudge(post); await postPipeline.idle();
   postPipeline.requestMerge(post, coordinatorMergeCapability); await postPipeline.idle();
   assert.equal(post.review?.status, "post_ci_failed");
   assert.equal(post.review?.remediation?.actions.at(-1)?.failureClass, "post_merge_ci");
   assert.equal(post.review?.remediation?.actions.at(-1)?.evidence.mergeCommit, "commit-post-fail");
   assert.notEqual(post.integration?.status, "merged", "post-merge failure must never appear Done");
+  postPipeline.retryInfrastructure(post, "retry post-merge runner");
+  while ((post.review?.status as string) !== "merged") await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(postPublished.some((value) => value.review?.activeRetry?.target === "post_merge" && value.review.status === "ci_running"));
+  assert.equal(post.review?.activeRetry, undefined);
 });
 
 test("target advancement invalidates concurrent approval before integration", async () => {
@@ -418,6 +426,15 @@ test("changed diff after approval blocks guarded integration", async () => {
   const value = job(); const pipeline = new CompletionPipeline(adapter, () => undefined, "main", "/root", undefined, coordinatorMergeCapability);
   pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle(); pipeline.requestMerge(value, coordinatorMergeCapability); await pipeline.idle();
   assert.equal(value.review?.status, "blocked"); assert.equal(adapter.reconcileCalls, 0);
+});
+
+test("default product command detection emits literal npm test while retaining check and build", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "neocode-default-ci-"));
+  try {
+    await writeFile(join(directory, "package.json"), JSON.stringify({ scripts: { test: "node --test", check: "tsc", build: "vite build" } }));
+    await writeFile(join(directory, "package-lock.json"), "{}\n");
+    assert.deepEqual(await detectedCommands(directory), ["npm ci", "npm test", "npm run check", "npm run build"]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("actual review persists Git packet evidence but metadata alone cannot satisfy product CI", async () => {
@@ -458,12 +475,12 @@ test("actual review persists Git packet evidence but metadata alone cannot satis
     assert.equal(unconfigured.review?.ciHandoffRound, unconfigured.handoff?.round);
     assert.ok(unconfigured.review?.ci?.every((check) => check.purpose === "preparation" && check.handoffRound === unconfigured.handoff?.round));
     const defaultClassification = noProductAdapter.productCiEvidence([
-      { command: "npm run test", ok: true, exitCode: 0, durationMs: 1, output: "" },
+      { command: "npm test", ok: true, exitCode: 0, durationMs: 1, output: "" },
       { command: "npm run check", ok: true, exitCode: 0, durationMs: 1, output: "" },
       { command: "npm run build", ok: true, exitCode: 0, durationMs: 1, output: "" },
       { command: "git diff --check main HEAD", ok: true, exitCode: 0, durationMs: 1, output: "" },
     ]);
-    assert.deepEqual(defaultClassification.map((check) => check.command), ["npm run test", "npm run check", "npm run build"]);
+    assert.deepEqual(defaultClassification.map((check) => check.command), ["npm test", "npm run check", "npm run build"]);
     assert.throws(() => blocked.requestMerge(unconfigured, coordinatorMergeCapability), /judge approval/);
 
     const configuredAdapter = new LocalReviewAdapter(root, {

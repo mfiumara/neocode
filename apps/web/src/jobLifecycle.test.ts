@@ -50,6 +50,10 @@ test("active state requires genuine worker execution and covers synchronized coo
   judging.handoff = checking.handoff; judging.review!.judgeHandoffRound = 2; judging.review!.judge = { approved: true, summary: "done", requirements: [], model: { provider: "test", id: "judge" }, diffSha256: "hash", raw: "{}" };
   assert.equal(jobActiveState(judging), undefined, "published current verdict is no longer live");
   assert.deepEqual(jobActiveState(reviewed("merging")), { kind: "integration", label: "Integrating" });
+  const retry = reviewed("ci_running"); retry.review!.activeRetry = { target: "review", startedAt: 3 }; retry.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "retry", actions: [{ id: "retry", failureClass: "infrastructure", fingerprint: "f", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: 2, updatedAt: 3, evidence: { detail: "retry" } }] };
+  assert.deepEqual(jobActiveState(retry), { kind: "review", label: "Retrying review prerequisites" });
+  retry.review!.activeRetry.target = "post_merge";
+  assert.deepEqual(jobActiveState(retry), { kind: "checks", label: "Retrying verification" });
   assert.deepEqual(jobActiveState(job("running")), { kind: "worker", label: "Worker working" });
 });
 
@@ -78,6 +82,8 @@ test("settled and disconnected lifecycle state never appears active", () => {
   assert.equal(jobLifecycleLabel(reviewed("merge_queued")), "Approved · awaiting integration");
   assert.equal(jobActiveState(reviewed("judging"), false), undefined, "a stale snapshot is inactive during reconnect");
   assert.equal(jobActiveState(job("completed", { status: "integrating" })), undefined, "an orphaned transient integration flag is not live");
+  const publishedPost = reviewed("post_merge_ci"); publishedPost.review!.postMergeCi = [{ command: "npm test", ok: true, exitCode: 0, durationMs: 1, output: "passed" }];
+  assert.equal(jobActiveState(publishedPost), undefined, "published post-merge evidence settles the spinner before status advances");
   const historical = reviewed("approved");
   historical.review!.transitions.unshift({ status: "judging", at: 1 });
   assert.equal(jobActiveState(historical), undefined, "historical transient transitions are ignored");

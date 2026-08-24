@@ -110,6 +110,8 @@ export interface JobReview {
   preparedHandoffRound?: number;
   /** Handoff round represented by the current review.ci collection. */
   ciHandoffRound?: number;
+  /** Durable authority for a coordinator-owned infrastructure retry currently in flight. */
+  activeRetry?: { target: "review" | "post_merge"; startedAt: number };
   updatedAt: number;
   transitions: ReviewTransition[];
   ci?: CheckEvidence[];

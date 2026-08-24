@@ -30,13 +30,20 @@ export function jobActiveState(job: AgentJob, activityReady = true): JobActiveSt
     return { kind: "worker", label: job.review ? "Worker repairing" : "Worker working" };
   }
   if (review === "ci_running") {
+    const action = job.review?.remediation?.actions.find((item) => item.id === job.review?.remediation?.currentActionId);
+    if (action?.state === "repairing" && job.review?.activeRetry) {
+      return job.review.activeRetry.target === "post_merge"
+        ? { kind: "checks", label: "Retrying verification" }
+        : { kind: "review", label: "Retrying review prerequisites" };
+    }
     const round = job.handoff?.round;
     if (round !== undefined && job.review?.ciHandoffRound === round) return undefined;
     return job.review?.reviewBaseRef && round !== undefined && job.review.preparedHandoffRound === round
       ? { kind: "checks", label: "Running product checks" }
       : { kind: "review", label: "Preparing review" };
   }
-  if (review === "post_merge_ci") return { kind: "checks", label: "Running checks" };
+  if (review === "post_merge_ci") return job.review?.postMergeCi?.length
+    ? undefined : { kind: "checks", label: "Running checks" };
   if (review === "judging") return job.review?.judge && job.handoff?.round !== undefined
     && job.review.judgeHandoffRound === job.handoff.round ? undefined : { kind: "review", label: "Under review" };
   if (review === "merging") return { kind: "integration", label: "Integrating" };

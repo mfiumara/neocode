@@ -33,8 +33,8 @@ test("conflicted integration does not erase specific production failure guidance
     ["ci_failed", /CI failed; repair is required/i, "ci"],
     ["rejected", /Judge rejected/, "judge"],
     ["post_ci_failed", /Post-merge CI failed/, "verification"],
-    ["blocked", /recorded reason|coordinator action/i, "merge"],
-    ["failed", /recorded reason|coordinator action/i, "merge"],
+    ["blocked", /blocked exact diagnostic/i, "merge"],
+    ["failed", /failed exact diagnostic/i, "merge"],
   ];
   for (const [status, guidance, failedStage] of cases) {
     const value = job(status); value.integration = { status: "conflicted" }; value.review!.error = `${status} exact diagnostic`;
@@ -53,7 +53,7 @@ test("action-required evidence marks its specific repair and failed stage withou
   const value = job("blocked"); value.integration = { status: "conflicted" };
   value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "ci-action", actions: [{ id: "ci-action", failureClass: "candidate_ci", fingerprint: "f", state: "pending", attempt: 1, maxAttempts: 2, createdAt: 3_000, updatedAt: 3_500, evidence: { detail: "candidate check failed" } }] };
   const pipeline = reviewPipeline(value);
-  assert.match(pipeline.guidance, /candidate ci requires coordinator action/i);
+  assert.match(pipeline.guidance, /candidate check failed/i);
   assert.equal(pipeline.stages.find((item) => item.id === "ci")?.tone, "blocked");
   assert.equal(pipeline.stages.find((item) => item.id === "repair")?.tone, "blocked");
   assert.doesNotMatch(pipeline.guidance, /rebase conflict/i);
@@ -254,15 +254,50 @@ test("offline judging, pre-merge verification evidence, and needs-attention reas
   assert.doesNotMatch(reviewPipeline(offline, false).stages.find((item) => item.id === "judge")!.summary, /has not started/i);
 
   const verifying = job("post_merge_ci");
-  verifying.review!.postMergeCi = [{ command: "npm run test", ok: true, exitCode: 0, durationMs: 20, output: "passed" }];
-  assert.equal(stage(verifying, "verification").tone, "active");
-  assert.match(stage(verifying, "verification").summary, /Historical\/recorded evidence/);
+  verifying.review!.postMergeCi = [{ command: "npm test", ok: true, exitCode: 0, durationMs: 20, output: "passed" }];
+  assert.equal(stage(verifying, "verification").tone, "complete");
+  assert.match(reviewPipeline(verifying).guidance, /completed.*awaiting verified terminal/i);
+  verifying.review!.postMergeCi = [{ command: "npm test", ok: false, exitCode: 1, durationMs: 20, output: "failed" }];
+  assert.equal(stage(verifying, "verification").tone, "failed");
+  assert.match(reviewPipeline(verifying).guidance, /completed with failures/i);
 
   const attention = job("blocked", "needs_attention");
   attention.recoveryIssue = "Checkout identity changed\nexact diagnostic";
   attention.review!.remediation = { maxAttempts: 1, rounds: {}, currentActionId: "exhausted", actions: [{ id: "exhausted", failureClass: "infrastructure", fingerprint: "f", state: "exhausted", attempt: 1, maxAttempts: 1, createdAt: 3, updatedAt: 4, evidence: { detail: "Judge backend unavailable" } }] };
   assert.match(reviewPipeline(attention).guidance, /Judge backend unavailable/);
   assert.doesNotMatch(reviewPipeline(attention).guidance, /exact diagnostic/);
+});
+
+test("durable infrastructure retry target overrides retained completed evidence", () => {
+  const retry = (target: "review" | "post_merge") => {
+    const value = job("ci_running"); value.review!.reviewBaseRef = "prepared"; value.review!.preparedHandoffRound = 1; value.review!.ciHandoffRound = 1;
+    value.review!.ci = [{ command: "npm test", purpose: "product_ci", handoffRound: 1, ok: true, exitCode: 0, durationMs: 20, output: "prior" }];
+    value.review!.activeRetry = { target, startedAt: 5_000 };
+    value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "infra", actions: [{ id: "infra", failureClass: "infrastructure", fingerprint: "f", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: 4_000, updatedAt: 5_000, evidence: { detail: "runner interrupted", ...(target === "post_merge" ? { mergeCommit: "merged" } : {}) } }] };
+    return value;
+  };
+  const judgeRetry = retry("review");
+  assert.equal(stage(judgeRetry, "preparation").tone, "active");
+  assert.equal(stage(judgeRetry, "ci").tone, "waiting");
+  assert.match(stage(judgeRetry, "ci").summary, /Historical prior-round evidence/);
+  assert.match(stage(judgeRetry, "judge").summary, /queued behind retry prerequisite checks/);
+  assert.match(reviewPipeline(judgeRetry).guidance, /retrying review prerequisites/);
+  judgeRetry.review!.remediation!.actions[0]!.failureClass = "candidate_ci";
+  assert.equal(stage(judgeRetry, "preparation").tone, "active", "candidate transient retry uses durable retry target");
+
+  const postRetry = retry("post_merge");
+  postRetry.review!.postMergeCi = [{ command: "npm test", ok: false, exitCode: null, durationMs: 20, output: "prior interruption" }];
+  assert.equal(stage(postRetry, "verification").tone, "active");
+  assert.equal(reviewPipeline(postRetry).stages.filter((item) => item.tone === "active").map((item) => item.id).join(","), "verification");
+  assert.match(reviewPipeline(postRetry).guidance, /retrying post-merge verification/);
+});
+
+test("generic blocked and failed states surface concise human-readable reasons", () => {
+  for (const status of ["blocked", "failed"] as const) {
+    const value = job(status); value.integration = { status: "conflicted" }; value.review!.error = "Target branch moved while checks ran\nopaque diagnostics";
+    assert.match(reviewPipeline(value).guidance, /Review is blocked: Target branch moved while checks ran/);
+    assert.doesNotMatch(reviewPipeline(value).guidance, /opaque diagnostics/);
+  }
 });
 
 test("top-level authority and reconnect suppress stale active phases while recovered work wins", () => {

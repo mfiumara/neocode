@@ -32,7 +32,7 @@ function fixture(root: string, title = "durable"): DurableRuntimeState {
     },
     completion: { head: "def456", finishedAt: 2 },
     handoff: { report: "done", requirements: [], diffSha256: "hash", branch: "neocode/durable-job-1", worktree: join(root, ".worktrees", "durable-job-1"), tests: [], risks: [], round: 2, createdAt: 2 },
-    review: { hookToken: "hook", status: "ci_running", attempt: 2, targetBranch: "main", reviewBaseRef: "base-2", preparedHandoffRound: 2, ciHandoffRound: 2, updatedAt: 2, transitions: [], ci: [{ command: "custom-ci", purpose: "product_ci", handoffRound: 2, ok: true, exitCode: 0, durationMs: 5, output: "passed" }] },
+    review: { hookToken: "hook", status: "ci_running", attempt: 2, targetBranch: "main", reviewBaseRef: "base-2", preparedHandoffRound: 2, ciHandoffRound: 2, activeRetry: { target: "review", startedAt: 2 }, updatedAt: 2, transitions: [], ci: [{ command: "custom-ci", purpose: "product_ci", handoffRound: 2, ok: true, exitCode: 0, durationMs: 5, output: "passed" }] },
     integration: { status: "merged", targetRef: "main", verifiedAt: 3, targetHead: "fed789", completionHead: "def456" },
     cleanup: {
       status: "removed", checkedAt: 3, removedAt: 4,
@@ -69,6 +69,7 @@ test("runtime state atomically round-trips all job and session metadata", async 
     assert.equal(restored?.jobs[0]?.job.integration?.status, "merged");
     assert.equal(restored?.jobs[0]?.job.review?.preparedHandoffRound, 2);
     assert.equal(restored?.jobs[0]?.job.review?.ciHandoffRound, 2);
+    assert.equal(restored?.jobs[0]?.job.review?.activeRetry?.target, "review");
     assert.equal(restored?.jobs[0]?.job.review?.ci?.[0]?.purpose, "product_ci");
     assert.equal(restored?.jobs[0]?.job.review?.ci?.[0]?.handoffRound, 2);
     assert.equal(restored?.maintenance?.removed, 1);
