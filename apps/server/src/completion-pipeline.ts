@@ -767,7 +767,7 @@ export async function detectedCommands(cwd: string): Promise<string[]> {
     if (value.scripts?.test) commands.push("npm test");
     commands.push(...["check", "build"]
       .filter((name) => value.scripts?.[name])
-      .map((name) => name === "test" ? "npm test" : `npm run ${name}`));
+      .map((name) => `npm run ${name}`));
     return commands;
   } catch { return []; }
 }

@@ -12,7 +12,6 @@ import {
   CompletionPipeline,
   detectedCommands,
   LocalReviewAdapter,
-  detectedCommands,
   PipelineError,
   runBounded,
   type ReconcileResult,
