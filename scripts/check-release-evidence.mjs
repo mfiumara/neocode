@@ -6,9 +6,15 @@ const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b78
 const COMMANDS = ["npm test", "npm run check", "npm run build"];
 const SHA = /^[0-9a-f]{64}$/;
 const UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function fail(message) { throw new Error(`release evidence: ${message}`); }
 function validUtc(value) { return typeof value === "string" && UTC.test(value) && Number.isFinite(Date.parse(value)); }
+function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
+export function commandRecordSha256(command) {
+  return sha256(JSON.stringify({ command: command.command, cwd: command.cwd, startedUtc: command.startedUtc,
+    finishedUtc: command.finishedUtc, exit: command.exit, stdoutBase64: command.stdoutBase64, stderrBase64: command.stderrBase64 }));
+}
 
 export function validateEvidenceRecord(record, facts) {
   if (!record || record.version !== 1) fail("missing or unsupported record");
@@ -28,8 +34,12 @@ export function validateEvidenceRecord(record, facts) {
     for (const stream of ["stdout", "stderr"]) {
       const checksum = command[`${stream}Sha256`];
       const bytes = command[`${stream}Bytes`];
-      if (!SHA.test(checksum || "") || !Number.isSafeInteger(bytes) || bytes < 0) fail(`${command.command} ${stream} checksum metadata malformed`);
+      const encoded = command[`${stream}Base64`];
+      if (!SHA.test(checksum || "") || !Number.isSafeInteger(bytes) || bytes < 0 || typeof encoded !== "string" || !BASE64.test(encoded)) fail(`${command.command} ${stream} raw record malformed`);
+      const raw = Buffer.from(encoded, "base64");
+      if (raw.toString("base64") !== encoded || raw.length !== bytes || sha256(raw) !== checksum) fail(`${command.command} ${stream} checksum/byte mismatch`);
     }
+    if (!SHA.test(command.recordSha256 || "") || commandRecordSha256(command) !== command.recordSha256) fail(`${command.command} raw command record mismatch`);
   }
   for (const name of ["candidatePorcelain", "rootPorcelain"]) {
     const evidence = record[name];
