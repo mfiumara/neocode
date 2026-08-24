@@ -420,7 +420,30 @@ test("exact checked-in manifest normalizes clean authority and leaves unproven d
   const inert = await migrateStaleManifest(dirtyManifest, new Map([[dirty.job.id, dirty.job]]), { workspaceRoot: dirty.root });
   assert.equal(inert.nominated, 0);
   assert.equal(dirty.job.staleCandidate, undefined);
-  assert.match(inert.ambiguous[0] || "", /lacks exact manifest content fingerprints/);
+  assert.match(inert.ambiguous[0] || "", /explicitly unproven.*lacks exact content fingerprints/);
+});
+
+test("checked-in auditAuthority keeps unproven dirty orphans inert and permits fingerprinted exact orphans", async () => {
+  const unproven = await fixture(true);
+  const unprovenManifest = join(unproven.root, "unproven-orphan.json");
+  await writeFile(unprovenManifest, JSON.stringify({ schemaVersion: 1, generatedAt: "2026-08-23T00:00:00Z", baseline: { ref: "main", commit: unproven.base }, jobs: [],
+    worktrees: [{ path: unproven.path, branch: unproven.job.branch, head: unproven.base, valid: true, dirty: true, statusLines: 2,
+      auditAuthority: { state: "unproven", reason: "checked-in schema lacks canonical fingerprints" }, disposition: "superseded duplicate", evidence: "Replacement commit abcdef12 appears equivalent." }],
+  }));
+  const inert = await migrateStaleManifest(unprovenManifest, new Map(), { workspaceRoot: unproven.root });
+  assert.equal(inert.synthetic, 0); assert.equal(inert.nominated, 0);
+  assert.match(inert.ambiguous[0] || "", /explicitly unproven.*lacks exact content fingerprints/);
+
+  const proven = await fixture(true); const exact = await auditWorktree(proven.job, { workspaceRoot: proven.root });
+  const provenManifest = join(proven.root, "proven-orphan.json");
+  await writeFile(provenManifest, JSON.stringify({ schemaVersion: 1, generatedAt: "2026-08-23T00:00:00Z", baseline: { ref: "main", commit: proven.base }, jobs: [],
+    worktrees: [{ path: proven.path, branch: proven.job.branch, head: proven.base, valid: true, dirty: true, statusLines: 2,
+      auditAuthority: { state: "fingerprinted", reason: "canonical tracked and untracked audit" }, trackedDiffSha256: exact.trackedDiffSha256,
+      contentFingerprint: exact.contentFingerprint, untrackedFiles: exact.untrackedFiles, disposition: "superseded duplicate", evidence: "Replacement commit abcdef12 appears equivalent." }],
+  }));
+  const jobs = new Map<string, AgentJob>(); const imported = await migrateStaleManifest(provenManifest, jobs, { workspaceRoot: proven.root });
+  assert.equal(imported.synthetic, 1); assert.equal(imported.nominated, 1); assert.deepEqual(imported.ambiguous, []);
+  assert.equal([...jobs.values()][0]?.staleCandidate?.state, "pending");
 });
 
 test("orphan migration rejects status drift and optional exact-content drift even when dirty boolean is unchanged", async () => {

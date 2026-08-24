@@ -67,7 +67,8 @@ export class WorktreeJanitor {
 
   async review(job: AgentJob): Promise<boolean> {
     const checkedAt = this.now();
-    if (job.staleCandidate?.state === "pending") {
+    const terminalIntegration = job.integration?.status === "merged" || job.integration?.status === "superseded";
+    if (job.staleCandidate?.state === "pending" && !terminalIntegration) {
       return refusal(job, "not_completed", "Stale candidate awaits explicit confirmation; all files are retained.", checkedAt);
     }
     if (job.status !== "completed") return refusal(job, "not_completed", `Job status is ${job.status}.`, checkedAt);

@@ -156,3 +156,29 @@ test("removes a clean completed no-op wrapper without risking unique work", asyn
     assert.equal(await stat(worktree).then(() => true, () => false), false);
   });
 });
+
+test("terminal integration precedence ignores stale pending residue while nonterminal pending remains retained", async () => {
+  for (const terminal of ["merged", "superseded"] as const) {
+    await withFixture({ merge: terminal === "merged" }, async ({ root, job }) => {
+      job.integration = { status: terminal, verifiedAt: NOW - 1, targetRef: "main", targetHead: await git(root, ["rev-parse", "main"]) };
+      job.staleCandidate = {
+        state: "pending", nominatedAt: 1, nominatedBy: "coordinator", reason: "Residual provisional metadata must not override authoritative terminal integration.",
+        evidenceSource: "audit", confirmation: "pending", resumeState: { status: "completed" },
+        audit: { path: job.isolation.path, branch: job.branch, head: job.completion!.head, dirty: false, porcelain: "", trackedDiffSha256: "0".repeat(64), contentFingerprint: "1".repeat(64), untrackedFiles: [] },
+      };
+      assert.equal(await janitor(root).review(job), true, terminal);
+      assert.equal(job.cleanup?.status, "removed");
+    });
+  }
+
+  await withFixture({ merge: true }, async ({ root, job }) => {
+    job.staleCandidate = {
+      state: "pending", nominatedAt: 1, nominatedBy: "coordinator", reason: "This genuinely nonterminal stale candidate still requires an explicit decision.",
+      evidenceSource: "audit", confirmation: "pending", resumeState: { status: "completed" },
+      audit: { path: job.isolation.path, branch: job.branch, head: job.completion!.head, dirty: false, porcelain: "", trackedDiffSha256: "0".repeat(64), contentFingerprint: "1".repeat(64), untrackedFiles: [] },
+    };
+    assert.equal(await janitor(root).review(job), false);
+    assert.equal(reason(job), "not_completed");
+    assert.equal(await stat(job.isolation.path).then(() => true), true);
+  });
+});

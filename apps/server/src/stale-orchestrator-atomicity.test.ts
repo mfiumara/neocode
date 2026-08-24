@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import type { AgentJob, ServerMessage } from "@neocode/protocol";
 import { Orchestrator } from "./orchestrator.js";
+import { CompletionPipeline, type ReviewAdapter } from "./completion-pipeline.js";
 import { RuntimeStateStore, type DurableRuntimeState } from "./runtime-state.js";
 
 const exec = promisify(execFile);
@@ -43,7 +44,8 @@ async function fixture(status: AgentJob["status"] = "interrupted", dirty = false
     startWorkerRun: (job: AgentJob, attachments: unknown[], options: unknown) => void;
     stateStore: { writeAtomic(state: DurableRuntimeState): Promise<void>; flush(): Promise<void> };
     startCleanup(source: "manual", ignoreGrace?: boolean): void; janitorRun?: Promise<void>;
-    scheduleBacklogSweep(): void; persist(): void;
+    scheduleBacklogSweep(): void; persist(): void; completionPipeline: CompletionPipeline;
+    migrateStaleAuditTransaction(path: string, publish: boolean): Promise<{ nominated: number; ambiguous: string[] }>;
   };
   const harness = orchestrator as unknown as Harness;
   harness.jobs.set(job.id, job); harness.coordinator = { model: {}, thinkingLevel: "medium" };
@@ -90,6 +92,77 @@ test("nomination audit and real resumeJob serialize in both orderings without st
     assert.equal(second.job.status, "running");
     assert.equal(second.harness.workers.has(second.job.id), true);
   } finally { await second.cleanup(); }
+});
+
+
+test("stale nomination and startJudge serialize in both orderings with exactly one lifecycle claim", async () => {
+  const prepare = async () => {
+    const value = await fixture("completed", false);
+    value.job.handoff = { report: "ready", requirements: [], diffSha256: "diff", branch: value.job.branch, worktree: value.path, tests: ["npm test"], risks: [], round: 1, createdAt: 2 };
+    value.job.review = { hookToken: "hook", status: "queued", attempt: 1, targetBranch: "main", updatedAt: 2, transitions: [{ status: "queued", at: 2, owner: "worker" }] };
+    const ci = gate();
+    const adapter: ReviewAdapter = {
+      runCi: async () => { ci.arrive(); await ci.release; return [{ command: "npm test", ok: false, exitCode: 1, durationMs: 1, output: "deterministic stop" }]; },
+      readDiff: async () => "diff", judge: async () => ({ approved: false, summary: "not reached", requirements: [], model: { provider: "test", id: "judge" }, diffSha256: "diff", raw: "{}" }),
+      reconcile: async () => ({ commit: value.base }),
+    };
+    value.harness.completionPipeline = new CompletionPipeline(adapter, () => undefined, "main", value.root);
+    return { ...value, ci };
+  };
+
+  const first = await prepare();
+  try {
+    const paused = gate(); first.harness.staleLifecycleHooks = { beforeNominationMutation: async () => { paused.arrive(); await paused.release; } };
+    const nominationRun = first.orchestrator.nominateStale(first.job.id, nomination); await paused.entered;
+    let judgeSettled = false;
+    const judgeRun = first.orchestrator.startJudge(first.job.id).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error })).finally(() => { judgeSettled = true; });
+    await Promise.resolve(); assert.equal(judgeSettled, false);
+    paused.releaseNow(); await nominationRun;
+    const outcome = await judgeRun; assert.equal(outcome.ok, false); if (!outcome.ok) assert.match(String(outcome.error), /stale-candidate decision/);
+    assert.equal(first.job.staleCandidate?.state, "pending"); assert.equal(first.job.review?.status, "queued");
+  } finally { first.ci.releaseNow(); await first.cleanup(); }
+
+  const second = await prepare();
+  try {
+    const paused = gate(); second.harness.staleLifecycleHooks = { beforeReviewStart: async () => { paused.arrive(); await paused.release; } };
+    const judgeRun = second.orchestrator.startJudge(second.job.id); await paused.entered;
+    let nominationSettled = false;
+    const nominationRun = second.orchestrator.nominateStale(second.job.id, nomination).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error })).finally(() => { nominationSettled = true; });
+    await Promise.resolve(); assert.equal(nominationSettled, false);
+    paused.releaseNow(); await judgeRun; await second.ci.entered;
+    const outcome = await nominationRun; assert.equal(outcome.ok, false); if (!outcome.ok) assert.match(String(outcome.error), /Active jobs/);
+    assert.equal(second.job.staleCandidate, undefined); assert.notEqual(second.job.review?.status, "queued");
+  } finally { second.ci.releaseNow(); await second.cleanup(); }
+});
+
+
+test("migration applies only intended nominations and preserves unrelated worker callback progress byte-for-byte", async () => {
+  const value = await fixture("completed", false);
+  try {
+    const unrelated = structuredClone(value.job);
+    unrelated.id = "unrelated"; unrelated.branch = "neocode/unrelated"; unrelated.status = "running";
+    unrelated.messages = [{ id: "before", role: "system", text: "before", timestamp: 1 }]; unrelated.attempts = [];
+    value.harness.jobs.set(unrelated.id, unrelated);
+    const manifestPath = join(value.root, "scoped-manifest.json");
+    await writeFile(manifestPath, JSON.stringify({ schemaVersion: 1, generatedAt: "2026-08-23T00:00:00Z", baseline: { ref: "main", commit: value.base },
+      worktrees: [{ path: value.path, branch: value.job.branch, head: value.base, valid: true, dirty: false, statusLines: 0,
+        auditAuthority: { state: "clean-head-authoritative", reason: "exact clean identity" }, disposition: "already merged/content-equivalent", evidence: `Replacement commit ${value.base} is on main.` }],
+      jobs: [],
+    }));
+    const paused = gate(); value.harness.staleLifecycleHooks = { beforeNominationMutation: async (job) => { if (job.id === value.job.id) { paused.arrive(); await paused.release; } } };
+    const migration = value.harness.migrateStaleAuditTransaction(manifestPath, false); await paused.entered;
+    unrelated.status = "failed"; unrelated.error = "worker callback terminal progress";
+    unrelated.messages.push({ id: "callback", role: "assistant", text: "exact callback payload", timestamp: 3 });
+    unrelated.attempts = [{ number: 1, generation: 7, token: "lease", reason: "backend_restart", startedAt: 2, finishedAt: 3, error: "callback" }];
+    unrelated.completion = { head: "callback-head", finishedAt: 3 };
+    const callbackBytes = JSON.stringify(unrelated);
+    paused.releaseNow(); const result = await migration;
+    assert.equal(result.nominated, 1); assert.deepEqual(result.ambiguous, []);
+    assert.equal(value.job.staleCandidate?.state, "pending");
+    assert.equal(JSON.stringify(value.harness.jobs.get(unrelated.id)), callbackBytes, "migration never restores unrelated cloned state");
+    const restored = await new RuntimeStateStore(value.root).load();
+    assert.equal(JSON.stringify(restored?.jobs.find((entry) => entry.job.id === unrelated.id)?.job), callbackBytes);
+  } finally { await value.cleanup(); }
 });
 
 test("nomination persistence failure publishes nothing and leaves ownership eligibility unchanged", async () => {

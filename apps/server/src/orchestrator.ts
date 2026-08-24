@@ -195,6 +195,7 @@ interface StaleLifecycleHooks {
   beforeStaleFlush?: (job: AgentJob, action: "nominate" | "confirm_superseded" | "still_wanted") => void | Promise<void>;
   beforeStalePublish?: (job: AgentJob, action: "nominate" | "confirm_superseded" | "still_wanted") => void | Promise<void>;
   beforeWorkerOwnership?: (job: AgentJob) => void | Promise<void>;
+  beforeReviewStart?: (job: AgentJob, action: "judge" | "infrastructure_retry") => void | Promise<void>;
 }
 
 function restoreJob(target: AgentJob, snapshot: AgentJob): void {
@@ -420,7 +421,7 @@ export class Orchestrator {
       {
         name: "start_judge", label: "Start independent judge", description: "Coordinator-owned exact-diff CI and fresh independent judge review.",
         parameters: Type.Object({ jobId: Type.String() }),
-        execute: async (_callId: string, params: { jobId: string }) => { const job = this.requireLifecycleJob(params.jobId); this.completionPipeline.startJudge(job); return { content: [{ type: "text" as const, text: `Judge started for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
+        execute: async (_callId: string, params: { jobId: string }) => { await this.startJudge(params.jobId); return { content: [{ type: "text" as const, text: `Judge started for ${params.jobId}.` }], details: { jobId: params.jobId } }; },
       },
       {
         name: "request_worker_changes", label: "Request worker changes", description: "Send specific judge/coordinator feedback and resume the same worktree.",
@@ -431,7 +432,7 @@ export class Orchestrator {
         name: "retry_infrastructure", label: "Retry infrastructure", description: "Coordinator-owned bounded retry for a diagnosed transient CI/infrastructure failure.",
         parameters: Type.Object({ jobId: Type.String(), reason: Type.String() }),
         execute: async (_callId: string, params: { jobId: string; reason: string }) => {
-          this.completionPipeline.retryInfrastructure(this.requireLifecycleJob(params.jobId), params.reason);
+          await this.retryInfrastructure(params.jobId, params.reason);
           return { content: [{ type: "text" as const, text: `Bounded infrastructure retry scheduled for ${params.jobId}.` }], details: { jobId: params.jobId } };
         },
       },
@@ -1081,6 +1082,24 @@ export class Orchestrator {
     }
   }
 
+  async startJudge(jobId: string): Promise<void> {
+    await this.operationLock.run(async () => {
+      const job = this.requireLifecycleJob(jobId);
+      await this.staleLifecycleHooks?.beforeReviewStart?.(job, "judge");
+      if (this.jobs.get(jobId) !== job || job.staleCandidate?.state === "pending") throw new Error("Job lifecycle changed before judge ownership was acquired.");
+      this.completionPipeline.startJudge(job);
+    });
+  }
+
+  async retryInfrastructure(jobId: string, reason: string): Promise<void> {
+    await this.operationLock.run(async () => {
+      const job = this.requireLifecycleJob(jobId);
+      await this.staleLifecycleHooks?.beforeReviewStart?.(job, "infrastructure_retry");
+      if (this.jobs.get(jobId) !== job || job.staleCandidate?.state === "pending") throw new Error("Job lifecycle changed before review retry ownership was acquired.");
+      this.completionPipeline.retryInfrastructure(job, reason);
+    });
+  }
+
   async requestWorkerChanges(jobId: string, feedback: string): Promise<void> {
     await this.operationLock.run(async () => {
       const job = this.requireLifecycleJob(jobId);
@@ -1177,29 +1196,56 @@ export class Orchestrator {
   private async migrateStaleAuditTransaction(manifestPath: string, publish: boolean) {
     return this.operationLock.run(async () => {
       const stagedJobs = new Map([...this.jobs].map(([id, job]) => [id, structuredClone(job)]));
+      const baselineBytes = new Map([...this.jobs].map(([id, job]) => [id, JSON.stringify(job)]));
       const maintenanceBefore = structuredClone(this.maintenance);
       const notificationsBefore = structuredClone(this.notificationState);
       const sweepsBefore = new Set(this.sweepJobIds);
       let result: Awaited<ReturnType<typeof migrateStaleManifest>>;
+      const applied = new Map<string, AgentJob>();
       try {
         result = await migrateStaleManifest(manifestPath, stagedJobs, {
           workspaceRoot: this.cwd, hasActiveWorker: (id) => this.workers.has(id), jobs: stagedJobs,
           targetRef: this.maintenanceConfig.targetRef,
           beforeNominationMutation: (job) => this.staleLifecycleHooks?.beforeNominationMutation?.(job),
         });
-        for (const staged of stagedJobs.values()) if (staged.staleCandidate?.state === "pending") {
-          const current = this.jobs.get(staged.id);
-          if (this.workers.has(staged.id) || current?.status === "running" || current?.status === "queued") {
-            throw new Error(`Active worker ownership appeared during migration for ${staged.id}.`);
+        // Stage only records actually changed by migration. Unrelated current
+        // jobs remain live references and can continue receiving worker events.
+        for (const [id, staged] of stagedJobs) {
+          const baseline = baselineBytes.get(id);
+          if (baseline !== undefined && JSON.stringify(staged) === baseline) continue;
+          const current = this.jobs.get(id);
+          if (baseline !== undefined && (!current || JSON.stringify(current) !== baseline)) {
+            result.ambiguous.push(`job ${id}: durable state changed concurrently during migration`);
+            if (staged.staleCandidate?.state === "pending" && JSON.parse(baseline).staleCandidate?.state !== "pending") result.nominated = Math.max(0, result.nominated - 1);
+            continue;
           }
-          this.suppressStaleWakes(staged.id);
-          this.sweepJobIds.delete(staged.id);
+          if (this.workers.has(id) || current?.status === "running" || current?.status === "queued") {
+            result.ambiguous.push(`job ${id}: active ownership appeared during migration`);
+            if (baseline === undefined) result.synthetic = Math.max(0, result.synthetic - 1);
+            if (staged.staleCandidate?.state === "pending") result.nominated = Math.max(0, result.nominated - 1);
+            continue;
+          }
+          applied.set(id, staged);
+        }
+        const persistenceJobs = new Map(this.jobs);
+        for (const [id, staged] of applied) {
+          persistenceJobs.set(id, staged);
+          if (staged.staleCandidate?.state === "pending") {
+            this.suppressStaleWakes(id);
+            this.sweepJobIds.delete(id);
+          }
         }
         this.maintenance.staleMigration = { source: manifestPath, at: Date.now(), ...result };
-        const nominated = [...stagedJobs.values()].find((job) => job.staleCandidate?.state === "pending");
+        const nominated = [...applied.values()].find((job) => job.staleCandidate?.state === "pending");
         if (nominated) await this.staleLifecycleHooks?.beforeStaleFlush?.(nominated, "nominate");
-        await this.flushStagedJobs(stagedJobs, () => {
-          for (const [id, staged] of stagedJobs) {
+        // Revalidate changed identities immediately before the exact durable
+        // generation. No await occurs between this check and staged save setup.
+        for (const [id] of applied) {
+          const baseline = baselineBytes.get(id); const current = this.jobs.get(id);
+          if (baseline !== undefined && (!current || JSON.stringify(current) !== baseline)) throw new Error(`job ${id}: state changed before migration persistence`);
+        }
+        await this.flushStagedJobs(persistenceJobs, () => {
+          for (const [id, staged] of applied) {
             const current = this.jobs.get(id);
             if (current) restoreJob(current, staged); else this.jobs.set(id, staged);
           }
@@ -1210,7 +1256,9 @@ export class Orchestrator {
         this.sweepJobIds.clear(); for (const id of sweepsBefore) this.sweepJobIds.add(id);
         throw error;
       }
-      if (publish) for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") {
+      if (publish) for (const [id] of applied) {
+        const job = this.jobs.get(id)!;
+        if (job.staleCandidate?.state !== "pending") continue;
         await this.staleLifecycleHooks?.beforeStalePublish?.(job, "nominate");
         this.publishFlushedJob(job);
       }

@@ -391,6 +391,7 @@ interface ManifestWorktree {
   path: string; branch: string; head: string; valid: boolean; dirty: boolean | null; statusLines?: number | null;
   disposition: string; evidence: string; trackedDiffSha256?: string; contentFingerprint?: string;
   untrackedFiles?: Array<{ path: string; sha256: string; bytes: number }>;
+  auditAuthority?: { state: "unproven" | "clean-head-authoritative" | "fingerprinted"; reason?: string };
 }
 interface ManifestJob { id: string; title: string; branch: string; path: string; disposition: string; evidence: string }
 interface AuditManifest { schemaVersion: number; generatedAt: string; baseline: { ref: string; commit: string }; worktrees: ManifestWorktree[]; jobs?: ManifestJob[] }
@@ -418,6 +419,11 @@ export async function migrateStaleManifest(
     if (source) matchedManifestJobs.add(source.id);
     if (source && (source.path !== item.path || source.branch !== item.branch || !CANDIDATE_DISPOSITIONS.has(source.disposition))) {
       result.ambiguous.push(`${item.path}: manifest worktree/job classification mismatch`); continue;
+    }
+    if (item.dirty === true && item.auditAuthority?.state === "unproven"
+      && (!item.trackedDiffSha256 || !item.contentFingerprint || !Array.isArray(item.untrackedFiles))) {
+      result.ambiguous.push(`${item.path}: audit authority is explicitly unproven and lacks exact content fingerprints`);
+      continue;
     }
     const evidence = source ? `${item.evidence} Job audit (${source.disposition}): ${source.evidence}` : item.evidence;
     const expected: NominationInput = {
