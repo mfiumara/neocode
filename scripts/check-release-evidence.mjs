@@ -17,9 +17,11 @@ export function commandRecordSha256(command) {
 }
 
 export function validateEvidenceRecord(record, facts) {
-  if (!record || record.version !== 1) fail("missing or unsupported record");
+  if (!record || record.version !== 2) fail("missing or unsupported checkout-independent record");
   for (const key of ["testedParent", "testedTree", "base", "mergeBase", "cwd", "rootCwd"]) if (typeof record[key] !== "string" || !record[key]) fail(`missing ${key}`);
   if (facts.subject !== "Record trusted literal validation evidence") fail("final commit subject is not recognized");
+  if (facts.parentCount !== 1) fail("final evidence commit is not a normal linear single-parent commit");
+  if (record.cwd !== "." || record.rootCwd !== "<main-worktree>") fail("evidence cwd markers are checkout-dependent");
   if (facts.parent !== record.testedParent) fail("tested parent does not match final parent");
   if (facts.headTree !== facts.parentTree || facts.headTree !== record.testedTree) fail("final commit is non-empty or tree does not match tested parent");
   if (facts.base !== record.base || facts.mergeBase !== record.mergeBase) fail("base or merge-base mismatch");
@@ -72,9 +74,10 @@ export function verifyHead(cwd = process.cwd()) {
   if (!root) fail("root worktree is unavailable");
   return validateEvidenceRecord(record, {
     subject: git(["show", "-s", "--format=%s", "HEAD"], cwd),
+    parentCount: git(["rev-list", "--parents", "-n", "1", "HEAD"], cwd).split(/\s+/).length - 1,
     parent: git(["rev-parse", "HEAD^"], cwd), headTree: git(["rev-parse", "HEAD^{tree}"], cwd),
     parentTree: git(["rev-parse", "HEAD^^{tree}"], cwd), base: git(["rev-parse", "main"], cwd),
-    mergeBase: git(["merge-base", "main", "HEAD"], cwd), cwd: git(["rev-parse", "--show-toplevel"], cwd), rootCwd: root,
+    mergeBase: git(["merge-base", "main", "HEAD"], cwd), cwd: ".", rootCwd: "<main-worktree>",
     candidatePorcelain: git(["status", "--porcelain=v1", "--untracked-files=all"], cwd),
     rootPorcelain: git(["status", "--porcelain=v1", "--untracked-files=all"], root),
   });

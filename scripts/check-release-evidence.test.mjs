@@ -4,9 +4,9 @@ import test from "node:test";
 import { commandRecordSha256, EMPTY_SHA256, parseEvidenceMessage, validateEvidenceRecord } from "./check-release-evidence.mjs";
 
 function fixture() {
-  const cwd = "/repo/.worktrees/candidate";
+  const cwd = ".";
   const record = {
-    version: 1, testedParent: "parent", testedTree: "tree", base: "base", mergeBase: "base", cwd, rootCwd: "/repo",
+    version: 2, testedParent: "parent", testedTree: "tree", base: "base", mergeBase: "base", cwd, rootCwd: "<main-worktree>",
     commands: ["npm test", "npm run check", "npm run build"].map((command, index) => {
       const stdout = Buffer.from(`output ${index}\n`); const stderr = Buffer.alloc(0);
       const evidence = { command, cwd, startedUtc: `2026-08-24T08:0${index}:00Z`, finishedUtc: `2026-08-24T08:0${index}:01Z`, exit: 0,
@@ -20,7 +20,7 @@ function fixture() {
     rootPorcelain: { beforeSha256: EMPTY_SHA256, beforeBytes: 0, afterSha256: EMPTY_SHA256, afterBytes: 0 },
     risks: ["Dirty manifest fingerprint omissions remain durably ambiguous.", "Existing Vite chunk-size warning remains."],
   };
-  const facts = { subject: "Record trusted literal validation evidence", parent: "parent", headTree: "tree", parentTree: "tree", base: "base", mergeBase: "base", cwd, rootCwd: "/repo", candidatePorcelain: "", rootPorcelain: "" };
+  const facts = { subject: "Record trusted literal validation evidence", parentCount: 1, parent: "parent", headTree: "tree", parentTree: "tree", base: "base", mergeBase: "base", cwd, rootCwd: "<main-worktree>", candidatePorcelain: "", rootPorcelain: "" };
   return { record, facts };
 }
 
@@ -42,6 +42,7 @@ test("fails closed for missing records, non-empty final commit, wrong parent/tre
     (r, f) => { r.commands.pop(); },
     (r, f) => { f.headTree = "changed"; },
     (r, f) => { f.parent = "wrong"; },
+    (r, f) => { f.parentCount = 2; },
     (r, f) => { f.candidatePorcelain = " M file"; },
     (r, f) => { r.rootPorcelain.afterSha256 = "c".repeat(64); },
   ]) {
@@ -55,6 +56,7 @@ test("rejects command spelling, cwd, exits, timestamps, checksums, and missing r
   for (const mutate of [
     (r) => { r.commands[0].command = "npm run test"; },
     (r) => { r.commands[1].cwd = "/other"; },
+    (r) => { r.cwd = "/repo/.worktrees/candidate"; },
     (r) => { r.commands[2].exit = 1; },
     (r) => { r.commands[0].startedUtc = "yesterday"; },
     (r) => { r.commands[0].startedUtc = "2026-08-24T07:59:59Z"; },
