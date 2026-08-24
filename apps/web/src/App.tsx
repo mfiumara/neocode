@@ -1022,7 +1022,7 @@ export function App() {
               }}
             >
               <div className="transcript-content" ref={transcriptContentRef}>
-              {activeJob && isStaleCandidate(activeJob) && <StaleEvidence job={activeJob} />}
+              {activeJob?.staleCandidate && <StaleEvidence job={activeJob} />}
               {activeJob && <ReviewStatusPanel job={activeJob} activityReady={activityReady} />}
               {activeJob?.recoveryIssue && <div className="recovery-notice">Recovery needs coordinator attention. Open technical review evidence for exact diagnostics.</div>}
               {!rows.length && (
@@ -1290,21 +1290,25 @@ export function TranscriptMessageBody({ message, jobs }: { message: TranscriptMe
 
 export function StaleEvidence({ job }: { job: AgentJob }) {
   const stale = job.staleCandidate;
-  if (!stale || stale.state !== "pending") return null;
-  const replacement = [
-    stale.suspectedReplacementJobId ? `job ${stale.suspectedReplacementJobId}` : "",
-    stale.suspectedReplacementCommit ? `commit ${stale.suspectedReplacementCommit}` : "",
-  ].filter(Boolean).join(" · ");
+  const [copied, setCopied] = useState(false);
+  if (!stale) return null;
+  const hasReplacement = !!(stale.suspectedReplacementJobId || stale.suspectedReplacementCommit);
   const exact = JSON.stringify({
-    jobId: job.id, branch: stale.audit.branch, path: stale.audit.path, head: stale.audit.head,
-    dirty: stale.audit.dirty, porcelain: stale.audit.porcelain, evidenceSource: stale.evidenceSource,
+    jobId: job.id,
+    replacement: { jobId: stale.suspectedReplacementJobId, commit: stale.suspectedReplacementCommit },
+    audit: stale.audit, evidenceSource: stale.evidenceSource, archive: stale.archive,
   }, null, 2);
+  const heading = stale.state === "pending" ? "Needs decision — checkout retained"
+    : stale.state === "kept" ? "Still wanted — checkout retained"
+      : "Confirmed superseded — evidence archived";
   return <section className="stale-evidence" aria-labelledby={`stale-title-${job.id}`}>
-    <h2 id={`stale-title-${job.id}`}>Needs decision — checkout retained</h2>
+    <h2 id={`stale-title-${job.id}`}>{heading}</h2>
     <p>{stale.reason}</p>
-    {replacement && <p><strong>Suspected replacement:</strong> {replacement}</p>}
+    {hasReplacement && <p><strong>Suspected replacement:</strong> exact job or commit evidence is recorded below.</p>}
+    {stale.archive && <p><strong>Archive:</strong> dirty diff and inventory metadata were archived before confirmation.</p>}
     <p className="retention-warning">{stale.audit.dirty ? "Dirty files are retained in the worktree. Nothing was cleaned or deleted." : "The branch and worktree are retained. Nothing was cleaned or deleted."}</p>
-    <details><summary>Exact audit evidence</summary><pre>{exact}</pre><button type="button" onClick={() => void navigator.clipboard?.writeText(exact)}>Copy exact evidence</button></details>
+    <details><summary>Exact audit, replacement, and archive evidence</summary><pre>{exact}</pre><button type="button" onClick={() => void navigator.clipboard?.writeText(exact).then(() => setCopied(true))}>Copy exact evidence</button></details>
+    <span className="sr-only" role="status" aria-live="polite">{copied ? "Exact stale evidence copied" : ""}</span>
   </section>;
 }
 

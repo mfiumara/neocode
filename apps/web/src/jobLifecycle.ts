@@ -59,6 +59,7 @@ export function isStaleCandidate(job: AgentJob): boolean {
 }
 
 export function isDoneJob(job: AgentJob): boolean {
+  if (isStaleCandidate(job)) return false;
   if (job.integration?.status === "merged" || job.integration?.status === "superseded") return true;
   if (job.status === "failed" || job.status === "cancelled") return true;
   return job.status === "completed" && job.isolation.mode === "root";

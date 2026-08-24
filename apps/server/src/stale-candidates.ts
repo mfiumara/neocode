@@ -6,7 +6,12 @@ import { promisify } from "node:util";
 import type { AgentJob, JobStatus, StaleCandidateArchive } from "@neocode/protocol";
 
 const execFileAsync = promisify(execFile);
-const CANDIDATE_DISPOSITIONS = new Set(["superseded duplicate", "intentionally cancelled"]);
+const CANDIDATE_DISPOSITIONS = new Set([
+  "superseded duplicate", "intentionally cancelled", "already merged/content-equivalent",
+]);
+const ACTIVE_REVIEW_STATES = new Set([
+  "ci_running", "judging", "approved", "merge_queued", "merging", "post_merge_ci", "post_ci_failed", "worker_resumed", "conflict",
+]);
 
 export interface NominationInput {
   reason: string;
@@ -50,6 +55,21 @@ async function authorizedWorktree(workspaceRoot: string, candidatePath: string):
   return path;
 }
 
+async function dirtyContentAudit(path: string, porcelain: string) {
+  const trackedPatch = await gitRaw(path, ["diff", "--binary", "HEAD", "--"]);
+  const untrackedRaw = await git(path, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  const untrackedFiles: StaleCandidateArchive["untrackedFiles"] = [];
+  for (const name of untrackedRaw.split("\0").filter(Boolean).sort()) {
+    const file = await realpath(join(path, name));
+    if (!file.startsWith(path + sep) || !(await stat(file)).isFile()) throw new Error("Unsafe untracked path in candidate checkout.");
+    const bytes = await readFile(file);
+    untrackedFiles.push({ path: name, sha256: sha(bytes), bytes: bytes.length });
+  }
+  const trackedDiffSha256 = sha(trackedPatch);
+  const contentFingerprint = sha(JSON.stringify({ porcelain, trackedDiffSha256, untrackedFiles }));
+  return { trackedPatch, trackedDiffSha256, contentFingerprint, untrackedFiles };
+}
+
 export async function auditWorktree(job: AgentJob, context: StaleContext) {
   if (job.isolation.mode !== "worktree") throw new Error("Only isolated worktree jobs can be nominated.");
   const path = await authorizedWorktree(context.workspaceRoot, job.isolation.path);
@@ -58,16 +78,30 @@ export async function auditWorktree(job: AgentJob, context: StaleContext) {
   if (!branch || branch !== job.branch) throw new Error("Registered branch does not match durable job metadata.");
   const head = (await git(path, ["rev-parse", "HEAD"])).trim();
   const porcelain = (await git(path, ["status", "--porcelain=v1", "--untracked-files=all"])).trimEnd();
-  return { path, branch, head, dirty: porcelain.length > 0, porcelain };
+  const content = await dirtyContentAudit(path, porcelain);
+  return {
+    path, branch, head, dirty: porcelain.length > 0, porcelain,
+    trackedDiffSha256: content.trackedDiffSha256,
+    contentFingerprint: content.contentFingerprint,
+    untrackedFiles: content.untrackedFiles,
+  };
+}
+
+export function activeStaleFence(job: AgentJob, activeJobIds?: ReadonlySet<string>): string | undefined {
+  if (activeJobIds?.has(job.id) || job.status === "running" || job.status === "queued") return "active worker ownership";
+  if (job.integration && ["reviewing", "integrating", "conflicted"].includes(job.integration.status)) return `integration ${job.integration.status}`;
+  if (job.review && ACTIVE_REVIEW_STATES.has(job.review.status)) return `review ${job.review.status}`;
+  const action = job.review?.remediation?.actions.find((entry) => entry.id === job.review?.remediation?.currentActionId);
+  if (action && (action.state === "pending" || action.state === "repairing")) return `remediation ${action.state}`;
+  return undefined;
 }
 
 export async function nominateStaleCandidate(job: AgentJob, input: NominationInput, context: StaleContext): Promise<AgentJob> {
   if (job.integration?.status === "merged" || job.integration?.status === "superseded") {
     throw new Error("Terminal disposition is authoritative and cannot be replaced by a stale nomination.");
   }
-  if (context.activeJobIds?.has(job.id) || job.status === "running" || job.status === "queued") {
-    throw new Error("Active jobs cannot be nominated as stale candidates.");
-  }
+  const activeFence = activeStaleFence(job, context.activeJobIds);
+  if (activeFence) throw new Error(`Active jobs cannot be nominated as stale candidates (${activeFence}).`);
   if (input.reason.trim().length < 20 || !input.evidenceSource.trim()) throw new Error("Specific reason and evidence source are required.");
   const audit = await auditWorktree(job, context);
   const existing = job.staleCandidate;
@@ -75,7 +109,7 @@ export async function nominateStaleCandidate(job: AgentJob, input: NominationInp
     const same = existing.reason === input.reason.trim()
       && existing.evidenceSource === input.evidenceSource.trim()
       && existing.audit.path === audit.path && existing.audit.branch === audit.branch
-      && existing.audit.head === audit.head && existing.audit.porcelain === audit.porcelain
+      && existing.audit.head === audit.head && existing.audit.contentFingerprint === audit.contentFingerprint
       && existing.suspectedReplacementJobId === input.suspectedReplacementJobId
       && existing.suspectedReplacementCommit === input.suspectedReplacementCommit;
     if (same) return job;
@@ -102,19 +136,24 @@ async function archiveDirtyEvidence(job: AgentJob, context: StaleContext): Promi
   const candidate = job.staleCandidate;
   if (!candidate || candidate.state !== "pending") throw new Error("No pending stale candidate.");
   const audit = await auditWorktree(job, context);
-  if (audit.head !== candidate.audit.head || audit.porcelain !== candidate.audit.porcelain) {
+  if (audit.head !== candidate.audit.head || audit.contentFingerprint !== candidate.audit.contentFingerprint) {
     throw new Error("Worktree changed after nomination; renominate with fresh evidence.");
   }
-  const archiveRoot = join(resolve(context.workspaceRoot), ".neocode", "runtime", "stale-archives", job.id, String(candidate.nominatedAt));
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(job.id)) throw new Error("Unsafe job id for stale evidence archive.");
+  const workspace = await realpath(context.workspaceRoot);
+  const authorizedArchiveRoot = join(workspace, ".neocode", "runtime", "stale-archives");
+  const archiveRoot = resolve(authorizedArchiveRoot, job.id, String(candidate.nominatedAt));
+  if (!archiveRoot.startsWith(authorizedArchiveRoot + sep)) throw new Error("Stale archive path escaped its authorized root.");
   await mkdir(archiveRoot, { recursive: true });
-  const patches = [await gitRaw(audit.path, ["diff", "--binary", "HEAD", "--"])];
-  const untrackedRaw = await git(audit.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
-  const untrackedFiles: StaleCandidateArchive["untrackedFiles"] = [];
-  for (const name of untrackedRaw.split("\0").filter(Boolean).sort()) {
-    const file = await realpath(join(audit.path, name));
-    if (!file.startsWith(audit.path + sep) || !(await stat(file)).isFile()) throw new Error("Unsafe untracked path in candidate checkout.");
+  const trackedPatch = await gitRaw(audit.path, ["diff", "--binary", "HEAD", "--"]);
+  if (sha(trackedPatch) !== audit.trackedDiffSha256) throw new Error("Tracked content changed while archiving stale evidence.");
+  const patches = [trackedPatch];
+  const untrackedFiles = audit.untrackedFiles;
+  for (const item of untrackedFiles) {
+    const file = await realpath(join(audit.path, item.path));
+    if (!file.startsWith(audit.path + sep)) throw new Error("Unsafe untracked path in candidate checkout.");
     const bytes = await readFile(file);
-    untrackedFiles.push({ path: name, sha256: sha(bytes), bytes: bytes.length });
+    if (bytes.length !== item.bytes || sha(bytes) !== item.sha256) throw new Error("Untracked content changed while archiving stale evidence.");
     patches.push(await gitRaw(audit.path, ["diff", "--binary", "--no-index", "--", "/dev/null", file], true));
   }
   const evidence = {
@@ -125,13 +164,16 @@ async function archiveDirtyEvidence(job: AgentJob, context: StaleContext): Promi
     audit, untrackedFiles,
   };
   const patch = Buffer.concat(patches);
-  const patchPath = join(archiveRoot, "dirty.patch");
-  const evidencePath = join(archiveRoot, "evidence.json");
+  const patchPath = resolve(archiveRoot, "dirty.patch");
+  const evidencePath = resolve(archiveRoot, "evidence.json");
+  if (!patchPath.startsWith(authorizedArchiveRoot + sep) || !evidencePath.startsWith(authorizedArchiveRoot + sep)) {
+    throw new Error("Stale archive file escaped its authorized root.");
+  }
   await writeFile(patchPath, patch, { mode: 0o600 });
   await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   return {
-    archivedAt: (context.now ?? Date.now)(), patchPath: relative(context.workspaceRoot, patchPath),
-    evidencePath: relative(context.workspaceRoot, evidencePath), diffSha256: sha(patch),
+    archivedAt: (context.now ?? Date.now)(), patchPath: relative(workspace, patchPath),
+    evidencePath: relative(workspace, evidencePath), diffSha256: sha(patch),
     porcelainSha256: sha(audit.porcelain), dirty: audit.dirty, untrackedFiles,
   };
 }
@@ -143,7 +185,8 @@ export async function decideStaleCandidate(
 ): Promise<AgentJob> {
   const candidate = job.staleCandidate;
   if (!candidate || candidate.state !== "pending" || candidate.confirmation !== "pending") throw new Error("No pending stale decision.");
-  if (context.activeJobIds?.has(job.id)) throw new Error("An active worker cannot be decided.");
+  const activeFence = activeStaleFence(job, context.activeJobIds);
+  if (activeFence) throw new Error(`An active operation cannot be decided (${activeFence}).`);
   if (job.integration?.status === "merged" || job.integration?.status === "superseded") throw new Error("Terminal disposition is authoritative.");
   const now = (context.now ?? Date.now)();
   if (decision === "still_wanted") {
@@ -162,8 +205,8 @@ export async function decideStaleCandidate(
   candidate.state = "superseded";
   candidate.confirmation = "confirmed_superseded";
   candidate.resolvedAt = now;
-  job.status = "completed";
-  job.completion = { head: candidate.audit.head, finishedAt: now };
+  // Completion and attempts are immutable execution history. A stale decision
+  // records its own audited head/archive and never invents worker completion.
   job.worktreeIdentity ??= { path: candidate.audit.path, branch: candidate.audit.branch, baseRef: job.baseRef, createdAt: job.createdAt };
   job.integration = {
     ...job.integration, status: "superseded", targetRef: "main", verifiedAt: now,
@@ -206,6 +249,17 @@ export async function migrateStaleManifest(
       result.ambiguous.push(item.path || "invalid worktree"); continue;
     }
     const suffix = item.branch.match(/-([0-9a-f]{8})$/)?.[1];
+    const source = suffix ? manifestJobs.get(suffix) : undefined;
+    if (source && (source.path !== item.path || source.branch !== item.branch || !CANDIDATE_DISPOSITIONS.has(source.disposition))) {
+      result.ambiguous.push(`${item.path}: manifest worktree/job classification mismatch`); continue;
+    }
+    const evidence = source ? `${item.evidence} Job audit (${source.disposition}): ${source.evidence}` : item.evidence;
+    const expected: NominationInput = {
+      reason: `${item.disposition}: ${evidence}`,
+      evidenceSource: manifestPath,
+      nominatedBy: "manifest-migration",
+      ...replacementEvidence(evidence),
+    };
     let job = suffix ? jobs.get(suffix) : undefined;
     if (!job) job = [...jobs.values()].find((entry) => entry.branch === item.branch);
     if (job) {
@@ -225,7 +279,6 @@ export async function migrateStaleManifest(
         const porcelain = (await git(path, ["status", "--porcelain=v1", "--untracked-files=all"])).trimEnd();
         if (branch !== item.branch || head !== item.head || (item.dirty !== null && item.dirty !== !!porcelain)) throw new Error("live audit differs from manifest");
         const id = suffix && !jobs.has(suffix) ? suffix : `inventory-${sha(item.path).slice(0, 12)}`;
-        const source = suffix ? manifestJobs.get(suffix) : undefined;
         const createdAt = Date.parse(parsed.generatedAt) || Date.now();
         job = {
           id, title: source?.title || `Historical inventory: ${basename(item.path)}`,
@@ -242,14 +295,20 @@ export async function migrateStaleManifest(
         result.ambiguous.push(`${item.path}: ${error instanceof Error ? error.message : String(error)}`); continue;
       }
     }
-    if (job.staleCandidate?.state === "pending") { result.unchanged += 1; continue; }
+    const decision = job.staleCandidate;
+    if (decision && decision.state !== "pending") {
+      const same = decision.reason === expected.reason
+        && decision.evidenceSource === expected.evidenceSource
+        && decision.suspectedReplacementJobId === expected.suspectedReplacementJobId
+        && decision.suspectedReplacementCommit === expected.suspectedReplacementCommit;
+      if (same) result.unchanged += 1;
+      else result.ambiguous.push(`${item.path}: resolved stale decision conflicts with changed manifest evidence`);
+      continue;
+    }
     try {
-      await nominateStaleCandidate(job, {
-        reason: `${item.disposition}: ${item.evidence}`,
-        evidenceSource: manifestPath,
-        nominatedBy: "manifest-migration",
-        ...replacementEvidence(item.evidence),
-      }, context);
+      const before = job.staleCandidate;
+      await nominateStaleCandidate(job, expected, context);
+      if (before === job.staleCandidate) { result.unchanged += 1; continue; }
       result.nominated += 1;
     } catch (error) {
       result.ambiguous.push(`${item.path}: ${error instanceof Error ? error.message : String(error)}`);

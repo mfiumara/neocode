@@ -47,7 +47,7 @@ function fixture(root: string, title = "durable"): DurableRuntimeState {
     version: RUNTIME_STATE_VERSION,
     workspaceRoot: root,
     updatedAt: 3,
-    maintenance: { state: "idle", lastRunAt: 4, source: "scheduled", checked: 1, removed: 1, refused: 0 },
+    maintenance: { state: "idle", lastRunAt: 4, source: "scheduled", checked: 1, removed: 1, refused: 0, staleMigration: { source: "audit.json", at: 4, nominated: 0, synthetic: 0, unchanged: 0, skipped: 1, ambiguous: ["path mismatch"] } },
     coordinator: {
       messages: [{ id: "c1", role: "assistant", text: "hello", timestamp: 1 }],
       piSessionFile: join(root, ".neocode", "runtime", "server-v1", "pi-sessions", "coordinator", "session.jsonl"),
@@ -73,6 +73,7 @@ test("runtime state atomically round-trips all job and session metadata", async 
     assert.equal(restored?.jobs[0]?.job.review?.ci?.[0]?.purpose, "product_ci");
     assert.equal(restored?.jobs[0]?.job.review?.ci?.[0]?.handoffRound, 2);
     assert.equal(restored?.maintenance?.removed, 1);
+    assert.deepEqual(restored?.maintenance?.staleMigration?.ambiguous, ["path mismatch"]);
     assert.match(restored?.coordinator.piSessionFile || "", /pi-sessions/);
     assert.match(runtimeStatePath(root), /\.neocode\/runtime\/server-v1\/state\.json$/);
   } finally {
@@ -90,13 +91,20 @@ test("pending stale nomination and exact audit survive restart persistence", asy
     job.staleCandidate = {
       state: "pending", nominatedAt: 5, nominatedBy: "manifest-migration", reason: "Semantic audit identifies a likely historical duplicate.",
       evidenceSource: "docs/audit.json", confirmation: "pending", resumeState: { status: "interrupted", recoverable: true },
-      audit: { path: job.isolation.path, branch: job.branch, head: "def456", dirty: true, porcelain: " M file\n?? local" },
+      audit: { path: job.isolation.path, branch: job.branch, head: "def456", dirty: true, porcelain: " M file\n?? local", trackedDiffSha256: "diff", contentFingerprint: "fingerprint", untrackedFiles: [{ path: "local", sha256: "local-sha", bytes: 1 }] },
     };
     const store = new RuntimeStateStore(root);
     store.save(state); await store.flush();
     const restored = await store.load();
     assert.equal(restored?.jobs[0]?.job.staleCandidate?.state, "pending");
     assert.equal(restored?.jobs[0]?.job.staleCandidate?.audit.porcelain, " M file\n?? local");
+    restored!.jobs[0]!.job.staleCandidate!.state = "kept";
+    restored!.jobs[0]!.job.staleCandidate!.confirmation = "still_wanted";
+    restored!.jobs[0]!.job.staleCandidate!.resolvedAt = 6;
+    store.save(restored!); await store.flush();
+    const kept = await store.load();
+    assert.equal(kept?.jobs[0]?.job.staleCandidate?.state, "kept");
+    assert.equal(kept?.jobs[0]?.job.staleCandidate?.confirmation, "still_wanted");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

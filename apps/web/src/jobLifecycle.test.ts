@@ -25,11 +25,16 @@ test("pending stale candidates are a distinct non-Done group and terminal dispos
   pending.staleCandidate = {
     state: "pending", nominatedAt: 1, nominatedBy: "coordinator", reason: "Specific historical replacement evidence.",
     evidenceSource: "audit.json", confirmation: "pending", resumeState: { status: "interrupted" },
-    audit: { path: "/worktree", branch: "worker", head: "abc", dirty: true, porcelain: " M file" },
+    audit: { path: "/worktree", branch: "worker", head: "abc", dirty: true, porcelain: " M file", trackedDiffSha256: "diff", contentFingerprint: "fingerprint", untrackedFiles: [] },
   };
   assert.equal(isStaleCandidate(pending), true);
   assert.equal(isDoneJob(pending), false);
   assert.equal(jobLifecycleLabel(pending), "Needs decision · dirty files retained");
+  for (const status of ["failed", "cancelled", "completed"] as const) {
+    pending.status = status;
+    assert.equal(isStaleCandidate(pending), true);
+    assert.equal(isDoneJob(pending), false, `${status} pending decisions stay exclusively in Stale`);
+  }
   pending.integration = { status: "merged" };
   assert.equal(isStaleCandidate(pending), false, "terminal integration remains authoritative");
   assert.equal(isDoneJob(pending), true);

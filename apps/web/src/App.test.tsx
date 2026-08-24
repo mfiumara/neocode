@@ -243,19 +243,28 @@ test("stale evidence is accessible, exact evidence is collapsed/copyable, and de
     reason: "Dirty historical implementation appears replaced by the current model picker.",
     suspectedReplacementJobId: "replacement-job", suspectedReplacementCommit: "abcdef123456",
     evidenceSource: "docs/audit.json", confirmation: "pending", resumeState: { status: "interrupted", recoverable: true },
-    audit: { path: "/safe/.worktrees/stale", branch: "neocode/stale", head: "012345", dirty: true, porcelain: " M secret-name.txt" },
+    audit: { path: "/safe/.worktrees/stale", branch: "neocode/stale", head: "012345", dirty: true, porcelain: " M secret-name.txt", trackedDiffSha256: "tracked-sha", contentFingerprint: "fingerprint", untrackedFiles: [] },
   };
   const evidence = renderToStaticMarkup(<StaleEvidence job={stale} />);
   assert.match(evidence, /Needs decision — checkout retained/);
   assert.match(evidence, /Nothing was cleaned or deleted/);
   assert.match(evidence, /Suspected replacement:/);
-  assert.match(evidence, /<details><summary>Exact audit evidence<\/summary>/);
+  assert.match(evidence, /<details><summary>Exact audit, replacement, and archive evidence<\/summary>/);
   assert.match(evidence, /Copy exact evidence/);
-  for (const exact of ["stale-id", "abcdef123456", "/safe/.worktrees/stale", "secret-name.txt"]) assert.ok(evidence.includes(exact));
+  const summary = evidence.split("<details>")[0] || "";
+  assert.doesNotMatch(summary, /replacement-job|abcdef123456|\/safe\/\.worktrees/);
+  for (const exact of ["stale-id", "abcdef123456", "/safe/.worktrees/stale", "secret-name.txt", "tracked-sha", "fingerprint"]) assert.ok(evidence.includes(exact));
   const controls = renderToStaticMarkup(<StaleDecisionControls job={stale} send={() => true} />);
   assert.match(controls, /role="group" aria-label="Stale candidate decision"/);
   assert.match(controls, />Still wanted<|>Still wanted<\/button>/);
   assert.match(controls, />Confirm superseded<|>Confirm superseded<\/button>/);
+  stale.staleCandidate.state = "superseded";
+  stale.staleCandidate.confirmation = "confirmed_superseded";
+  stale.staleCandidate.archive = { archivedAt: 2, patchPath: ".neocode/runtime/stale-archives/stale/dirty.patch", evidencePath: ".neocode/runtime/stale-archives/stale/evidence.json", diffSha256: "archive-diff", porcelainSha256: "porcelain-sha", dirty: true, untrackedFiles: [] };
+  const archived = renderToStaticMarkup(<StaleEvidence job={stale} />);
+  assert.match(archived, /Confirmed superseded — evidence archived/);
+  assert.match(archived, /dirty diff and inventory metadata were archived/);
+  assert.match(archived, /archive-diff/);
 });
 
 test("review renders the complete handoff and owned lifecycle evidence", () => {

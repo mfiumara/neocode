@@ -309,9 +309,17 @@ export class Orchestrator {
     // closed inside the importer and never alter execution history.
     const manifestPath = join(this.cwd, "docs", "worktree-backlog-manifest-20260823.json");
     if (await this.pathExists(manifestPath)) {
-      await migrateStaleManifest(manifestPath, this.jobs, {
-        workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()),
-      }).catch(() => undefined);
+      try {
+        const result = await migrateStaleManifest(manifestPath, this.jobs, {
+          workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()),
+        });
+        this.maintenance.staleMigration = { source: manifestPath, at: Date.now(), ...result };
+      } catch (error) {
+        this.maintenance.staleMigration = {
+          source: manifestPath, at: Date.now(), nominated: 0, synthetic: 0, unchanged: 0, skipped: 0, ambiguous: [],
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
       for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") this.suppressStaleWakes(job.id);
     }
 
@@ -1107,6 +1115,9 @@ export class Orchestrator {
       workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()),
     });
     for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") this.suppressStaleWakes(job.id);
+    this.maintenance.staleMigration = {
+      source: join(this.cwd, "docs", "worktree-backlog-manifest-20260823.json"), at: Date.now(), ...result,
+    };
     this.persist();
     await this.stateStore.flush();
     for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") this.emit({ type: "job_updated", job: this.transportJob(job) });

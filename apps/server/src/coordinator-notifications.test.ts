@@ -70,7 +70,7 @@ test("pending stale candidates never create autonomous lifecycle or backlog wake
   value.staleCandidate = {
     state: "pending", nominatedAt: 1, nominatedBy: "coordinator", reason: "Historical replacement requires an explicit user decision.",
     evidenceSource: "audit.json", confirmation: "pending", resumeState: { status: "completed" },
-    audit: { path: value.isolation.path, branch: value.branch, head: "abc", dirty: true, porcelain: " M file" },
+    audit: { path: value.isolation.path, branch: value.branch, head: "abc", dirty: true, porcelain: " M file", trackedDiffSha256: "diff", contentFingerprint: "fingerprint", untrackedFiles: [] },
   };
   assert.equal(queue.observe(value), false);
   assert.equal(queue.requestBacklogSweep(value), false);

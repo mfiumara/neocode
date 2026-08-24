@@ -299,7 +299,12 @@ export interface StaleCandidate {
   resolvedAt?: number;
   /** State restored by Still wanted; this does not bypass normal lifecycle gates. */
   resumeState: { status: JobStatus; recoverable?: boolean; recoveryIssue?: string };
-  audit: { path: string; branch: string; head: string; dirty: boolean; porcelain: string };
+  audit: {
+    path: string; branch: string; head: string; dirty: boolean; porcelain: string;
+    trackedDiffSha256: string;
+    contentFingerprint: string;
+    untrackedFiles: Array<{ path: string; sha256: string; bytes: number }>;
+  };
   archive?: StaleCandidateArchive;
 }
 
@@ -395,8 +400,20 @@ export interface AgentJob {
   staleCandidate?: StaleCandidate;
 }
 
+export interface StaleMigrationStatus {
+  source: string;
+  at: number;
+  nominated: number;
+  synthetic: number;
+  unchanged: number;
+  skipped: number;
+  ambiguous: string[];
+  error?: string;
+}
+
 export interface MaintenanceStatus {
   state: "idle" | "running";
+  staleMigration?: StaleMigrationStatus;
   lastRunAt?: number;
   source?: "startup" | "scheduled" | "manual";
   checked?: number;
