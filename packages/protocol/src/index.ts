@@ -157,6 +157,8 @@ export interface CoordinatorCompactionStatus {
   /** Safe SDK metadata only. The generated summary and private context are never transported. */
   tokensBefore?: number;
   estimatedTokensAfter?: number;
+  /** SDK indicates that automatic compaction recovery will make another attempt. */
+  willRetry?: boolean;
   error?: string;
 }
 

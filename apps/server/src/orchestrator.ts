@@ -673,6 +673,10 @@ export class Orchestrator {
         continue;
       } finally {
         this.coordinatorTurnInFlight = false;
+        // agent_settled fires before prompt() necessarily resolves. Publish
+        // again only after synchronous turn ownership is actually released so
+        // manualCompactionAvailable cannot remain falsely disabled.
+        this.publishCoordinatorContext();
       }
     }
     if (!this.pendingCoordinatorPrompts.length && this.coordinator.isIdle) {
@@ -1096,6 +1100,7 @@ export class Orchestrator {
           completedAt,
           tokensBefore: event.result?.tokensBefore,
           estimatedTokensAfter: event.result?.estimatedTokensAfter,
+          willRetry: event.willRetry || undefined,
           error: event.errorMessage,
         };
         this.publishCoordinatorContext();
@@ -1798,7 +1803,11 @@ export class Orchestrator {
         this.sweepJobIds.add(event.jobId);
         return () => { this.coordinatorTurnInFlight = false; };
       },
-      turnReleased: () => this.schedulePromptDrain(),
+      turnReleased: () => {
+        // NotificationQueue invokes this only after its reservation release.
+        this.publishCoordinatorContext();
+        this.schedulePromptDrain();
+      },
       wake: async (event, started) => {
         const prompt = this.coordinator.prompt(
           `<neocode-worker-event event-id="${event.id}">${event.text}</neocode-worker-event>\n${event.kind === "backlog_sweep"

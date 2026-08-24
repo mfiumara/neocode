@@ -9,6 +9,8 @@ import { Orchestrator } from "./orchestrator.js";
 interface FakeSession {
   isIdle: boolean;
   autoCompactionEnabled: boolean;
+  model?: { provider: string; id: string };
+  setModel: (model: { provider: string; id: string; contextWindow?: number }) => Promise<void>;
   usage: { tokens: number | null; contextWindow: number; percent: number | null };
   listener?: (event: any) => void;
   compact: () => Promise<any>;
@@ -26,6 +28,11 @@ async function fixture(compact?: (session: FakeSession) => Promise<any>) {
   const session: FakeSession = {
     isIdle: true,
     autoCompactionEnabled: true,
+    model: { provider: "test", id: "old-model" },
+    setModel: async (model) => {
+      session.model = model;
+      session.usage = { tokens: 48_000, contextWindow: model.contextWindow || 128_000, percent: 48_000 / (model.contextWindow || 128_000) * 100 };
+    },
     usage: { tokens: 48_000, contextWindow: 128_000, percent: 37.5 },
     getContextUsage() { return this.usage; },
     subscribe(listener) { this.listener = listener; },
@@ -63,18 +70,37 @@ test("context state carries safe initial usage, capacity, auto-compaction, and r
     assert.equal(initialSnapshot.coordinator.context.usage?.tokens, 48_000);
     assert.equal(initialSnapshot.coordinator.context.autoCompactionEnabled, true);
 
-    value.internal.publishCoordinatorContext();
-    assert.deepEqual(latestContext(value.events).usage && {
-      tokens: latestContext(value.events).usage!.tokens,
-      contextWindow: latestContext(value.events).usage!.contextWindow,
-      percent: latestContext(value.events).usage!.percent,
+    assert.deepEqual({
+      tokens: initialSnapshot.coordinator.context.usage!.tokens,
+      contextWindow: initialSnapshot.coordinator.context.usage!.contextWindow,
+      percent: initialSnapshot.coordinator.context.usage!.percent,
     }, { tokens: 48_000, contextWindow: 128_000, percent: 37.5 });
-    assert.equal(latestContext(value.events).autoCompactionEnabled, true);
-    assert.equal(latestContext(value.events).manualCompactionAvailable, true);
+    assert.equal(initialSnapshot.coordinator.context.manualCompactionAvailable, true);
 
+    // A reconnect asks snapshot() again; no test-only live publish helper is
+    // involved, and current SDK state must win over the prior snapshot.
     value.session.autoCompactionEnabled = false;
-    value.internal.publishCoordinatorContext(); // same path used by reconnect snapshots/live refreshes
-    assert.equal(latestContext(value.events).autoCompactionEnabled, false);
+    value.session.usage = { tokens: 49_000, contextWindow: 128_000, percent: 38.28125 };
+    const reconnectSnapshot = value.orchestrator.snapshot();
+    assert.equal(reconnectSnapshot.coordinator.context.usage?.tokens, 49_000);
+    assert.equal(reconnectSnapshot.coordinator.context.autoCompactionEnabled, false);
+  } finally { await rm(value.cwd, { recursive: true, force: true }); }
+});
+
+test("setModel refreshes context capacity and publishes truthful gate transitions", async () => {
+  const value = await fixture();
+  try {
+    value.internal.modelRuntime = {
+      getAvailableSnapshot: () => [{ provider: "test", id: "new-model", contextWindow: 200_000 }],
+    };
+    value.internal.publishSettings = () => undefined;
+    value.internal.persist = () => undefined;
+    await value.orchestrator.setModel({ provider: "test", id: "new-model" });
+    const contextEvents = value.events.filter((event): event is Extract<ServerMessage, { type: "coordinator_context" }> => event.type === "coordinator_context");
+    assert.ok(contextEvents.some((event) => event.context.manualCompactionAvailable === false), "model transition closes the manual gate");
+    assert.equal(contextEvents.at(-1)?.context.manualCompactionAvailable, true, "model release republishes the open gate");
+    assert.equal(contextEvents.at(-1)?.context.usage?.contextWindow, 200_000);
+    assert.ok(value.events.some((event) => event.type === "coordinator_model_updated" && event.model.id === "new-model"));
   } finally { await rm(value.cwd, { recursive: true, force: true }); }
 });
 
@@ -111,14 +137,19 @@ test("manual compaction rejects queued work and reports SDK failures without a s
 
   const failed = await fixture(async (session) => {
     session.listener?.({ type: "compaction_start", reason: "manual" });
-    session.listener?.({ type: "compaction_end", reason: "manual", result: undefined, aborted: false, willRetry: false, errorMessage: "provider unavailable" });
+    session.listener?.({ type: "compaction_end", reason: "manual", result: undefined, aborted: false, willRetry: true, errorMessage: "provider unavailable" });
     throw new Error("provider unavailable");
   });
   try {
     await assert.rejects(failed.orchestrator.compactCoordinator(), /provider unavailable/);
     assert.equal(latestContext(failed.events).compaction?.state, "failed");
     assert.equal(latestContext(failed.events).compaction?.error, "provider unavailable");
+    assert.equal(latestContext(failed.events).compaction?.willRetry, true);
     assert.equal(latestContext(failed.events).manualCompactionAvailable, true);
+    failed.internal.settings = () => ({ variant: "build", thinkingLevel: "off", availableVariants: ["build"], availableThinkingLevels: [] });
+    failed.internal.currentModel = () => ({ provider: "test", id: "old-model" });
+    failed.internal.modelChoices = () => [];
+    assert.equal(failed.orchestrator.snapshot().coordinator.context.compaction?.willRetry, true, "reconnect snapshot retains retry intent");
   } finally { await rm(failed.cwd, { recursive: true, force: true }); }
 });
 
@@ -147,6 +178,8 @@ test("production lifecycle wake reservation shares compaction, model, disposal, 
     assert.equal(hooks.reserveTurn(event), undefined, "a user or second system wake cannot race the reservation");
     release();
     assert.equal(value.internal.coordinatorTurnInFlight, false);
+    hooks.turnReleased();
+    assert.equal(latestContext(value.events).manualCompactionAvailable, true, "system-wake release publishes open availability");
   } finally { await rm(value.cwd, { recursive: true, force: true }); }
 });
 
@@ -192,10 +225,12 @@ test("reserved system turns and compaction jointly gate FIFO prompts until autho
     value.session.listener?.({ type: "agent_settled" });
     assert.equal(notificationSettlements, 1, "Pi settlement remains authoritative for a claimed system wake");
     assert.equal(latestContext(value.events).usage?.tokens, 24_000, "the same settlement publishes trustworthy context");
+    assert.equal(latestContext(value.events).manualCompactionAvailable, false, "settlement does not advertise idle before turn release");
 
     releasePrompt();
     await waitFor(() => value.internal.pendingCoordinatorPrompts.length === 0);
     assert.equal(value.internal.coordinatorTurnInFlight, false);
+    assert.equal(latestContext(value.events).manualCompactionAvailable, true, "prompt finally republishes availability after atomic release");
     assert.equal(calls.length, 1, "the durable FIFO prompt runs exactly once after every gate releases");
   } finally { await rm(value.cwd, { recursive: true, force: true }); }
 });

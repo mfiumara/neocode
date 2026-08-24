@@ -57,6 +57,23 @@ test("context indicator clearly announces unknown post-compaction usage and disa
   assert.doesNotMatch(markup, /<meter/);
 });
 
+test("terminal compaction status preserves SDK retry intent without a stale spinner", () => {
+  const markup = renderToStaticMarkup(<TooltipProvider><ContextIndicator
+    connected
+    onCompact={() => {}}
+    context={{
+      usage: { tokens: 80_000, contextWindow: 128_000, percent: 62.5, updatedAt: 1 },
+      autoCompactionEnabled: true,
+      manualCompactionAvailable: false,
+      compaction: { state: "failed", reason: "overflow", startedAt: 1, completedAt: 2, willRetry: true, error: "temporary provider error" },
+    }}
+  /></TooltipProvider>);
+
+  assert.match(markup, /Compaction failed · SDK will retry: temporary provider error/);
+  assert.doesNotMatch(markup, />Compacting…</);
+  assert.match(markup, />Compact</);
+});
+
 test("the workspace command-palette label uses Command/Ctrl-K", () => {
   const markup = renderToStaticMarkup(<App />);
 

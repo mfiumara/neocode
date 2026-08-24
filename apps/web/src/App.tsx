@@ -1148,10 +1148,11 @@ export function ContextIndicator({ context, connected, onCompact }: {
     : undefined;
   const compaction = context?.compaction;
   const active = compaction?.state === "active";
+  const retryLabel = compaction?.willRetry && compaction.state !== "active" ? " · SDK will retry" : "";
   const statusLabel = active
     ? `Compacting model context (${compaction.reason})`
     : compaction
-      ? `Compaction ${compaction.state}${compaction.error ? `: ${compaction.error}` : ""}`
+      ? `Compaction ${compaction.state}${retryLabel}${compaction.error ? `: ${compaction.error}` : ""}`
       : "No compaction reported this session";
   const usageLabel = !usage
     ? "Context capacity unknown"
