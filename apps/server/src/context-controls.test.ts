@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,6 +17,9 @@ interface FakeSession {
   prompt: (content: string) => Promise<void>;
   getContextUsage: () => FakeSession["usage"];
   subscribe: (listener: (event: any) => void) => void;
+  abort: () => Promise<void>;
+  abortCompaction: () => void;
+  dispose: () => void;
 }
 
 async function fixture(compact?: (session: FakeSession) => Promise<any>) {
@@ -38,12 +41,41 @@ async function fixture(compact?: (session: FakeSession) => Promise<any>) {
     subscribe(listener) { this.listener = listener; },
     compact: async () => undefined,
     prompt: async () => undefined,
+    abort: async () => undefined,
+    abortCompaction: () => undefined,
+    dispose: () => undefined,
   };
   session.compact = () => compact?.(session) ?? Promise.resolve(undefined);
   const internal = orchestrator as any;
   internal.coordinator = session;
   internal.bindCoordinator();
   return { cwd, events, orchestrator, internal, session };
+}
+
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+async function cleanupFixture(value: Fixture): Promise<void> {
+  // Orchestrator.dispose owns shutdown ordering: stop timers/notification turns,
+  // abort the SDK session, enqueue the final durable state, and await its flush.
+  await value.orchestrator.dispose();
+  const store = value.internal.stateStore;
+  while (store.writing || store.latest) {
+    if (store.writing) await store.writing;
+    else await Promise.resolve();
+  }
+  assert.equal(store.writing, undefined);
+  assert.equal(store.latest, undefined);
+
+  let writesAfterRemovalBegan = 0;
+  const save = store.save.bind(store);
+  store.save = (...args: unknown[]) => {
+    writesAfterRemovalBegan += 1;
+    return save(...args);
+  };
+  await rm(value.cwd, { recursive: true, force: true });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(writesAfterRemovalBegan, 0, "no orchestrator-owned writer starts after disposal and removal begin");
+  await assert.rejects(access(value.cwd));
 }
 
 async function waitFor(check: () => boolean, timeout = 1_000): Promise<void> {
@@ -84,7 +116,7 @@ test("context state carries safe initial usage, capacity, auto-compaction, and r
     const reconnectSnapshot = value.orchestrator.snapshot();
     assert.equal(reconnectSnapshot.coordinator.context.usage?.tokens, 49_000);
     assert.equal(reconnectSnapshot.coordinator.context.autoCompactionEnabled, false);
-  } finally { await rm(value.cwd, { recursive: true, force: true }); }
+  } finally { await cleanupFixture(value); }
 });
 
 test("setModel refreshes context capacity and publishes truthful gate transitions", async () => {
@@ -101,7 +133,7 @@ test("setModel refreshes context capacity and publishes truthful gate transition
     assert.equal(contextEvents.at(-1)?.context.manualCompactionAvailable, true, "model release republishes the open gate");
     assert.equal(contextEvents.at(-1)?.context.usage?.contextWindow, 200_000);
     assert.ok(value.events.some((event) => event.type === "coordinator_model_updated" && event.model.id === "new-model"));
-  } finally { await rm(value.cwd, { recursive: true, force: true }); }
+  } finally { await cleanupFixture(value); }
 });
 
 test("manual compaction is idle-only, reports completion, makes usage unknown, and preserves durable transcript", async () => {
@@ -125,15 +157,17 @@ test("manual compaction is idle-only, reports completion, makes usage unknown, a
     assert.equal(state.manualCompactionAvailable, true);
     assert.deepEqual(value.internal.coordinatorMessages, [durable]);
     assert.doesNotMatch(JSON.stringify(value.events), /private generated summary|private-id/);
-  } finally { await rm(value.cwd, { recursive: true, force: true }); }
+  } finally { await cleanupFixture(value); }
 });
 
 test("manual compaction rejects queued work and reports SDK failures without a stale active state", async () => {
   const blocked = await fixture();
   try {
-    blocked.internal.pendingCoordinatorPrompts.push({ messageId: "queued" });
+    blocked.internal.coordinatorTurnInFlight = true;
+    await blocked.orchestrator.prompt("queued", [], [], "queued-for-compaction");
+    blocked.internal.coordinatorTurnInFlight = false;
     await assert.rejects(blocked.orchestrator.compactCoordinator(), /queued coordinator prompts/);
-  } finally { await rm(blocked.cwd, { recursive: true, force: true }); }
+  } finally { await cleanupFixture(blocked); }
 
   const failed = await fixture(async (session) => {
     session.listener?.({ type: "compaction_start", reason: "manual" });
@@ -150,7 +184,7 @@ test("manual compaction rejects queued work and reports SDK failures without a s
     failed.internal.currentModel = () => ({ provider: "test", id: "old-model" });
     failed.internal.modelChoices = () => [];
     assert.equal(failed.orchestrator.snapshot().coordinator.context.compaction?.willRetry, true, "reconnect snapshot retains retry intent");
-  } finally { await rm(failed.cwd, { recursive: true, force: true }); }
+  } finally { await cleanupFixture(failed); }
 });
 
 test("production lifecycle wake reservation shares compaction, model, disposal, and turn gates", async () => {
@@ -180,7 +214,7 @@ test("production lifecycle wake reservation shares compaction, model, disposal, 
     assert.equal(value.internal.coordinatorTurnInFlight, false);
     hooks.turnReleased();
     assert.equal(latestContext(value.events).manualCompactionAvailable, true, "system-wake release publishes open availability");
-  } finally { await rm(value.cwd, { recursive: true, force: true }); }
+  } finally { await cleanupFixture(value); }
 });
 
 test("reserved system turns and compaction jointly gate FIFO prompts until authoritative settlement", async () => {
@@ -200,6 +234,7 @@ test("reserved system turns and compaction jointly gate FIFO prompts until autho
       settled: () => undefined,
       hasPendingWake: () => false,
       requestBacklogSweep: () => false,
+      shutdown: () => undefined,
     };
 
     // Model a lifecycle/system wake that synchronously owns the shared Pi turn.
@@ -232,7 +267,20 @@ test("reserved system turns and compaction jointly gate FIFO prompts until autho
     assert.equal(value.internal.coordinatorTurnInFlight, false);
     assert.equal(latestContext(value.events).manualCompactionAvailable, true, "prompt finally republishes availability after atomic release");
     assert.equal(calls.length, 1, "the durable FIFO prompt runs exactly once after every gate releases");
-  } finally { await rm(value.cwd, { recursive: true, force: true }); }
+  } finally { await cleanupFixture(value); }
+});
+
+test("fixture cleanup drains concurrent durable writers before removing runtime directories", async () => {
+  await Promise.all(Array.from({ length: 16 }, async (_, index) => {
+    const value = await fixture();
+    try {
+      await value.orchestrator.prompt(`stress ${index}`, [], [], `stress-${index}`);
+      await value.internal.promptDrain;
+      assert.equal(value.internal.pendingCoordinatorPrompts.length, 0);
+    } finally {
+      await cleanupFixture(value);
+    }
+  }));
 });
 
 test("aborted compaction is terminal and later trustworthy settled usage clears unknown state", async () => {
@@ -247,5 +295,5 @@ test("aborted compaction is terminal and later trustworthy settled usage clears 
     value.session.listener?.({ type: "agent_settled" });
     assert.equal(latestContext(value.events).usage?.tokens, 22_000);
     assert.equal(latestContext(value.events).usage?.contextWindow, 200_000);
-  } finally { await rm(value.cwd, { recursive: true, force: true }); }
+  } finally { await cleanupFixture(value); }
 });
