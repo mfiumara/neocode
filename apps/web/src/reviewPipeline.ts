@@ -40,12 +40,16 @@ function checkSummary(checks: NonNullable<AgentJob["review"]>["ci"] = [], histor
   return historical ? `Historical prior-round evidence: ${summary}` : summary;
 }
 
-/** Latest review-intended verdict, including evidence retained by remediation after review.judge is cleared. */
+/** Current verdict authority is exact-round bound; remediation verdicts are audit history only. */
 export function latestJudgeEvidence(job: AgentJob): JudgeEvidence | undefined {
-  if (job.review?.judge) return job.review.judge;
-  return job.review?.remediation?.actions
+  return job.review?.judge && job.handoff?.round !== undefined && job.review.judgeHandoffRound === job.handoff.round
+    ? job.review.judge : undefined;
+}
+export function latestHistoricalJudgeEvidence(job: AgentJob): JudgeEvidence | undefined {
+  const remediation = job.review?.remediation?.actions
     .filter((action) => !!action.evidence.judge)
     .sort((left, right) => right.updatedAt - left.updatedAt)[0]?.evidence.judge;
+  return remediation || (job.review?.judge && !latestJudgeEvidence(job) ? job.review.judge : undefined);
 }
 function interruptedJudgeAction(job: AgentJob) {
   const action = job.review?.remediation?.actions.find((item) => item.id === job.review?.remediation?.currentActionId)
@@ -60,7 +64,10 @@ function judgeSummary(job: AgentJob, historical = false): string {
     return historical ? `Historical prior-round verdict: ${summary}` : summary;
   }
   const interrupted = interruptedJudgeAction(job);
-  return interrupted ? `Interrupted: ${interrupted.evidence.detail}` : "Independent judge has not started";
+  if (interrupted) return `Interrupted: ${interrupted.evidence.detail}`;
+  return latestHistoricalJudgeEvidence(job)
+    ? "Awaiting independent judge; prior-round verdict retained in historical technical evidence"
+    : "Independent judge has not started for this handoff round";
 }
 function hasRebaseConflictEvidence(job: AgentJob): boolean {
   if (job.review?.status !== "conflict") return false;

@@ -12,7 +12,7 @@ import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
 import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
-import { latestJudgeEvidence, reviewPipeline } from "./reviewPipeline";
+import { latestHistoricalJudgeEvidence, latestJudgeEvidence, reviewPipeline } from "./reviewPipeline";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
 import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
@@ -1334,8 +1334,9 @@ function reviewTechnicalEvidence(job: AgentJob): string {
     review?.error && `review error\n${review.error}`,
     ...(review?.remediation?.actions || []).map((action) => `remediation action\n${JSON.stringify(action, null, 2)}`),
     ...(review?.ci || []).map((check) => `CI command: ${check.command}\nexit ${check.exitCode}\n${check.output}`),
-    latestJudgeEvidence(job) && !review?.remediation?.actions.some((action) => action.evidence.judge === latestJudgeEvidence(job))
-      ? `judge diff sha256 ${latestJudgeEvidence(job)!.diffSha256}\nmodel ${latestJudgeEvidence(job)!.model.provider}/${latestJudgeEvidence(job)!.model.id}\n${latestJudgeEvidence(job)!.raw}` : undefined,
+    latestJudgeEvidence(job) && `current judge diff sha256 ${latestJudgeEvidence(job)!.diffSha256}\nmodel ${latestJudgeEvidence(job)!.model.provider}/${latestJudgeEvidence(job)!.model.id}\n${latestJudgeEvidence(job)!.raw}`,
+    latestHistoricalJudgeEvidence(job) && !review?.remediation?.actions.some((action) => action.evidence.judge === latestHistoricalJudgeEvidence(job))
+      ? `historical prior-round judge diff sha256 ${latestHistoricalJudgeEvidence(job)!.diffSha256}\nmodel ${latestHistoricalJudgeEvidence(job)!.model.provider}/${latestHistoricalJudgeEvidence(job)!.model.id}\n${latestHistoricalJudgeEvidence(job)!.raw}` : undefined,
     review?.mergeCommit && `merge commit ${review.mergeCommit}`,
     ...(review?.postMergeCi || []).map((check) => `Post-merge CI command: ${check.command}\nexit ${check.exitCode}\n${check.output}`),
   ].filter(Boolean);

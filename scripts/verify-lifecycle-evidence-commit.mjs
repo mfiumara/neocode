@@ -2,10 +2,17 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { EVIDENCE_MARKER, verifyReviewEvidence } from "./review-evidence.mjs";
 
 const cwd = process.cwd();
 const run = (args, options = {}) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options }).trimEnd();
 const message = run(["show", "-s", "--format=%B", "HEAD"]);
+if (message.startsWith(EVIDENCE_MARKER)) {
+  verifyReviewEvidence(cwd);
+  console.log(`lifecycle_evidence_state=review-status-active-verified`);
+  console.log(`lifecycle_evidence_verified_head=${run(["rev-parse", "HEAD"])}`);
+  process.exit(0);
+}
 if (!/^Lifecycle-Evidence-Type:/m.test(message)) {
   console.log("lifecycle_evidence_state=pre-evidence-no-op");
   process.exit(0);

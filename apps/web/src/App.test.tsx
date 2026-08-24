@@ -137,7 +137,8 @@ test("compact review panel has timeline semantics, check counts, and collapsed t
   assert.match(markup, /aria-label="Worker review progress"/);
   assert.match(markup, /aria-current="step"/);
   assert.match(markup, /1\/2 product checks passed/);
-  assert.match(markup, /Rejected: One requirement remains/);
+  assert.match(markup, /prior-round verdict retained in historical technical evidence/);
+  assert.match(markup, /historical prior-round judge diff sha256 exacthash/);
   assert.match(markup, /<details class="technical-evidence">/);
   assert.match(markup, /Technical review evidence/);
   assert.match(markup, /npm run test/);
@@ -154,7 +155,8 @@ test("compact panel preserves remediation judge audit evidence after the current
     } },
   }] };
   const markup = renderToStaticMarkup(<ReviewStatusPanel job={value} />);
-  assert.match(markup, /Rejected: Durable remediation verdict/);
+  assert.match(markup, /prior-round verdict retained in historical technical evidence/);
+  assert.match(markup, /Durable remediation verdict/);
   assert.match(markup, /opaque-action/);
   assert.match(markup, /npm test -- exact/);
   assert.match(markup, /nested diagnostic/);

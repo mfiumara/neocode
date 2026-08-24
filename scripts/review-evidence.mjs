@@ -21,8 +21,10 @@ function requireObject(value, label) {
 }
 function verifyCapture(capture, command, label) {
   const value = requireObject(capture, label);
-  if (value.command !== command || value.exit !== 0 || typeof value.output !== "string" || !hex64.test(value.sha256 || "")) {
-    throw new Error(`Malformed recognized review evidence: invalid ${label} command, exit, output, or checksum.`);
+  if (value.command !== command || value.exit !== 0 || typeof value.output !== "string" || typeof value.cwd !== "string"
+    || value.cwd.length === 0 || !Number.isSafeInteger(value.bytes) || value.bytes !== Buffer.byteLength(value.output)
+    || !hex64.test(value.sha256 || "")) {
+    throw new Error(`Malformed recognized review evidence: invalid ${label} command, cwd, exit, bytes, output, or checksum.`);
   }
   if (checksum(value.output) !== value.sha256) throw new Error(`Malformed recognized review evidence: ${label} checksum mismatch.`);
   for (const field of ["startedAt", "finishedAt"]) {
@@ -52,7 +54,10 @@ export function verifyReviewEvidence(cwd = process.cwd()) {
     throw new Error("Malformed recognized review evidence: base/merge-base mismatch.");
   }
   if (!Array.isArray(evidence.commands) || evidence.commands.length !== COMMANDS.length) throw new Error("Malformed recognized review evidence: exact command captures are required.");
-  evidence.commands.forEach((capture, index) => verifyCapture(capture, COMMANDS[index], `commands[${index}]`));
+  evidence.commands.forEach((capture, index) => {
+    verifyCapture(capture, COMMANDS[index], `commands[${index}]`);
+    if (capture.cwd !== cwd) throw new Error(`Malformed recognized review evidence: commands[${index}] cwd mismatch.`);
+  });
 
   const commonDir = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd).trim();
   const root = resolve(dirname(commonDir));

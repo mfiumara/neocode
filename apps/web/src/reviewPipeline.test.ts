@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentJob, JudgeEvidence, ReviewStatus } from "@neocode/protocol";
-import { latestJudgeEvidence, reviewPipeline } from "./reviewPipeline";
+import { latestHistoricalJudgeEvidence, latestJudgeEvidence, reviewPipeline } from "./reviewPipeline";
 
 function job(status?: ReviewStatus, top: AgentJob["status"] = "completed"): AgentJob {
   return {
@@ -39,7 +39,7 @@ test("conflicted integration does not erase specific production failure guidance
   for (const [status, guidance, failedStage] of cases) {
     const value = job(status); value.integration = { status: "conflicted" }; value.review!.error = `${status} exact diagnostic`;
     if (status === "ci_failed") value.review!.ci = [{ command: "npm run test", ok: false, exitCode: 1, durationMs: 40, output: "fail" }];
-    if (status === "rejected") value.review!.judge = verdict("Missing behavior");
+    if (status === "rejected") { value.review!.judge = verdict("Missing behavior"); value.review!.judgeHandoffRound = 1; }
     if (status === "post_ci_failed") value.review!.postMergeCi = [{ command: "npm test", ok: false, exitCode: 1, durationMs: 50, output: "fail" }];
     if (status === "blocked" || status === "failed") value.review!.coordinatorAuthorizedAt = 2_500;
     const pipeline = reviewPipeline(value);
@@ -119,7 +119,7 @@ test("durable stage durations use checks, transitions, and remediation timestamp
   value.review!.transitions = [{ status: "ci_running", at: 3_000 }, { status: "judging", at: 4_000 }, { status: "rejected", at: 5_500 }];
   value.review!.ciHandoffRound = 1;
   value.review!.ci = [{ command: "npm run test", purpose: "product_ci", handoffRound: 1, ok: true, exitCode: 0, durationMs: 700, output: "" }];
-  value.review!.judge = verdict("No");
+  value.review!.judge = verdict("No"); value.review!.judgeHandoffRound = 1;
   value.review!.remediation = { maxAttempts: 2, rounds: {}, actions: [{ id: "a", failureClass: "judge_changes", fingerprint: "f", state: "pending", attempt: 1, maxAttempts: 2, createdAt: 5_500, updatedAt: 6_250, evidence: { detail: "repair" } }] };
   assert.equal(stage(value, "ci").durationMs, 700);
   assert.equal(stage(value, "judge").durationMs, 1_500);
@@ -133,8 +133,10 @@ test("latest judge survives remediation and superseded outcomes remain terminal"
     { id: "older", failureClass: "judge_changes", fingerprint: "1", state: "resolved", attempt: 1, maxAttempts: 2, createdAt: 1, updatedAt: 10, evidence: { detail: "old", judge: verdict("Old") } },
     { id: "latest", failureClass: "judge_changes", fingerprint: "2", state: "pending", attempt: 2, maxAttempts: 2, createdAt: 11, updatedAt: 20, evidence: { detail: "new", judge: preserved } },
   ] };
-  assert.equal(latestJudgeEvidence(value), preserved);
-  assert.match(stage(value, "judge").summary, /Fresh approval required/);
+  assert.equal(latestJudgeEvidence(value), undefined);
+  assert.equal(latestHistoricalJudgeEvidence(value), preserved);
+  assert.match(stage(value, "judge").summary, /prior-round verdict retained/);
+  assert.equal(stage(value, "judge").tone, "waiting");
 
   value.integration = { status: "superseded" };
   const pipeline = reviewPipeline(value);
@@ -143,6 +145,19 @@ test("latest judge survives remediation and superseded outcomes remain terminal"
   assert.equal(pipeline.stages.some((item) => item.tone === "active"), false);
   assert.equal(stage(value, "merge").tone, "complete");
   assert.equal(stage(value, "verification").summary, "Superseded terminal outcome");
+});
+
+test("fresh handoff and pre-judge CI never promote resolved prior remediation verdict", () => {
+  for (const status of ["handoff_received", "ci_running"] as const) {
+    const value = job(status); value.handoff!.round = 2;
+    value.review!.judgeHandoffRound = 1;
+    value.review!.preparedHandoffRound = status === "ci_running" ? 2 : 1;
+    value.review!.reviewBaseRef = "base";
+    value.review!.remediation = { maxAttempts: 2, rounds: {}, actions: [{ id: "old", failureClass: "judge_changes", fingerprint: "f", state: "resolved", attempt: 1, maxAttempts: 2, createdAt: 2, updatedAt: 3, evidence: { detail: "old rejection", judge: verdict("Prior rejected verdict") } }] };
+    assert.equal(latestJudgeEvidence(value), undefined);
+    assert.match(stage(value, "judge").summary, /Awaiting independent judge.*prior-round verdict/i);
+    assert.equal(stage(value, "judge").tone, "waiting");
+  }
 });
 
 test("major approval, repair, integration, and terminal states have production guidance", () => {
@@ -201,7 +216,7 @@ test("fresh active rounds label retained checks and verdicts as historical", () 
   assert.match(stage(ci, "ci").summary, /^Historical prior-round evidence/);
   assert.equal(stage(ci, "ci").durationMs, undefined);
   const judging = job("judging"); judging.review!.judge = verdict("Old rejection");
-  assert.match(stage(judging, "judge").summary, /^Historical prior-round verdict/);
+  assert.match(stage(judging, "judge").summary, /Awaiting independent judge.*prior-round verdict/i);
   assert.equal(stage(judging, "judge").tone, "active");
 });
 
