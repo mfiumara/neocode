@@ -756,6 +756,8 @@ export async function runBounded(command: string, cwd: string, timeoutMs = Numbe
     let output = "";
     let truncated = false;
     let timedOut = false;
+    let closed = false;
+    let forceTimer: NodeJS.Timeout | undefined;
     const append = (chunk: Buffer) => {
       const value = chunk.toString();
       const remaining = maxBytes - Buffer.byteLength(output);
@@ -764,14 +766,35 @@ export async function runBounded(command: string, cwd: string, timeoutMs = Numbe
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
+    const signalChild = (signal: NodeJS.Signals) => {
+      if (closed) return;
+      try {
+        if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch (error) {
+        // The process group can disappear between timeout and signal delivery,
+        // or macOS can reject a group signal with EPERM. Never let a cleanup
+        // race crash the server; fall back to the direct child and retain the
+        // diagnostic as CI evidence.
+        const detail = error instanceof Error ? error.message : String(error);
+        output += `\nFailed to signal command process group (${signal}): ${detail}`;
+        try { child.kill(signal); } catch (childError) {
+          output += `\nFailed to signal command process (${signal}): ${childError instanceof Error ? childError.message : String(childError)}`;
+        }
+      }
+    };
     const timer = setTimeout(() => {
+      if (closed) return;
       timedOut = true;
-      if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGTERM");
-      else child.kill("SIGTERM");
+      signalChild("SIGTERM");
+      forceTimer = setTimeout(() => signalChild("SIGKILL"), 5_000);
+      forceTimer.unref();
     }, timeoutMs);
     child.on("error", (error) => { output += `\n${error.message}`; });
     child.on("close", (exitCode) => {
+      closed = true;
       clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       resolve({ command, ok: exitCode === 0 && !timedOut, exitCode, durationMs: Date.now() - started, output, truncated: truncated || undefined, timedOut: timedOut || undefined });
     });
   });

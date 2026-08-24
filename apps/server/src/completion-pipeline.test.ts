@@ -12,6 +12,7 @@ import {
   CompletionPipeline,
   LocalReviewAdapter,
   PipelineError,
+  runBounded,
   type ReconcileResult,
   type ReviewAdapter,
 } from "./completion-pipeline.js";
@@ -20,6 +21,23 @@ import { executeCoordinatorGuardedMerge } from "./orchestrator.js";
 const execFileAsync = promisify(execFile);
 const coordinatorMergeCapability = Symbol("test coordinator merge capability");
 const pass: CheckEvidence = { command: "test", ok: true, exitCode: 0, durationMs: 1, output: "ok" };
+
+test("CI timeout process-group signal failure falls back without crashing the server", async () => {
+  const originalKill = process.kill;
+  process.kill = (() => {
+    const error = new Error("operation not permitted") as NodeJS.ErrnoException;
+    error.code = "EPERM";
+    throw error;
+  }) as typeof process.kill;
+  try {
+    const result = await runBounded("sleep 1", process.cwd(), 5);
+    assert.equal(result.timedOut, true);
+    assert.equal(result.ok, false);
+    assert.match(result.output, /Failed to signal command process group \(SIGTERM\): operation not permitted/);
+  } finally {
+    process.kill = originalKill;
+  }
+});
 
 function job(id = "job-1"): AgentJob {
   return {
