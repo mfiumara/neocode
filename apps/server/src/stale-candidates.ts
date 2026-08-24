@@ -342,7 +342,15 @@ export async function migrateStaleManifest(
         const branch = (await git(path, ["branch", "--show-current"])).trim();
         const head = (await git(path, ["rev-parse", "HEAD"])).trim();
         const porcelain = (await git(path, ["status", "--porcelain=v1", "--untracked-files=all"])).trimEnd();
-        if (branch !== item.branch || head !== item.head || (item.dirty !== null && item.dirty !== !!porcelain)) throw new Error("live audit differs from manifest");
+        const content = await dirtyContentAudit(path, porcelain);
+        const lineCount = porcelain ? porcelain.split("\n").length : 0;
+        const exactUntracked = item.untrackedFiles === undefined
+          || JSON.stringify(item.untrackedFiles) === JSON.stringify(content.untrackedFiles);
+        if (branch !== item.branch || head !== item.head || (item.dirty !== null && item.dirty !== !!porcelain)
+          || (item.statusLines != null && lineCount !== item.statusLines)
+          || (item.trackedDiffSha256 !== undefined && item.trackedDiffSha256 !== content.trackedDiffSha256)
+          || (item.contentFingerprint !== undefined && item.contentFingerprint !== content.contentFingerprint)
+          || !exactUntracked) throw new Error("live status/content audit differs from manifest");
         const id = suffix && !jobs.has(suffix) ? suffix : `inventory-${sha(item.path).slice(0, 12)}`;
         const createdAt = Date.parse(parsed.generatedAt) || Date.now();
         job = {

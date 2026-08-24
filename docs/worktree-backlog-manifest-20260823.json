@@ -69,7 +69,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "Root checkout is clean at the fixed baseline 71f7cc5; it was inventoried read-only and never mutated."
+      "evidence": "Root checkout is clean at the fixed baseline 71f7cc5; it was inventoried read-only and never mutated.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/.paseo/worktrees/13yqxxws/rampant-parrot",
@@ -90,7 +94,11 @@
       "dirty": true,
       "statusLines": 9,
       "disposition": "actionable unique work",
-      "evidence": "Coordinator-spawned job f91c790b is running and owns its dirty files. Preserved in refreshed snapshots; do not commit/rebase/overwrite while active."
+      "evidence": "Coordinator-spawned job f91c790b is running and owns its dirty files. Preserved in refreshed snapshots; do not commit/rebase/overwrite while active.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/add-model-selection-ui-98cf0e6a",
@@ -100,7 +108,11 @@
       "dirty": true,
       "statusLines": 20,
       "disposition": "superseded duplicate",
-      "evidence": "Dirty pre-integration web implementation was semantically reconciled by d913671; current main exposes the runtime-backed model picker. Snapshot preserves all 20 paths."
+      "evidence": "Dirty pre-integration web implementation was semantically reconciled by d913671; current main exposes the runtime-backed model picker. Snapshot preserves all 20 paths.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/add-per-step-activity-timers-011964e9",
@@ -110,7 +122,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "Feature commit 49f5b8a was semantically reconciled as main commit c1a6d09; transcript records the same timing requirements and passing tests."
+      "evidence": "Feature commit 49f5b8a was semantically reconciled as main commit c1a6d09; transcript records the same timing requirements and passing tests.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/adopt-shadcn-ui-components-ee87c4d3",
@@ -120,7 +136,11 @@
       "dirty": true,
       "statusLines": 18,
       "disposition": "superseded duplicate",
-      "evidence": "Interrupted dirty prototype was resumed by job 00779657 (2ac7c54) and semantically landed as ab72094; 13 UI primitive files are byte-identical to main."
+      "evidence": "Interrupted dirty prototype was resumed by job 00779657 (2ac7c54) and semantically landed as ab72094; 13 UI primitive files are byte-identical to main.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/automated-review-and-merge-pipel-e8b1a035",
@@ -130,7 +150,11 @@
       "dirty": true,
       "statusLines": 7,
       "disposition": "intentionally cancelled",
-      "evidence": "Implemented the pipeline in removed legacy Lua. Explicit follow-up 3ca0d2c3 rejected that target; TypeScript pipeline was delivered by 663fc0f/80952ea."
+      "evidence": "Implemented the pipeline in removed legacy Lua. Explicit follow-up 3ca0d2c3 rejected that target; TypeScript pipeline was delivered by 663fc0f/80952ea.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/automatically-resume-interrupted-be3dbf65",
@@ -140,7 +164,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "7d573d7 was reconciled into main as 83840ab, with prerequisite pipeline represented by 80952ea."
+      "evidence": "7d573d7 was reconciled into main as 83840ab, with prerequisite pipeline represented by 80952ea.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/backtick-command-palette-navigat-541a551d",
@@ -150,7 +178,11 @@
       "dirty": true,
       "statusLines": 5,
       "disposition": "intentionally cancelled",
-      "evidence": "Wrong-target legacy Lua implementation. Its intended web behavior was ported in d913671 and retained by 5322a17; legacy Lua was removed by 409b1f0."
+      "evidence": "Wrong-target legacy Lua implementation. Its intended web behavior was ported in d913671 and retained by 5322a17; legacy Lua was removed by 409b1f0.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/change-palette-shortcut-to-comma-9d06babc",
@@ -160,7 +192,11 @@
       "dirty": true,
       "statusLines": 2,
       "disposition": "superseded duplicate",
-      "evidence": "No current durable job/transcript. Its comma shortcut conflicts with the later explicit Cmd/Ctrl-K plus NORMAL-mode backtick architecture in 5322a17."
+      "evidence": "No current durable job/transcript. Its comma shortcut conflicts with the later explicit Cmd/Ctrl-K plus NORMAL-mode backtick architecture in 5322a17.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/clipboard-image-attachments-f7324f9f",
@@ -170,7 +206,11 @@
       "dirty": true,
       "statusLines": 20,
       "disposition": "superseded duplicate",
-      "evidence": "Dirty initial implementation was semantically reconciled into d913671, then hardened by 47b416d and candidate 75352e2. Snapshot preserves the original 20 paths."
+      "evidence": "Dirty initial implementation was semantically reconciled into d913671, then hardened by 47b416d and candidate 75352e2. Snapshot preserves the original 20 paths.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/correct-done-and-stale-job-class-a8102299",
@@ -180,7 +220,11 @@
       "dirty": true,
       "statusLines": 12,
       "disposition": "actionable unique work",
-      "evidence": "Coordinator-spawned job a8102299 is running the metadata/disposition migration requested by this audit and owns its dirty files. Preserved in the third snapshot; do not duplicate or overwrite."
+      "evidence": "Coordinator-spawned job a8102299 is running the metadata/disposition migration requested by this audit and owns its dirty files. Preserved in the third snapshot; do not duplicate or overwrite.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/fix-transcript-bottom-scrolling-c616e48c",
@@ -190,7 +234,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "4144b98 was semantically reconciled as c676606; both implement local near-bottom scrolling and clipping fixes."
+      "evidence": "4144b98 was semantically reconciled as c676606; both implement local near-bottom scrolling and clipping fixes.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/flexible-worker-isolation-policy-6e7402c3",
@@ -200,7 +248,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "Patch-id a8fbda8b0fd10cd8769348641bd8449f5ea4222c is identical for e1930fb and main commit 531db9a."
+      "evidence": "Patch-id a8fbda8b0fd10cd8769348641bd8449f5ea4222c is identical for e1930fb and main commit 531db9a.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/investigate-and-fix-image-paste-59dc2307",
@@ -210,7 +262,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "530e1a4 was semantically reconciled as 47b416d. The StrictMode follow-up remains separately actionable at 75352e2."
+      "evidence": "530e1a4 was semantically reconciled as 47b416d. The StrictMode follow-up remains separately actionable at 75352e2.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/live-agent-activity-visibility-a38c2084",
@@ -220,7 +276,11 @@
       "dirty": true,
       "statusLines": 19,
       "disposition": "superseded duplicate",
-      "evidence": "Dirty initial implementation was semantically reconciled into d913671; main contains activity.ts/tests and integrated UI."
+      "evidence": "Dirty initial implementation was semantically reconciled into d913671; main contains activity.ts/tests and integrated UI.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/make-coordinator-own-review-and--870fa4f3",
@@ -230,7 +290,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "superseded duplicate",
-      "evidence": "Interrupted before producing a commit; its explicit coordinator-owned architecture was implemented by 83d2a97 and reconciled by 684f2ad."
+      "evidence": "Interrupted before producing a commit; its explicit coordinator-owned architecture was implemented by 83d2a97 and reconciled by 684f2ad.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/make-reconciliation-a-durable-ha-6e225474",
@@ -240,7 +304,11 @@
       "dirty": true,
       "statusLines": 10,
       "disposition": "superseded duplicate",
-      "evidence": "Dirty auto-supervisor design is superseded by the later explicit coordinator-owned architecture. Snapshot preserves lifecycle-supervisor files; do not combine its autonomous product decisions."
+      "evidence": "Dirty auto-supervisor design is superseded by the later explicit coordinator-owned architecture. Snapshot preserves lifecycle-supervisor files; do not combine its autonomous product decisions.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/model-variant-and-effort-control-5e425212",
@@ -250,7 +318,11 @@
       "dirty": true,
       "statusLines": 20,
       "disposition": "superseded duplicate",
-      "evidence": "Dirty initial implementation was semantically reconciled into d913671 with live Pi capability handling."
+      "evidence": "Dirty initial implementation was semantically reconciled into d913671 with live Pi capability handling.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/persist-and-restore-neocode-stat-d4d5f95c",
@@ -260,7 +332,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "0f21b7b and 7dd4bc2 have identical stable patch-id 68a28e5c980be39b3d922e201bed066a3268ca96."
+      "evidence": "0f21b7b and 7dd4bc2 have identical stable patch-id 68a28e5c980be39b3d922e201bed066a3268ca96.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/port-completion-hooks-pipeline-t-3ca0d2c3",
@@ -270,7 +346,11 @@
       "dirty": true,
       "statusLines": 6,
       "disposition": "superseded duplicate",
-      "evidence": "Interrupted dirty TypeScript implementation was resumed as 663fc0f and landed patch-equivalently as 80952ea (stable patch-id 3dca43e4c7f13891ba08a5b7a333edd1c836ad41)."
+      "evidence": "Interrupted dirty TypeScript implementation was resumed as 663fc0f and landed patch-equivalently as 80952ea (stable patch-id 3dca43e4c7f13891ba08a5b7a333edd1c836ad41).",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/reconcile-and-integrate-complete-6a2c4ad2",
@@ -280,7 +360,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "d913671 is an ancestor of main and is the explicit semantic reconciliation for the first feature batch."
+      "evidence": "d913671 is an ancestor of main and is the explicit semantic reconciliation for the first feature batch.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/reconcile-coordinator-lifecycle--62c4e517",
@@ -290,7 +374,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "actionable unique work",
-      "evidence": "External lifecycle worker completed clean commit 684f2ada1193b62370fb9f172b7c872cbb863eae directly on 71f7cc5 and entered independent review. Its earlier conflicted/index state is preserved in snapshot 20260823T150623Z; do not duplicate or overwrite."
+      "evidence": "External lifecycle worker completed clean commit 684f2ada1193b62370fb9f172b7c872cbb863eae directly on 71f7cc5 and entered independent review. Its earlier conflicted/index state is preserved in snapshot 20260823T150623Z; do not duplicate or overwrite.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/remove-legacy-lua-implementation-8c8c3865",
@@ -300,7 +388,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "26d4290 was semantically reconciled as main commit 409b1f0; main has no lua/neocode or plugin legacy tree."
+      "evidence": "26d4290 was semantically reconciled as main commit 409b1f0; main has no lua/neocode or plugin legacy tree.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/render-transcript-markdown-ac316d50",
@@ -310,7 +402,11 @@
       "dirty": true,
       "statusLines": 20,
       "disposition": "superseded duplicate",
-      "evidence": "Dirty implementation was semantically reconciled into d913671; Markdown.tsx and Markdown.test.tsx are byte-identical to main."
+      "evidence": "Dirty implementation was semantically reconciled into d913671; Markdown.tsx and Markdown.test.tsx are byte-identical to main.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/restore-cursor-per-thread-50a773d3",
@@ -320,7 +416,11 @@
       "dirty": true,
       "statusLines": 19,
       "disposition": "superseded duplicate",
-      "evidence": "Dirty implementation was semantically reconciled into d913671; threadNavigation.ts and its test are byte-identical to main."
+      "evidence": "Dirty implementation was semantically reconciled into d913671; threadNavigation.ts and its test are byte-identical to main.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/restore-root-after-audit-violati-ae65aed6",
@@ -330,7 +430,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "Clean no-op worktree equals main at 71f7cc5; root recovery evidence remains under ignored runtime storage."
+      "evidence": "Clean no-op worktree equals main at 71f7cc5; root recovery evidence remains under ignored runtime storage.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-blocked-batch-reconciliat-e883120c",
@@ -340,7 +444,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "Its continuation produced/fed 1832651, which is an ancestor of main; stale branch pointer d913671 contains no unique remaining tree."
+      "evidence": "Its continuation produced/fed 1832651, which is an ancestor of main; stale branch pointer d913671 contains no unique remaining tree.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-coordinator-owned-lifecyc-1a1855a0",
@@ -350,7 +458,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "superseded duplicate",
-      "evidence": "83d2a97 is the source architecture reconciled by active follow-up 62c4e517 into candidate 684f2ad on current main."
+      "evidence": "83d2a97 is the source architecture reconciled by active follow-up 62c4e517 into candidate 684f2ad on current main.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-interrupted-shadcn-migrat-00779657",
@@ -360,7 +472,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "2ac7c54 was semantically reconciled as ab72094 while preserving later overlapping UI changes."
+      "evidence": "2ac7c54 was semantically reconciled as ab72094 while preserving later overlapping UI changes.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/resume-web-completion-pipeline-770d3f76",
@@ -370,7 +486,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "663fc0f and main 80952ea share stable patch-id 3dca43e4c7f13891ba08a5b7a333edd1c836ad41."
+      "evidence": "663fc0f and main 80952ea share stable patch-id 3dca43e4c7f13891ba08a5b7a333edd1c836ad41.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/review-reconcile-and-land-comple-e50094b9",
@@ -380,7 +500,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "1832651 is an ancestor of main and contains the coordinator notification/lifecycle reconciliation batch."
+      "evidence": "1832651 is an ancestor of main and contains the coordinator notification/lifecycle reconciliation batch.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/safely-land-reconciled-ui-on-mai-ba959014",
@@ -390,7 +514,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "superseded duplicate",
-      "evidence": "Interrupted landing helper made no branch commit; root recovery and later guarded integration landed d913671 and successors without needing this stale checkout."
+      "evidence": "Interrupted landing helper made no branch commit; root recovery and later guarded integration landed d913671 and successors without needing this stale checkout.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/salvage-and-reconcile-every-work-4856566e",
@@ -400,7 +528,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "actionable unique work",
-      "evidence": "This isolated worker owns only the tracked manifest candidate and never mutates root/main."
+      "evidence": "This isolated worker owns only the tracked manifest candidate and never mutates root/main.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/session-6a8a0557cb51",
@@ -410,7 +542,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "unknown",
-      "evidence": "Legacy metadata says active, but branch remains at initial 28261f0 and transcript is empty; no evidence supports merge or deletion."
+      "evidence": "Legacy metadata says active, but branch remains at initial 28261f0 and transcript is empty; no evidence supports merge or deletion.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/session-6a8ac2319711",
@@ -420,7 +556,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "unknown",
-      "evidence": "Legacy metadata says active, but branch remains at initial 28261f0 and transcript is empty; no evidence supports merge or deletion."
+      "evidence": "Legacy metadata says active, but branch remains at initial 28261f0 and transcript is empty; no evidence supports merge or deletion.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/simplify-composer-and-polish-pal-39ba9695",
@@ -430,7 +570,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "8af5710 was semantically reconciled as main commit 5322a17, preserving Cmd-K/backtick and removing handoff/isolation composer UI."
+      "evidence": "8af5710 was semantically reconciled as main commit 5322a17, preserving Cmd-K/backtick and removing handoff/isolation composer UI.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/verify-image-paste-on-current-ma-e32120ea",
@@ -440,7 +584,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "actionable unique work",
-      "evidence": "Clean commit 75352e21fdda78c89964b9c600665ff9b7cf9d7b is directly based on 71f7cc5. Review rejected only for absent captured browser evidence; independent rerun with system Chrome passed 1/1."
+      "evidence": "Clean commit 75352e21fdda78c89964b9c600665ff9b7cf9d7b is directly based on 71f7cc5. Review rejected only for absent captured browser evidence; independent rerun with system Chrome passed 1/1.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/visual-model-picker-0476be99",
@@ -450,7 +598,11 @@
       "dirty": true,
       "statusLines": 8,
       "disposition": "intentionally cancelled",
-      "evidence": "Wrong-target legacy Lua implementation. Intended runtime-backed web picker was ported in d913671; legacy tree was deliberately removed."
+      "evidence": "Wrong-target legacy Lua implementation. Intended runtime-backed web picker was ported in d913671; legacy tree was deliberately removed.",
+      "auditAuthority": {
+        "state": "unproven",
+        "reason": "The 2026-08-23 semantic audit retained salvage locations but did not embed canonical tracked/untracked content fingerprints in this row; fail closed until authoritative fingerprints are supplied."
+      }
     },
     {
       "path": "/Users/mattiafiumara/repos/neocode/.worktrees/worker-done-section-and-safe-jan-a2547df6",
@@ -460,7 +612,11 @@
       "dirty": false,
       "statusLines": 0,
       "disposition": "already merged/content-equivalent",
-      "evidence": "9c22c70 was semantically reconciled as main commit 5a26172 with guarded janitor behavior."
+      "evidence": "9c22c70 was semantically reconciled as main commit 5a26172 with guarded janitor behavior.",
+      "auditAuthority": {
+        "state": "clean-head-authoritative",
+        "reason": "The row records an exact HEAD and zero porcelain/status lines; migration must re-verify both live."
+      }
     }
   ],
   "jobs": [
@@ -944,5 +1100,10 @@
       "where": "candidate 684f2ad (worker evidence)",
       "result": "pass: 54 server tests, 25 web tests; check/build/diff-check pass"
     }
-  ]
+  ],
+  "auditFieldPolicy": {
+    "dirtyExactEvidence": "Dirty rows without trackedDiffSha256, contentFingerprint, and untrackedFiles are explicitly unproven and migration must leave matching existing durable jobs ambiguous.",
+    "cleanExactEvidence": "For valid clean rows, exact HEAD plus an empty porcelain/status line count proves worktree content identity.",
+    "authority": "No auditAuthority marker is a final integration or deletion decision."
+  }
 }

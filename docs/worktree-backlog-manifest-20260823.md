@@ -2,6 +2,8 @@
 
 Baseline: `main` at `71f7cc5be8c9bdb9eabeb07efb55bdb65c1a5fb1`. Root/main was inventoried but never modified.
 
+> Exact-audit normalization: the JSON manifest now marks every dirty row whose original audit omitted canonical tracked/untracked fingerprints as `auditAuthority.state: "unproven"`. Migration must leave those existing durable jobs ambiguous rather than infer content identity from HEAD/porcelain. Valid clean rows are marked `clean-head-authoritative` and still require live HEAD plus empty-status verification. These markers are provisional evidence policy, never integration or deletion decisions.
+
 ## Salvage
 
 - `/Users/mattiafiumara/repos/neocode/.neocode/runtime/worktree-salvage/20260823T150623Z` — captures the initial 38 registrations and the lifecycle conflict/index state. `SHA256SUMS.ALL` hash: `1e2acd609aee4cee30db7ed742c4722d4219263ae8420561546aa8eecb064442`.

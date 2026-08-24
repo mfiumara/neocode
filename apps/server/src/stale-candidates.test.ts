@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -319,4 +319,72 @@ test("janitor refuses confirmed stale state without archive and replacement auth
   };
   assert.equal(await new WorktreeJanitor(value.root, { graceMs: 0, targetRef: "main" }).review(value.job), false);
   assert.match(value.job.cleanup?.status === "refused" ? value.job.cleanup.detail : "", /lacks archive or authoritative replacement/);
+});
+
+test("exact checked-in manifest normalizes clean authority and leaves unproven dirty durable rows inert", async () => {
+  const checkedPath = resolve(import.meta.dirname, "../../../docs/worktree-backlog-manifest-20260823.json");
+  const checked = JSON.parse(await readFile(checkedPath, "utf8")) as {
+    schemaVersion: number; generatedAt: string; baseline: { ref: string; commit: string };
+    auditFieldPolicy: Record<string, string>; worktrees: Array<Record<string, any>>; jobs: Array<Record<string, any>>;
+  };
+  assert.equal(checked.schemaVersion, 1);
+  assert.match(checked.auditFieldPolicy.dirtyExactEvidence, /unproven.*ambiguous/i);
+  const dirtyRows = checked.worktrees.filter((row) => row.dirty === true);
+  assert.ok(dirtyRows.length > 0);
+  assert.ok(dirtyRows.every((row) => row.auditAuthority?.state === "unproven"));
+
+  const cleanSourceRow = checked.worktrees.find((row) => row.branch.endsWith("-011964e9"))!;
+  const cleanSourceJob = checked.jobs.find((row) => row.id === "011964e9")!;
+  const clean = await fixture(false);
+  const cleanManifest = join(clean.root, "checked-clean.json");
+  await writeFile(cleanManifest, JSON.stringify({
+    schemaVersion: checked.schemaVersion, generatedAt: checked.generatedAt, baseline: { ref: "main", commit: clean.base },
+    auditFieldPolicy: checked.auditFieldPolicy,
+    worktrees: [{ ...cleanSourceRow, path: clean.path, branch: clean.job.branch, head: clean.base, dirty: false, statusLines: 0 }],
+    jobs: [{ ...cleanSourceJob, id: clean.job.id, path: clean.path, branch: clean.job.branch }],
+  }));
+  const cleanJobs = new Map([[clean.job.id, clean.job]]);
+  const nominated = await migrateStaleManifest(cleanManifest, cleanJobs, { workspaceRoot: clean.root });
+  assert.equal(nominated.nominated, 1);
+  assert.equal(clean.job.staleCandidate?.state, "pending");
+  assert.equal(clean.job.integration, undefined);
+
+  const dirtySourceRow = checked.worktrees.find((row) => row.branch.endsWith("-ee87c4d3"))!;
+  const dirtySourceJob = checked.jobs.find((row) => row.id === "ee87c4d3")!;
+  const dirty = await fixture(true);
+  const dirtyManifest = join(dirty.root, "checked-dirty.json");
+  await writeFile(dirtyManifest, JSON.stringify({
+    schemaVersion: checked.schemaVersion, generatedAt: checked.generatedAt, baseline: { ref: "main", commit: dirty.base },
+    auditFieldPolicy: checked.auditFieldPolicy,
+    worktrees: [{ ...dirtySourceRow, path: dirty.path, branch: dirty.job.branch, head: dirty.base, dirty: true, statusLines: 2 }],
+    jobs: [{ ...dirtySourceJob, id: dirty.job.id, path: dirty.path, branch: dirty.job.branch }],
+  }));
+  const inert = await migrateStaleManifest(dirtyManifest, new Map([[dirty.job.id, dirty.job]]), { workspaceRoot: dirty.root });
+  assert.equal(inert.nominated, 0);
+  assert.equal(dirty.job.staleCandidate, undefined);
+  assert.match(inert.ambiguous[0] || "", /lacks exact manifest content fingerprints/);
+});
+
+test("orphan migration rejects status drift and optional exact-content drift even when dirty boolean is unchanged", async () => {
+  const statusDrift = await fixture(true);
+  const statusManifest = join(statusDrift.root, "orphan-status.json");
+  const row = { path: statusDrift.path, branch: statusDrift.job.branch, head: statusDrift.base, valid: true, dirty: true, statusLines: 2,
+    disposition: "superseded duplicate", evidence: "Replacement commit abcdef12 contains equivalent behavior." };
+  await writeFile(join(statusDrift.path, "another.txt"), "new status row\n");
+  await writeFile(statusManifest, JSON.stringify({ schemaVersion: 1, generatedAt: "2026-08-23T00:00:00Z", baseline: { ref: "main", commit: statusDrift.base }, worktrees: [row], jobs: [] }));
+  let result = await migrateStaleManifest(statusManifest, new Map(), { workspaceRoot: statusDrift.root });
+  assert.equal(result.synthetic, 0);
+  assert.match(result.ambiguous[0] || "", /status\/content audit differs/);
+
+  const contentDrift = await fixture(true);
+  const initial = await auditWorktree(contentDrift.job, { workspaceRoot: contentDrift.root });
+  const contentManifest = join(contentDrift.root, "orphan-content.json");
+  await writeFile(join(contentDrift.path, "base.txt"), "same status and dirty boolean, different bytes\n");
+  const exactRow = { path: contentDrift.path, branch: contentDrift.job.branch, head: contentDrift.base, valid: true, dirty: true, statusLines: 2,
+    disposition: "superseded duplicate", evidence: "Replacement commit abcdef12 contains equivalent behavior.",
+    trackedDiffSha256: initial.trackedDiffSha256, contentFingerprint: initial.contentFingerprint, untrackedFiles: initial.untrackedFiles };
+  await writeFile(contentManifest, JSON.stringify({ schemaVersion: 1, generatedAt: "2026-08-23T00:00:00Z", baseline: { ref: "main", commit: contentDrift.base }, worktrees: [exactRow], jobs: [] }));
+  result = await migrateStaleManifest(contentManifest, new Map(), { workspaceRoot: contentDrift.root });
+  assert.equal(result.synthetic, 0);
+  assert.match(result.ambiguous[0] || "", /status\/content audit differs/);
 });

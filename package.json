@@ -13,10 +13,11 @@
     "dev:server:verbose": "NEOCODE_VERBOSE=1 npm run dev -w @neocode/server",
     "dev:web": "npm run dev -w @neocode/web",
     "test": "npm run test:unit && npm run test:e2e",
-    "test:unit": "npm run test --workspaces --if-present",
+    "test:unit": "npm run test --workspaces --if-present && npm run test:evidence",
+    "test:evidence": "node --test scripts/check-release-evidence.test.mjs",
     "test:e2e": "npm exec --workspace @neocode/web playwright install chromium && npm run test:e2e -w @neocode/web",
     "check:git": "node scripts/check-git-state.mjs && node scripts/verify-lifecycle-evidence-commit.mjs",
-    "check": "npm run check:git && npm run check --workspaces --if-present",
+    "check": "npm run check:git && npm run check --workspaces --if-present && node scripts/check-release-evidence.mjs",
     "build": "npm run build --workspaces --if-present"
   },
   "devDependencies": {
