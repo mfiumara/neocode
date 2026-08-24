@@ -83,8 +83,9 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
   const freshHandoffAfterBase = !!review?.reviewBaseRef && !!job.handoff
     && ["handoff_received", "queued"].includes(status || "")
     && (review?.judgeHandoffRound || 0) < job.handoff.round;
-  const targetAdvanced = !!review?.reviewBaseRef && review?.transitions.some((item) => item.status === "handoff_received"
-    && /main advanced|target advanced|prior approval invalidated/i.test(item.detail || ""));
+  const targetAdvanced = !!review?.reviewBaseRef && ["handoff_received", "queued"].includes(status || "")
+    && review?.transitions.some((item) => item.status === "handoff_received"
+      && /main advanced|target advanced|prior approval invalidated/i.test(item.detail || ""));
   const preparationInvalidated = freshHandoffAfterBase || targetAdvanced;
 
   let headline = "Awaiting worker handoff";
