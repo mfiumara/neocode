@@ -82,13 +82,13 @@ export function verifyReviewEvidence(cwd = process.cwd()) {
   const commonDir = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd).trim();
   const root = resolve(dirname(commonDir));
   const live = [
-    [evidence.candidatePorcelain, "git status --porcelain --untracked-files=all", "candidatePorcelain", git(["status", "--porcelain", "--untracked-files=all"], cwd)],
-    [evidence.rootPorcelain, "git status --porcelain --untracked-files=all", "rootPorcelain", git(["status", "--porcelain", "--untracked-files=all"], root)],
-    [evidence.diffCheck, `git diff --check ${evidence.base} ${evidence.testedParent}`, "diffCheck", git(["diff", "--check", evidence.base, evidence.testedParent], cwd)],
+    [evidence.candidatePorcelain, "git status --porcelain --untracked-files=all", "candidatePorcelain", git(["status", "--porcelain", "--untracked-files=all"], cwd), recordedCwd],
+    [evidence.rootPorcelain, "git status --porcelain --untracked-files=all", "rootPorcelain", git(["status", "--porcelain", "--untracked-files=all"], root), recordedTop],
+    [evidence.diffCheck, `git diff --check ${evidence.base} ${evidence.testedParent}`, "diffCheck", git(["diff", "--check", evidence.base, evidence.testedParent], cwd), recordedCwd],
   ];
-  for (const [capture, command, label, output] of live) {
+  for (const [capture, command, label, output, expectedCwd] of live) {
     verifyCapture(capture, command, label);
-    if (normalize(capture.cwd) !== recordedCwd) throw new Error(`Malformed recognized review evidence: ${label} historical cwd is inconsistent.`);
+    if (normalize(capture.cwd) !== expectedCwd) throw new Error(`Malformed recognized review evidence: ${label} historical cwd is inconsistent.`);
     if (capture.output !== output) throw new Error(`Malformed recognized review evidence: live ${label} output mismatch.`);
   }
   process.stdout.write(`verified review evidence: tested parent ${parent}, tree ${evidence.testedTree}\n`);
