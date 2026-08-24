@@ -189,6 +189,19 @@ export async function migrateStartupLegacyHandoffs(
   }
 }
 
+interface StaleLifecycleHooks {
+  beforeNominationMutation?: (job: AgentJob) => void | Promise<void>;
+  afterArchivePublication?: (job: AgentJob) => void | Promise<void>;
+  beforeStaleFlush?: (job: AgentJob, action: "nominate" | "confirm_superseded" | "still_wanted") => void | Promise<void>;
+  beforeStalePublish?: (job: AgentJob, action: "nominate" | "confirm_superseded" | "still_wanted") => void | Promise<void>;
+  beforeWorkerOwnership?: (job: AgentJob) => void | Promise<void>;
+}
+
+function restoreJob(target: AgentJob, snapshot: AgentJob): void {
+  for (const key of Object.keys(target) as Array<keyof AgentJob>) delete target[key];
+  Object.assign(target, structuredClone(snapshot));
+}
+
 export class Orchestrator {
   private readonly jobs = new Map<string, AgentJob>();
   private readonly workers = new Map<string, RunningWorker>();
@@ -233,6 +246,10 @@ export class Orchestrator {
   private completionPipeline!: CompletionPipeline;
   readonly #coordinatorMergeCapability = Symbol("main coordinator guarded integration");
   private readonly operationLock = new OperationLock();
+  /** While an exact lifecycle commit is in flight, every coalesced save uses it. */
+  private persistenceJobOverride?: ReadonlyMap<string, AgentJob>;
+  /** Deterministic boundary hooks used only by production-shaped concurrency tests. */
+  private staleLifecycleHooks?: StaleLifecycleHooks;
   private readonly janitor: WorktreeJanitor;
   private maintenance: MaintenanceStatus = { state: "idle" };
   private janitorTimer?: NodeJS.Timeout;
@@ -322,10 +339,7 @@ export class Orchestrator {
     const manifestPath = join(this.cwd, "docs", "worktree-backlog-manifest-20260823.json");
     if (await this.pathExists(manifestPath)) {
       try {
-        const result = await migrateStaleManifest(manifestPath, this.jobs, {
-          workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()), jobs: this.jobs, targetRef: this.maintenanceConfig.targetRef,
-        });
-        this.maintenance.staleMigration = { source: manifestPath, at: Date.now(), ...result };
+        await this.migrateStaleAuditTransaction(manifestPath, false);
       } catch (error) {
         this.maintenance.staleMigration = {
           source: manifestPath, at: Date.now(), nominated: 0, synthetic: 0, unchanged: 0, skipped: 0, ambiguous: [],
@@ -1058,60 +1072,97 @@ export class Orchestrator {
       // The coordinator's durable repair claim happened before the previous
       // process died. Resume that exact same worktree without consuming another
       // round or inventing new feedback.
-      this.completionPipeline.workerResumed(job);
-      job.recoverable = true;
-      await this.startRecoveryAttempt(job, "manual_resume");
+      await this.operationLock.run(async () => {
+        if (job.staleCandidate?.state === "pending" || this.workers.has(job.id)) return;
+        this.completionPipeline.workerResumed(job);
+        job.recoverable = true;
+        await this.startRecoveryAttempt(job, "manual_resume");
+      });
     }
   }
 
   async requestWorkerChanges(jobId: string, feedback: string): Promise<void> {
-    const job = this.requireLifecycleJob(jobId);
-    if (job.status !== "completed") throw new Error(`Worker ${jobId} is not awaiting review.`);
-    if (job.isolation.mode !== "worktree") throw new Error("Review iterations require an isolated worktree worker.");
-    this.completionPipeline.requestChanges(job, feedback);
-    job.messages.push({ id: id(), role: "user", text: `Coordinator repair feedback (inspect the exact diagnostics and correct this checkout):\n${feedback}`, timestamp: Date.now() });
-    job.recoverable = true;
-    this.completionPipeline.workerResumed(job);
-    await this.startRecoveryAttempt(job, "manual_resume");
+    await this.operationLock.run(async () => {
+      const job = this.requireLifecycleJob(jobId);
+      if (job.status !== "completed") throw new Error(`Worker ${jobId} is not awaiting review.`);
+      if (job.isolation.mode !== "worktree") throw new Error("Review iterations require an isolated worktree worker.");
+      this.completionPipeline.requestChanges(job, feedback);
+      job.messages.push({ id: id(), role: "user", text: `Coordinator repair feedback (inspect the exact diagnostics and correct this checkout):\n${feedback}`, timestamp: Date.now() });
+      job.recoverable = true;
+      this.completionPipeline.workerResumed(job);
+      await this.startRecoveryAttempt(job, "manual_resume");
+    });
   }
 
   async resumeJob(jobId: string): Promise<void> {
-    const job = this.jobs.get(jobId);
-    if (!job) throw new Error(`Unknown job: ${jobId}`);
-    if (job.staleCandidate?.state === "pending") throw new Error("Resolve the stale-candidate decision before resuming.");
-    if (job.status !== "interrupted" && job.status !== "needs_attention") {
-      throw new Error(`Job ${jobId} cannot be resumed from ${job.status}.`);
-    }
-    if (this.workers.has(jobId)) throw new Error(`Job ${jobId} already has an active worker.`);
-    const timer = this.recoveryTimers.get(jobId);
-    if (timer) {
-      clearTimeout(timer);
-      this.recoveryTimers.delete(jobId);
-    }
-    await this.validateRecoveryCheckout(job);
-    if (job.status !== "interrupted" && job.status !== "needs_attention") throw new Error(`Job ${jobId} is already being resumed.`);
-    if (this.workers.has(jobId)) throw new Error(`Job ${jobId} already has an active worker.`);
-    if (!job.recoverable || job.recoveryIssue) throw new Error(job.recoveryIssue || "The recorded checkout is not recoverable.");
-    await this.startRecoveryAttempt(job, "manual_resume");
+    await this.operationLock.run(async () => {
+      const job = this.jobs.get(jobId);
+      if (!job) throw new Error(`Unknown job: ${jobId}`);
+      if (job.staleCandidate?.state === "pending") throw new Error("Resolve the stale-candidate decision before resuming.");
+      if (job.status !== "interrupted" && job.status !== "needs_attention") {
+        throw new Error(`Job ${jobId} cannot be resumed from ${job.status}.`);
+      }
+      if (this.workers.has(jobId)) throw new Error(`Job ${jobId} already has an active worker.`);
+      const timer = this.recoveryTimers.get(jobId);
+      if (timer) {
+        clearTimeout(timer);
+        this.recoveryTimers.delete(jobId);
+      }
+      await this.validateRecoveryCheckout(job);
+      if (job.status !== "interrupted" && job.status !== "needs_attention") throw new Error(`Job ${jobId} is already being resumed.`);
+      if (this.workers.has(jobId)) throw new Error(`Job ${jobId} already has an active worker.`);
+      if (!job.recoverable || job.recoveryIssue) throw new Error(job.recoveryIssue || "The recorded checkout is not recoverable.");
+      await this.startRecoveryAttempt(job, "manual_resume");
+    });
   }
 
   async nominateStale(jobId: string, input: { reason: string; evidenceSource: string; suspectedReplacementJobId?: string; suspectedReplacementCommit?: string }): Promise<AgentJob> {
-    const job = this.requireJob(jobId);
-    await nominateStaleCandidate(job, input, { workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()), jobs: this.jobs, targetRef: this.maintenanceConfig.targetRef });
-    this.sweepJobIds.delete(job.id);
-    this.suppressStaleWakes(job.id);
-    this.publishJob(job);
-    await this.stateStore.flush();
-    return job;
+    return this.operationLock.run(async () => {
+      const job = this.requireJob(jobId);
+      const staged = structuredClone(job);
+      const stagedJobs = new Map(this.jobs); stagedJobs.set(job.id, staged);
+      const notificationsBefore = structuredClone(this.notificationState);
+      const sweptBefore = this.sweepJobIds.has(job.id);
+      try {
+        await nominateStaleCandidate(staged, input, {
+          workspaceRoot: this.cwd, hasActiveWorker: (id) => this.workers.has(id), jobs: stagedJobs,
+          targetRef: this.maintenanceConfig.targetRef,
+          beforeNominationMutation: () => this.staleLifecycleHooks?.beforeNominationMutation?.(staged),
+        });
+        // Revalidate live ownership under the same authority immediately before
+        // the staged mutation is persisted; a captured Set is never authority.
+        if (this.workers.has(job.id) || job.status === "running" || job.status === "queued") throw new Error("Active worker ownership appeared during stale nomination.");
+        this.sweepJobIds.delete(job.id);
+        this.suppressStaleWakes(job.id);
+        await this.staleLifecycleHooks?.beforeStaleFlush?.(staged, "nominate");
+        await this.flushStagedJobs(stagedJobs, () => restoreJob(job, staged));
+      } catch (error) {
+        Object.assign(this.notificationState, notificationsBefore);
+        if (sweptBefore) this.sweepJobIds.add(job.id); else this.sweepJobIds.delete(job.id);
+        throw error;
+      }
+      await this.staleLifecycleHooks?.beforeStalePublish?.(job, "nominate");
+      this.publishFlushedJob(job);
+      return job;
+    });
   }
 
   async decideStale(jobId: string, decision: "confirm_superseded" | "still_wanted"): Promise<AgentJob> {
-    const job = this.requireJob(jobId);
-    await decideStaleCandidate(job, decision, { workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()), jobs: this.jobs, targetRef: this.maintenanceConfig.targetRef });
-    this.publishJob(job);
-    await this.stateStore.flush();
-    if (decision === "still_wanted") this.scheduleBacklogSweep();
-    return job;
+    return this.operationLock.run(async () => {
+      const job = this.requireJob(jobId);
+      const staged = structuredClone(job);
+      const stagedJobs = new Map(this.jobs); stagedJobs.set(job.id, staged);
+      await decideStaleCandidate(staged, decision, {
+        workspaceRoot: this.cwd, hasActiveWorker: (id) => this.workers.has(id), jobs: stagedJobs,
+        targetRef: this.maintenanceConfig.targetRef,
+        afterArchivePublication: () => this.staleLifecycleHooks?.afterArchivePublication?.(staged),
+      });
+      await this.staleLifecycleHooks?.beforeStaleFlush?.(staged, decision);
+      await this.flushStagedJobs(stagedJobs, () => restoreJob(job, staged));
+      await this.staleLifecycleHooks?.beforeStalePublish?.(job, decision);
+      this.publishFlushedJob(job);
+      return job;
+    });
   }
 
   private suppressStaleWakes(jobId: string): void {
@@ -1123,18 +1174,52 @@ export class Orchestrator {
     }
   }
 
-  async migrateStaleAudit() {
-    const result = await migrateStaleManifest(join(this.cwd, "docs", "worktree-backlog-manifest-20260823.json"), this.jobs, {
-      workspaceRoot: this.cwd, activeJobIds: new Set(this.workers.keys()), jobs: this.jobs, targetRef: this.maintenanceConfig.targetRef,
+  private async migrateStaleAuditTransaction(manifestPath: string, publish: boolean) {
+    return this.operationLock.run(async () => {
+      const stagedJobs = new Map([...this.jobs].map(([id, job]) => [id, structuredClone(job)]));
+      const maintenanceBefore = structuredClone(this.maintenance);
+      const notificationsBefore = structuredClone(this.notificationState);
+      const sweepsBefore = new Set(this.sweepJobIds);
+      let result: Awaited<ReturnType<typeof migrateStaleManifest>>;
+      try {
+        result = await migrateStaleManifest(manifestPath, stagedJobs, {
+          workspaceRoot: this.cwd, hasActiveWorker: (id) => this.workers.has(id), jobs: stagedJobs,
+          targetRef: this.maintenanceConfig.targetRef,
+          beforeNominationMutation: (job) => this.staleLifecycleHooks?.beforeNominationMutation?.(job),
+        });
+        for (const staged of stagedJobs.values()) if (staged.staleCandidate?.state === "pending") {
+          const current = this.jobs.get(staged.id);
+          if (this.workers.has(staged.id) || current?.status === "running" || current?.status === "queued") {
+            throw new Error(`Active worker ownership appeared during migration for ${staged.id}.`);
+          }
+          this.suppressStaleWakes(staged.id);
+          this.sweepJobIds.delete(staged.id);
+        }
+        this.maintenance.staleMigration = { source: manifestPath, at: Date.now(), ...result };
+        const nominated = [...stagedJobs.values()].find((job) => job.staleCandidate?.state === "pending");
+        if (nominated) await this.staleLifecycleHooks?.beforeStaleFlush?.(nominated, "nominate");
+        await this.flushStagedJobs(stagedJobs, () => {
+          for (const [id, staged] of stagedJobs) {
+            const current = this.jobs.get(id);
+            if (current) restoreJob(current, staged); else this.jobs.set(id, staged);
+          }
+        });
+      } catch (error) {
+        this.maintenance = maintenanceBefore;
+        Object.assign(this.notificationState, notificationsBefore);
+        this.sweepJobIds.clear(); for (const id of sweepsBefore) this.sweepJobIds.add(id);
+        throw error;
+      }
+      if (publish) for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") {
+        await this.staleLifecycleHooks?.beforeStalePublish?.(job, "nominate");
+        this.publishFlushedJob(job);
+      }
+      return result;
     });
-    for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") this.suppressStaleWakes(job.id);
-    this.maintenance.staleMigration = {
-      source: join(this.cwd, "docs", "worktree-backlog-manifest-20260823.json"), at: Date.now(), ...result,
-    };
-    this.persist();
-    await this.stateStore.flush();
-    for (const job of this.jobs.values()) if (job.staleCandidate?.state === "pending") this.emit({ type: "job_updated", job: this.transportJob(job) });
-    return result;
+  }
+
+  async migrateStaleAudit() {
+    return this.migrateStaleAuditTransaction(join(this.cwd, "docs", "worktree-backlog-manifest-20260823.json"), true);
   }
 
   async cancelJob(jobId: string): Promise<void> {
@@ -1889,11 +1974,15 @@ export class Orchestrator {
     }
   }
 
-  private publishJob(job: AgentJob): void {
-    this.persist();
+  private publishFlushedJob(job: AgentJob): void {
     this.emit({ type: "job_updated", job: this.transportJob(job) });
     this.coordinatorNotifications?.observe(job);
     this.scheduleBacklogSweep();
+  }
+
+  private publishJob(job: AgentJob): void {
+    this.persist();
+    this.publishFlushedJob(job);
   }
 
   private appendCoordinatorWorkerEvent(event: CoordinatorWorkerEvent): void {
@@ -1916,7 +2005,21 @@ export class Orchestrator {
     this.emit({ type: "coordinator_message", message });
   }
 
-  private persist(): void {
+  private async flushStagedJobs(stagedJobs: ReadonlyMap<string, AgentJob>, apply: () => void): Promise<void> {
+    if (this.persistenceJobOverride) throw new Error("Another exact lifecycle persistence transaction is active.");
+    this.persistenceJobOverride = stagedJobs;
+    try {
+      this.persist(stagedJobs);
+      await this.stateStore.flush();
+      // Apply synchronously before ordinary persistence can observe the old
+      // aggregate after the exact staged generation becomes durable.
+      apply();
+    } finally {
+      this.persistenceJobOverride = undefined;
+    }
+  }
+
+  private persist(jobSnapshot: ReadonlyMap<string, AgentJob> = this.persistenceJobOverride ?? this.jobs): void {
     const state: DurableRuntimeState = {
       version: RUNTIME_STATE_VERSION,
       workspaceRoot: this.cwd,
@@ -1940,7 +2043,7 @@ export class Orchestrator {
       // RuntimeStateStore snapshots this envelope synchronously before its
       // first write await. Avoid cloning every large diff/transcript twice on
       // each high-frequency activity transition.
-      jobs: this.listJobs().map((job) => ({
+      jobs: [...jobSnapshot.values()].map((job) => ({
         job,
         piSessionFile: this.piSessionFiles.get(job.id),
       })),
@@ -2111,22 +2214,27 @@ export class Orchestrator {
   }
 
   private async launchScheduledRecovery(job: AgentJob): Promise<void> {
-    if (job.status !== "interrupted" || this.workers.has(job.id) || !job.recovery?.nextRetryAt) return;
-    await this.validateRecoveryCheckout(job);
-    if (job.status !== "interrupted" || this.workers.has(job.id)) return;
-    if (!canAutomaticallyResume(job)) {
-      job.status = "needs_attention";
-      job.activity = undefined;
-      job.recoveryIssue ||= "The checkout changed while automatic recovery was waiting.";
-      this.publishJob(job);
-      return;
-    }
-    await this.startRecoveryAttempt(job, "backend_restart");
+    await this.operationLock.run(async () => {
+      if (job.status !== "interrupted" || this.workers.has(job.id) || !job.recovery?.nextRetryAt) return;
+      await this.validateRecoveryCheckout(job);
+      if (job.status !== "interrupted" || this.workers.has(job.id)) return;
+      if (!canAutomaticallyResume(job)) {
+        job.status = "needs_attention";
+        job.activity = undefined;
+        job.recoveryIssue ||= "The checkout changed while automatic recovery was waiting.";
+        this.publishJob(job);
+        return;
+      }
+      await this.startRecoveryAttempt(job, "backend_restart");
+    });
   }
 
 
   private async startRecoveryAttempt(job: AgentJob, reason: "backend_restart" | "manual_resume"): Promise<void> {
+    if (job.staleCandidate?.state === "pending") throw new Error("Resolve the stale-candidate decision before resuming.");
     if (this.workers.has(job.id)) throw new Error(`Job ${job.id} already has an active worker.`);
+    await this.staleLifecycleHooks?.beforeWorkerOwnership?.(job);
+    if ((job.staleCandidate as AgentJob["staleCandidate"])?.state === "pending" || this.workers.has(job.id)) throw new Error("Worker ownership changed before resume acquisition.");
     const recovery = job.recovery ??= { retryCount: 0, maxRetries: this.recoveryConfig.maxRetries, generation: 0 };
     if (reason === "backend_restart") recovery.retryCount += 1;
     const generation = recovery.generation + 1;

@@ -24,11 +24,15 @@ export interface NominationInput {
 export interface StaleContext {
   workspaceRoot: string;
   activeJobIds?: ReadonlySet<string>;
+  /** Authoritative live ownership check used while caller-held serialization is active. */
+  hasActiveWorker?: (jobId: string) => boolean;
   jobs?: ReadonlyMap<string, AgentJob>;
   targetRef?: string;
   now?: () => number;
   /** Test-only crash-boundary hook; throwing must leave the nomination nonterminal. */
   archivePublicationHook?: (step: "file_fsync" | "temp_directory_fsync" | "publish_rename" | "parent_fsync") => void | Promise<void>;
+  beforeNominationMutation?: (job: AgentJob) => void | Promise<void>;
+  afterArchivePublication?: (job: AgentJob) => void | Promise<void>;
 }
 
 function sha(value: string | Buffer): string {
@@ -91,8 +95,8 @@ export async function auditWorktree(job: AgentJob, context: StaleContext) {
   };
 }
 
-export function activeStaleFence(job: AgentJob, activeJobIds?: ReadonlySet<string>): string | undefined {
-  if (activeJobIds?.has(job.id) || job.status === "running" || job.status === "queued") return "active worker ownership";
+export function activeStaleFence(job: AgentJob, activeJobIds?: ReadonlySet<string>, activelyOwned = false): string | undefined {
+  if (activelyOwned || activeJobIds?.has(job.id) || job.status === "running" || job.status === "queued") return "active worker ownership";
   if (job.integration && ["reviewing", "integrating", "conflicted"].includes(job.integration.status)) return `integration ${job.integration.status}`;
   if (job.review && ACTIVE_REVIEW_STATES.has(job.review.status)) return `review ${job.review.status}`;
   const action = job.review?.remediation?.actions.find((entry) => entry.id === job.review?.remediation?.currentActionId);
@@ -104,7 +108,7 @@ export async function nominateStaleCandidate(job: AgentJob, input: NominationInp
   if (job.integration?.status === "merged" || job.integration?.status === "superseded") {
     throw new Error("Terminal disposition is authoritative and cannot be replaced by a stale nomination.");
   }
-  const activeFence = activeStaleFence(job, context.activeJobIds);
+  const activeFence = activeStaleFence(job, context.activeJobIds, context.hasActiveWorker?.(job.id));
   if (activeFence) throw new Error(`Active jobs cannot be nominated as stale candidates (${activeFence}).`);
   if (input.reason.trim().length < 20 || !input.evidenceSource.trim()) throw new Error("Specific reason and evidence source are required.");
   const audit = await auditWorktree(job, context);
@@ -119,6 +123,9 @@ export async function nominateStaleCandidate(job: AgentJob, input: NominationInp
     if (same) return job;
     throw new Error("Job already has a different pending stale nomination.");
   }
+  await context.beforeNominationMutation?.(job);
+  const finalFence = activeStaleFence(job, context.activeJobIds, context.hasActiveWorker?.(job.id));
+  if (finalFence) throw new Error(`Active jobs cannot be nominated as stale candidates (${finalFence}).`);
   const now = (context.now ?? Date.now)();
   job.staleCandidate = {
     state: "pending", nominatedAt: now, nominatedBy: input.nominatedBy ?? "coordinator",
@@ -325,12 +332,14 @@ export async function decideStaleCandidate(
 ): Promise<AgentJob> {
   const candidate = job.staleCandidate;
   if (!candidate || candidate.state !== "pending" || candidate.confirmation !== "pending") throw new Error("No pending stale decision.");
-  const activeFence = activeStaleFence(job, context.activeJobIds);
+  const activeFence = activeStaleFence(job, context.activeJobIds, context.hasActiveWorker?.(job.id));
   if (activeFence) throw new Error(`An active operation cannot be decided (${activeFence}).`);
   if (job.integration?.status === "merged" || job.integration?.status === "superseded") throw new Error("Terminal disposition is authoritative.");
   const now = (context.now ?? Date.now)();
   if (decision === "still_wanted") {
     await auditWorktree(job, context);
+    const finalFence = activeStaleFence(job, context.activeJobIds, context.hasActiveWorker?.(job.id));
+    if (finalFence) throw new Error(`An active operation cannot be decided (${finalFence}).`);
     candidate.state = "kept";
     candidate.confirmation = "still_wanted";
     candidate.resolvedAt = now;
@@ -347,7 +356,11 @@ export async function decideStaleCandidate(
     return job;
   }
   candidate.replacementAuthority = await verifyReplacementAuthority(job, context);
-  candidate.archive = await archiveDirtyEvidence(job, context);
+  const publishedArchive = await archiveDirtyEvidence(job, context);
+  await context.afterArchivePublication?.(job);
+  const finalFence = activeStaleFence(job, context.activeJobIds, context.hasActiveWorker?.(job.id));
+  if (finalFence) throw new Error(`An active operation cannot be decided (${finalFence}).`);
+  candidate.archive = publishedArchive;
   if (candidate.audit.dirty && !candidate.archive.diffSha256) throw new Error("Dirty evidence archive was not completed.");
   candidate.state = "superseded";
   candidate.confirmation = "confirmed_superseded";
