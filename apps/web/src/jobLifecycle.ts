@@ -76,6 +76,15 @@ export function jobLifecycleLabel(job: AgentJob): string {
     return job.cleanup?.status === "removed" ? `${prefix} · cleaned` : `${prefix} · verified`;
   }
   if (integration === "superseded") return job.cleanup?.status === "removed" ? "Not required · cleaned" : "Not required · superseded";
+  const currentRoundJudgeClaim = job.handoff?.round !== undefined
+    && job.review?.judgeHandoffRound === job.handoff.round
+    && ["queued", "handoff_received"].includes(review || "");
+  if (currentRoundJudgeClaim) return "Review claimed · awaiting launch";
+  const action = job.review?.remediation?.actions.find((item) => item.id === job.review?.remediation?.currentActionId);
+  const retryRound = action ? job.review?.remediation?.rounds[action.failureClass] : undefined;
+  if (action?.state === "repairing" && !job.review?.activeRetry && retryRound?.nextRetryAt !== undefined) {
+    return action.evidence.mergeCommit ? "Verification retry scheduled" : "Review retry scheduled";
+  }
   if (review === "approved") return "Approved · awaiting merge";
   if (review === "merge_queued") return "Approved · awaiting integration";
   if (review === "blocked") return "Blocked · needs attention";

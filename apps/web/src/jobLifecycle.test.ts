@@ -57,6 +57,19 @@ test("active state requires genuine worker execution and covers synchronized coo
   assert.deepEqual(jobActiveState(job("running")), { kind: "worker", label: "Worker working" });
 });
 
+test("claimed judge and scheduled coordinator retry stay settled without false sidebar activity", () => {
+  const claimed = reviewed("queued"); claimed.handoff = { report: "done", requirements: [], diffSha256: "hash", branch: claimed.branch, worktree: claimed.worktree, tests: [], risks: [], round: 3, createdAt: 2 }; claimed.review!.judgeHandoffRound = 3;
+  assert.equal(jobLifecycleLabel(claimed), "Review claimed · awaiting launch");
+  assert.equal(jobActiveState(claimed), undefined);
+  assert.equal(jobActiveState(claimed, false), undefined);
+
+  const scheduled = reviewed("feedback_sent"); scheduled.review!.remediation = { maxAttempts: 2, rounds: { infrastructure: { failureClass: "infrastructure", fingerprint: "f", attempts: 1, maxAttempts: 2, nextRetryAt: 10_000, updatedAt: 3 } }, currentActionId: "retry", actions: [{ id: "retry", failureClass: "infrastructure", fingerprint: "f", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: 2, updatedAt: 3, evidence: { detail: "backoff" } }] };
+  assert.equal(jobLifecycleLabel(scheduled), "Review retry scheduled");
+  assert.equal(jobActiveState(scheduled), undefined);
+  scheduled.review!.remediation.actions[0]!.evidence.mergeCommit = "merged";
+  assert.equal(jobLifecycleLabel(scheduled), "Verification retry scheduled");
+});
+
 test("a recovered running worker wins over preserved settled review evidence", () => {
   const recovered = reviewed("blocked", "running");
   assert.deepEqual(jobActiveState(recovered), { kind: "worker", label: "Worker repairing" });

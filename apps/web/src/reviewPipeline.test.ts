@@ -28,6 +28,46 @@ test("ready for review is explicitly distinct from active coordinator review", (
   assert.equal(judging.stages.find((item) => item.tone === "active")?.label, "Independent judge");
 });
 
+test("current-round queued judge claim remains claimed across disconnect without false activity", () => {
+  for (const status of ["queued", "handoff_received"] as const) {
+    const claimed = job(status); claimed.review!.judgeHandoffRound = claimed.handoff!.round;
+    for (const connected of [true, false]) {
+      const pipeline = reviewPipeline(claimed, connected);
+      assert.equal(pipeline.headline, "Independent review claimed");
+      assert.doesNotMatch(pipeline.guidance, /no review is currently running|Ready for review/i);
+      assert.match(stage(claimed, "judge").summary, /claimed.*awaiting judge launch|claimed.*serialized coordinator/i);
+      assert.equal(pipeline.active, false);
+      assert.equal(pipeline.stages.some((item) => item.tone === "active"), false);
+    }
+  }
+});
+
+test("scheduled infrastructure backoff is coordinator-owned and target-attributed before active retry", () => {
+  const retry = (postMerge: boolean) => {
+    const value = job("feedback_sent");
+    value.review!.remediation = { maxAttempts: 2, rounds: { infrastructure: { failureClass: "infrastructure", fingerprint: "f", attempts: 1, maxAttempts: 2, nextRetryAt: 9_000, updatedAt: 4_000 } }, currentActionId: "retry", actions: [{ id: "retry", failureClass: "infrastructure", fingerprint: "f", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: 3_000, updatedAt: 4_000, evidence: { detail: "runner unavailable", ...(postMerge ? { mergeCommit: "merged-head" } : {}) } }] };
+    return value;
+  };
+  const reviewRetry = retry(false); const waiting = reviewPipeline(reviewRetry);
+  assert.equal(waiting.headline, "Coordinator retry scheduled");
+  assert.match(waiting.guidance, /review prerequisite retry.*backoff.*judge remains queued/i);
+  assert.match(stage(reviewRetry, "repair").summary, /Coordinator retry backoff/);
+  assert.equal(waiting.active, false);
+  assert.equal(waiting.stages.some((item) => item.tone === "active"), false);
+
+  const postRetry = retry(true); const postWaiting = reviewPipeline(postRetry);
+  assert.match(postWaiting.guidance, /post-merge verification retry.*backoff/i);
+  assert.match(stage(postRetry, "verification").summary, /scheduled after backoff/i);
+  assert.equal(stage(postRetry, "verification").tone, "waiting");
+
+  reviewRetry.review!.status = "ci_running";
+  assert.equal(reviewPipeline(reviewRetry).active, false, "restored backoff with stale coarse CI status has no spinner");
+  assert.equal(reviewPipeline(reviewRetry).stages.some((item) => item.tone === "active"), false);
+  reviewRetry.review!.activeRetry = { target: "review", startedAt: 9_000 };
+  assert.equal(stage(reviewRetry, "preparation").tone, "active");
+  assert.match(reviewPipeline(reviewRetry).guidance, /retrying review prerequisites/i);
+});
+
 test("conflicted integration does not erase specific production failure guidance", () => {
   const cases: Array<[ReviewStatus, RegExp, "ci" | "judge" | "verification" | "merge"]> = [
     ["ci_failed", /CI failed; repair is required/i, "ci"],

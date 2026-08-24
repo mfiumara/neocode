@@ -331,6 +331,30 @@ test("successful infrastructure retry resolves durably and restart cannot resche
   }
 });
 
+test("restart recovery preserves pre-launch judge claim and scheduled retry backoff without replay", async () => {
+  const adapter = new FakeAdapter();
+  const claimed = job("claimed-restart");
+  const initial = new CompletionPipeline(adapter, () => undefined, "main", "/root", undefined, coordinatorMergeCapability);
+  initial.enqueue(claimed); claimed.review!.judgeHandoffRound = claimed.handoff!.round;
+  const restoredClaim = structuredClone(claimed);
+  const restarted = new CompletionPipeline(adapter, () => undefined, "main", "/root", undefined, coordinatorMergeCapability);
+  restarted.recover([restoredClaim]); await restarted.idle();
+  assert.equal(restoredClaim.review?.status, "queued");
+  assert.equal(restoredClaim.review?.judgeHandoffRound, restoredClaim.handoff?.round);
+  assert.equal(adapter.ciCalls, 0); assert.equal(adapter.judgeCalls, 0);
+
+  const scheduled = job("scheduled-restart"); initial.enqueue(scheduled);
+  scheduled.review!.status = "feedback_sent";
+  scheduled.review!.remediation = { maxAttempts: 2, rounds: { infrastructure: { failureClass: "infrastructure", fingerprint: "f", attempts: 1, maxAttempts: 2, nextRetryAt: Date.now() + 60_000, updatedAt: Date.now() } }, currentActionId: "retry", actions: [{ id: "retry", failureClass: "infrastructure", fingerprint: "f", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: Date.now(), updatedAt: Date.now(), evidence: { detail: "runner backoff" } }] };
+  const restoredRetry = structuredClone(scheduled);
+  restarted.recover([restoredRetry]); await restarted.idle();
+  assert.equal(restoredRetry.review?.status, "feedback_sent");
+  assert.equal(restoredRetry.review?.remediation?.actions[0]?.state, "repairing");
+  assert.ok(restoredRetry.review?.remediation?.rounds.infrastructure?.nextRetryAt);
+  assert.equal(restoredRetry.review?.activeRetry, undefined);
+  assert.equal(restoredRetry.status, "completed", "scheduled coordinator retry must not become worker execution");
+});
+
 test("restart recovery does not duplicate a claimed source repair attempt", async () => {
   const adapter = new FakeAdapter(); const value = job("restart-repair");
   adapter.runCi = async () => [{ command: "test", ok: false, exitCode: 1, durationMs: 1, output: "broken" }];
