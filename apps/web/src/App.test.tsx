@@ -128,7 +128,7 @@ test("sidebar keeps queued and terminal worker labels authoritative over stale l
 test("compact review panel has timeline semantics, check counts, and collapsed technical evidence", () => {
   const value = sidebarJob("judging");
   value.review!.ci = [
-    { command: "npm test -- --opaque", ok: true, exitCode: 0, durationMs: 10, output: "secret diagnostic" },
+    { command: "npm run test", ok: true, exitCode: 0, durationMs: 10, output: "secret diagnostic" },
     { command: "npm run check", ok: false, exitCode: 1, durationMs: 20, output: "type diagnostic" },
   ];
   value.review!.judge = { approved: false, summary: "One requirement remains", requirements: [], model: { provider: "pi", id: "judge" }, diffSha256: "exacthash", raw: "{\"approved\":false}" };
@@ -140,7 +140,7 @@ test("compact review panel has timeline semantics, check counts, and collapsed t
   assert.match(markup, /Rejected: One requirement remains/);
   assert.match(markup, /<details class="technical-evidence">/);
   assert.match(markup, /Technical review evidence/);
-  assert.match(markup, /npm test -- --opaque/);
+  assert.match(markup, /npm run test/);
   assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
 });
 

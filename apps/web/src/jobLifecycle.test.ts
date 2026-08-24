@@ -37,9 +37,12 @@ function reviewed(status: NonNullable<AgentJob["review"]>["status"], jobStatus: 
   return value;
 }
 
-test("active state covers worker repair, checks, judging, integration, and normal workers", () => {
-  assert.deepEqual(jobActiveState(reviewed("worker_resumed")), { kind: "worker", label: "Worker repairing" });
-  assert.deepEqual(jobActiveState(reviewed("ci_running")), { kind: "checks", label: "Running checks" });
+test("active state requires genuine worker execution and covers synchronized coordinator phases", () => {
+  assert.equal(jobActiveState(reviewed("worker_resumed")), undefined, "stale resumed metadata is not live worker authority");
+  assert.equal(jobActiveState(reviewed("worker_resumed"), false), undefined);
+  assert.deepEqual(jobActiveState(reviewed("ci_running")), { kind: "review", label: "Preparing review" });
+  const checking = reviewed("ci_running"); checking.review!.reviewBaseRef = "prepared";
+  assert.deepEqual(jobActiveState(checking), { kind: "checks", label: "Running product checks" });
   assert.deepEqual(jobActiveState(reviewed("judging")), { kind: "review", label: "Under review" });
   assert.deepEqual(jobActiveState(reviewed("merging")), { kind: "integration", label: "Integrating" });
   assert.deepEqual(jobActiveState(job("running")), { kind: "worker", label: "Worker working" });

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { verifyReviewEvidence } from "./review-evidence.mjs";
 
 function git(args, options = {}) {
   const result = spawnSync("git", args, { encoding: "utf8", ...options });
@@ -54,6 +55,7 @@ function reportCommand(command, result, label) {
 }
 
 export function checkGitState(env = process.env) {
+  verifyReviewEvidence();
   const base = discoverDiffBase(env);
   process.stdout.write(`verified diff base: ${base}\n`);
 

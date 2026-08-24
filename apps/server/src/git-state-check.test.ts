@@ -70,6 +70,16 @@ test("coordinator worktrees report literal main packet commands across the full 
   } finally { value.cleanup(); }
 });
 
+test("recognized exact-tree evidence fails closed when malformed", () => {
+  const value = fixture();
+  try {
+    git(value.root, ["commit", "--allow-empty", "-m", "neocode-review-evidence-v1", "-m", "{\"version\":1}"]);
+    const result = check(value.root, { NEOCODE_DIFF_BASE_SHA: value.base });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Malformed recognized review evidence/);
+  } finally { value.cleanup(); }
+});
+
 test("verified base checks report exact empty clean status and reject dirty candidates", () => {
   const value = fixture();
   try {

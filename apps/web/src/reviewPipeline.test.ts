@@ -20,11 +20,12 @@ test("ready for review is explicitly distinct from active coordinator review", (
   assert.equal(ready.headline, "Ready for review");
   assert.match(ready.guidance, /no review is currently running/i);
   assert.equal(ready.active, false);
-  for (const [status, expected] of [["ci_running", "Product CI"], ["judging", "Independent judge"]] as const) {
-    const pipeline = reviewPipeline(job(status));
-    assert.equal(pipeline.headline, "Reviewing now");
-    assert.equal(pipeline.stages.find((item) => item.tone === "active")?.label, expected);
-  }
+  const preparing = reviewPipeline(job("ci_running"));
+  assert.equal(preparing.headline, "Reviewing now");
+  assert.equal(preparing.stages.find((item) => item.tone === "active")?.label, "Coordinator Git preparation");
+  const judging = reviewPipeline(job("judging"));
+  assert.equal(judging.headline, "Reviewing now");
+  assert.equal(judging.stages.find((item) => item.tone === "active")?.label, "Independent judge");
 });
 
 test("conflicted integration does not erase specific production failure guidance", () => {
@@ -37,7 +38,7 @@ test("conflicted integration does not erase specific production failure guidance
   ];
   for (const [status, guidance, failedStage] of cases) {
     const value = job(status); value.integration = { status: "conflicted" }; value.review!.error = `${status} exact diagnostic`;
-    if (status === "ci_failed") value.review!.ci = [{ command: "npm test", ok: false, exitCode: 1, durationMs: 40, output: "fail" }];
+    if (status === "ci_failed") value.review!.ci = [{ command: "npm run test", ok: false, exitCode: 1, durationMs: 40, output: "fail" }];
     if (status === "rejected") value.review!.judge = verdict("Missing behavior");
     if (status === "post_ci_failed") value.review!.postMergeCi = [{ command: "npm test", ok: false, exitCode: 1, durationMs: 50, output: "fail" }];
     if (status === "blocked" || status === "failed") value.review!.coordinatorAuthorizedAt = 2_500;
@@ -68,23 +69,36 @@ test("rebase conflict requires review conflict status and supporting durable evi
 
 test("preparation completes only with durable base evidence and early CI remains truthful", () => {
   const early = job("ci_running");
-  assert.equal(stage(early, "preparation").tone, "waiting");
-  assert.match(stage(early, "preparation").summary, /not yet durably confirmed/i);
+  assert.equal(stage(early, "preparation").tone, "active");
+  assert.match(stage(early, "preparation").summary, /preparing candidate/i);
   early.review!.reviewBaseRef = "prepared-base";
   assert.equal(stage(early, "preparation").tone, "complete");
 });
 
-test("fresh ci_running authority wins over retained failed checks", () => {
+test("pre-CI preparation transitions to actual product CI and excludes informational Git checks", () => {
   const value = job("ci_running");
-  value.review!.ci = [{ command: "old check", ok: false, exitCode: 1, durationMs: 40, output: "old failure" }];
+  value.review!.ci = [
+    { command: "git diff --check main HEAD", ok: true, exitCode: 0, durationMs: 10, output: "" },
+    { command: "git status --porcelain", ok: true, exitCode: 0, durationMs: 10, output: "" },
+  ];
+  assert.equal(stage(value, "preparation").tone, "active");
+  assert.equal(stage(value, "ci").tone, "waiting");
+  assert.match(stage(value, "ci").summary, /queued.*durably started/i);
+  assert.doesNotMatch(stage(value, "ci").summary, /2\/2/);
+
+  value.review!.reviewBaseRef = "prepared-main";
+  assert.equal(stage(value, "preparation").tone, "complete");
   assert.equal(stage(value, "ci").tone, "active");
-  assert.match(stage(value, "ci").summary, /0\/1/);
+  assert.match(stage(value, "ci").summary, /no completed product commands/i);
+  value.review!.ci.push({ command: "npm run test", ok: false, exitCode: 1, durationMs: 40, output: "prior failure" });
+  assert.equal(stage(value, "ci").tone, "active");
+  assert.match(stage(value, "ci").summary, /Historical prior-round evidence: 0\/1/);
 });
 
 test("durable stage durations use checks, transitions, and remediation timestamps", () => {
   const value = job("rejected");
   value.review!.transitions = [{ status: "ci_running", at: 3_000 }, { status: "judging", at: 4_000 }, { status: "rejected", at: 5_500 }];
-  value.review!.ci = [{ command: "test", ok: true, exitCode: 0, durationMs: 700, output: "" }];
+  value.review!.ci = [{ command: "npm run test", ok: true, exitCode: 0, durationMs: 700, output: "" }];
   value.review!.judge = verdict("No");
   value.review!.remediation = { maxAttempts: 2, rounds: {}, actions: [{ id: "a", failureClass: "judge_changes", fingerprint: "f", state: "pending", attempt: 1, maxAttempts: 2, createdAt: 5_500, updatedAt: 6_250, evidence: { detail: "repair" } }] };
   assert.equal(stage(value, "ci").durationMs, 700);
@@ -161,12 +175,30 @@ test("target advancement and a fresh handoff invalidate an older prepared base",
 });
 
 test("fresh active rounds label retained checks and verdicts as historical", () => {
-  const ci = job("ci_running"); ci.review!.ci = [{ command: "old", ok: false, exitCode: 1, durationMs: 20, output: "old" }];
+  const ci = job("ci_running"); ci.review!.reviewBaseRef = "prepared"; ci.review!.ci = [{ command: "npm run test", ok: false, exitCode: 1, durationMs: 20, output: "old" }];
   assert.match(stage(ci, "ci").summary, /^Historical prior-round evidence/);
   assert.equal(stage(ci, "ci").durationMs, undefined);
   const judging = job("judging"); judging.review!.judge = verdict("Old rejection");
   assert.match(stage(judging, "judge").summary, /^Historical prior-round verdict/);
   assert.equal(stage(judging, "judge").tone, "active");
+});
+
+test("offline judging, pre-merge verification evidence, and needs-attention reasons remain truthful", () => {
+  const offline = job("judging");
+  assert.match(reviewPipeline(offline, false).guidance, /live activity is not confirmed/i);
+  assert.match(reviewPipeline(offline, false).stages.find((item) => item.id === "judge")!.summary, /judging recorded.*unsynchronized/i);
+  assert.doesNotMatch(reviewPipeline(offline, false).stages.find((item) => item.id === "judge")!.summary, /has not started/i);
+
+  const verifying = job("post_merge_ci");
+  verifying.review!.postMergeCi = [{ command: "npm run test", ok: true, exitCode: 0, durationMs: 20, output: "passed" }];
+  assert.equal(stage(verifying, "verification").tone, "active");
+  assert.match(stage(verifying, "verification").summary, /Historical\/recorded evidence/);
+
+  const attention = job("blocked", "needs_attention");
+  attention.recoveryIssue = "Checkout identity changed\nexact diagnostic";
+  attention.review!.remediation = { maxAttempts: 1, rounds: {}, currentActionId: "exhausted", actions: [{ id: "exhausted", failureClass: "infrastructure", fingerprint: "f", state: "exhausted", attempt: 1, maxAttempts: 1, createdAt: 3, updatedAt: 4, evidence: { detail: "Judge backend unavailable" } }] };
+  assert.match(reviewPipeline(attention).guidance, /Judge backend unavailable/);
+  assert.doesNotMatch(reviewPipeline(attention).guidance, /exact diagnostic/);
 });
 
 test("top-level authority and reconnect suppress stale active phases while recovered work wins", () => {
