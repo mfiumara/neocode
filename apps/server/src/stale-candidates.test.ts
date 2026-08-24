@@ -152,6 +152,7 @@ test("manifest migration creates orphan inventory, nominates idempotently, and r
   const first = await migrateStaleManifest(manifestPath, jobs, { workspaceRoot: root });
   assert.deepEqual({ synthetic: first.synthetic, nominated: first.nominated, ambiguous: first.ambiguous.length }, { synthetic: 1, nominated: 1, ambiguous: 0 });
   assert.equal(jobs.get("12345678")?.staleCandidate?.state, "pending");
+  assert.equal(jobs.get("12345678")?.inventorySynthetic, true);
   const second = await migrateStaleManifest(manifestPath, jobs, { workspaceRoot: root });
   assert.equal(second.unchanged, 1);
   assert.equal(jobs.size, 1);

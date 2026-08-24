@@ -407,6 +407,8 @@ export interface AgentJob {
   /** `completed` means the worker stopped; only `merged` means Git verified integration. */
   integration?: JobIntegration;
   cleanup?: JobCleanup;
+  /** Durable marker for a non-executed orphan inventory record created by audit migration. */
+  inventorySynthetic?: boolean;
   /** Provisional only. Terminal integration disposition always takes precedence. */
   staleCandidate?: StaleCandidate;
 }

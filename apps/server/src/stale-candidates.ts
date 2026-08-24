@@ -308,7 +308,7 @@ export async function migrateStaleManifest(
     };
     let job = suffix ? jobs.get(suffix) : undefined;
     if (!job) job = [...jobs.values()].find((entry) => entry.branch === item.branch);
-    const wasExisting = !!job;
+    const wasExisting = !!job && job.inventorySynthetic !== true;
     if (job) {
       const samePath = await Promise.all([
         authorizedWorktree(context.workspaceRoot, job.isolation.path),
@@ -351,6 +351,7 @@ export async function migrateStaleManifest(
           status: "interrupted" as JobStatus, branch: item.branch, worktree: path,
           isolation: { requested: "worktree", mode: "worktree", path }, baseRef: parsed.baseline.commit,
           createdAt, updatedAt: createdAt, messages: [{ id: randomUUID(), role: "system", text: "Imported from the semantic worktree audit. Files and execution history were not changed.", timestamp: createdAt }],
+          inventorySynthetic: true,
           recoverable: false,
           recoveryIssue: item.disposition === "intentionally cancelled"
             ? "Synthetic intentionally-cancelled inventory is never automatically recoverable; coordinator validation is required."
