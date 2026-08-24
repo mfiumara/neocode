@@ -149,7 +149,11 @@ export class RuntimeStateStore {
     // still awaits the original operation-scoped promise.
     void promise.catch(() => undefined);
     this.completions.set(generation, { promise, resolve, reject });
-    this.latest = { state: structuredClone(state), generation };
+    // Orchestrator persistence already builds a detached state envelope. Keep
+    // only the latest reference and serialize it synchronously when the drain
+    // claims it; cloning a multi-megabyte runtime on every streamed activity
+    // update can otherwise retain gigabytes faster than atomic writes drain.
+    this.latest = { state, generation };
     if (!this.writing) this.startDrain();
   }
 
@@ -199,11 +203,14 @@ export class RuntimeStateStore {
   }
 
   private async writeAtomic(state: DurableRuntimeState): Promise<void> {
+    // Snapshot before the first await so later in-memory mutations cannot tear
+    // this generation, without paying for an additional structuredClone.
+    const serialized = `${JSON.stringify(state)}\n`;
     await mkdir(dirname(this.path), { recursive: true });
     const temporary = join(this.root, `.state.${process.pid}.${randomUUID()}.tmp`);
     const handle = await open(temporary, "wx", 0o600);
     try {
-      await handle.writeFile(`${JSON.stringify(state)}\n`, "utf8");
+      await handle.writeFile(serialized, "utf8");
       await handle.sync();
     } finally {
       await handle.close();

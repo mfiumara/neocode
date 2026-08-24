@@ -543,7 +543,9 @@ export class Orchestrator {
         activityHistory: [...this.coordinatorActivityHistory],
         messages: coordinatorWindow.messages,
         transcriptPage: coordinatorWindow.page,
-        promptSettlement: structuredClone(this.promptSettlement),
+        promptSettlement: this.promptSettlement
+          ? { throughTimestamp: this.promptSettlement.throughTimestamp, failures: [...this.promptSettlement.failures] }
+          : undefined,
         settings: this.settings(),
         model: this.currentModel(),
         models: this.modelChoices(),
@@ -566,7 +568,9 @@ export class Orchestrator {
     // Exclude the durable transcript before cloning metadata. Cloning the full
     // job and then replacing messages makes every update O(total history).
     const { messages: _durableMessages, transcriptPage: _transportPage, ...metadata } = job;
-    return { ...structuredClone(metadata), messages: window.messages, transcriptPage: window.page };
+    // send() serializes synchronously; a deep clone here duplicated large
+    // diffs and CI evidence for every streamed activity update.
+    return { ...metadata, messages: window.messages, transcriptPage: window.page };
   }
 
   async prompt(text: string, context: string[] = [], attachments: ImageAttachment[] = [], requestId?: string): Promise<void> {
@@ -1632,13 +1636,19 @@ export class Orchestrator {
         activity: this.coordinatorActivity,
         activityHistory: [...this.coordinatorActivityHistory],
         piSessionFile: this.coordinatorSessionFile,
-        pendingPrompts: structuredClone(this.pendingCoordinatorPrompts),
-        promptSettlement: structuredClone(this.promptSettlement),
+        pendingPrompts: this.pendingCoordinatorPrompts.map((prompt) => ({ ...prompt, context: [...prompt.context] })),
+        promptSettlement: { throughTimestamp: this.promptSettlement.throughTimestamp, failures: [...this.promptSettlement.failures] },
       },
       maintenance: { ...this.maintenance },
-      coordinatorNotifications: structuredClone(this.notificationState),
+      coordinatorNotifications: {
+        events: [...this.notificationState.events],
+        lastSignals: { ...this.notificationState.lastSignals },
+      },
+      // RuntimeStateStore snapshots this envelope synchronously before its
+      // first write await. Avoid cloning every large diff/transcript twice on
+      // each high-frequency activity transition.
       jobs: this.listJobs().map((job) => ({
-        job: structuredClone(job),
+        job,
         piSessionFile: this.piSessionFiles.get(job.id),
       })),
     };
