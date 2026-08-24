@@ -245,7 +245,12 @@ export class CompletionPipeline {
         if (action?.state === "repairing") this.resolveAction(job, action);
         continue;
       }
-      if (action?.state === "repairing" && action.failureClass === "infrastructure") {
+      const transientRetry = action?.evidence.checks?.some((check) => check.timedOut || check.exitCode === null);
+      if (action?.state === "repairing" && (action.failureClass === "infrastructure" || transientRetry)) {
+        if (job.review.activeRetry) {
+          delete job.review.activeRetry; // A pre-restart operation lease is never live authority.
+          this.publish(job);
+        }
         this.scheduleInfrastructureRetry(job);
       } else if (["ci_running", "judging"].includes(job.review.status)) {
         this.requireAction(job, "infrastructure", "failed", "Interrupted judge action requires a bounded recovery decision");
