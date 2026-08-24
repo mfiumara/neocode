@@ -137,7 +137,8 @@ test("compact review panel has timeline semantics, check counts, and collapsed t
   assert.match(markup, /aria-label="Worker review progress"/);
   assert.match(markup, /aria-current="step"/);
   assert.match(markup, /1\/2 product checks passed/);
-  assert.match(markup, /Latest prior-round verdict.*One requirement remains/);
+  assert.match(markup, /Latest prior-round verdict.*rejected/i);
+  assert.doesNotMatch(markup.split('<details class="technical-evidence">')[0]!, /One requirement remains/);
   assert.match(markup, /historical prior-round judge diff sha256 exacthash/);
   assert.match(markup, /<details class="technical-evidence">/);
   assert.match(markup, /Technical review evidence/);
@@ -155,11 +156,34 @@ test("compact panel preserves remediation judge audit evidence after the current
     } },
   }] };
   const markup = renderToStaticMarkup(<ReviewStatusPanel job={value} />);
-  assert.match(markup, /Latest prior-round verdict.*Durable remediation verdict/);
+  assert.match(markup, /Latest prior-round verdict.*rejected/i);
+  assert.doesNotMatch(markup.split('<details class="technical-evidence">')[0]!, /Durable remediation verdict/);
   assert.match(markup, /opaque-action/);
   assert.match(markup, /npm test -- exact/);
   assert.match(markup, /nested diagnostic/);
   assert.match(markup, /nested-hash/);
+  assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
+});
+
+test("primary review panel redacts arbitrary diagnostics while collapsed evidence retains exact text", () => {
+  const value = sidebarJob("blocked");
+  const sha1 = "0123456789abcdef0123456789abcdef01234567";
+  const sha256 = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+  const path = "/private/tmp/worktrees/secret-worker";
+  const command = "npm test -- --token opaque-command";
+  const packet = `BASE=${sha1} HEAD=${sha256} PARENT=opaque-parent TREE=opaque-tree`;
+  const opaqueId = "action-550e8400-e29b-41d4-a716-446655440000";
+  const multiline = `first diagnostic\nsecond diagnostic ${path}\n${command}\n${packet}`;
+  value.recoveryIssue = `recovery ${opaqueId}\n${multiline}`;
+  value.review!.error = `review error ${sha256}\n${path}`;
+  value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: opaqueId, actions: [{ id: opaqueId, failureClass: "worker_ci", fingerprint: sha1, state: "pending", attempt: 1, maxAttempts: 2, createdAt: 2, updatedAt: 3, evidence: { detail: multiline } }] };
+  const markup = renderToStaticMarkup(<ReviewStatusPanel job={value} />);
+  const primary = markup.split('<details class="technical-evidence">')[0]!;
+  for (const secret of [sha1, sha256, path, command, packet, opaqueId, "first diagnostic", "second diagnostic"]) {
+    assert.doesNotMatch(primary, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `primary panel leaked ${secret}`);
+    assert.ok(markup.includes(secret), `collapsed evidence omitted exact ${secret}`);
+  }
+  assert.match(primary, /Implementation checks requires coordinator action/);
   assert.doesNotMatch(markup, /<details class="technical-evidence" open/);
 });
 

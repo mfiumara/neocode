@@ -1,4 +1,4 @@
-import type { AgentJob, JudgeEvidence, ReviewStatus } from "@neocode/protocol";
+import type { AgentJob, JudgeEvidence, RemediationFailureClass, ReviewStatus } from "@neocode/protocol";
 
 export type PipelineTone = "waiting" | "active" | "complete" | "failed" | "blocked";
 export interface ReviewPipelineStage {
@@ -60,15 +60,20 @@ function interruptedJudgeAction(job: AgentJob) {
 function judgeSummary(job: AgentJob, historical = false): string {
   const judge = latestJudgeEvidence(job);
   if (judge) {
-    const summary = `${judge.approved ? "Approved" : "Rejected"}: ${judge.summary}`;
+    const summary = judge.approved ? "Approved current handoff round" : "Rejected; implementation changes required";
     return historical ? `Historical prior-round verdict: ${summary}` : summary;
   }
-  const interrupted = interruptedJudgeAction(job);
-  if (interrupted) return `Interrupted: ${interrupted.evidence.detail}`;
+  if (interruptedJudgeAction(job)) return "Independent judge interrupted; coordinator recovery required";
   const historicalJudge = latestHistoricalJudgeEvidence(job);
   return historicalJudge
-    ? `Latest prior-round verdict — ${historicalJudge.approved ? "Approved" : "Rejected"}: ${historicalJudge.summary}`
+    ? `Latest prior-round verdict — ${historicalJudge.approved ? "approved" : "rejected"}`
     : "Independent judge has not started for this handoff round";
+}
+
+function actionSubject(failureClass: RemediationFailureClass): string {
+  return ({ worker_ci: "Implementation checks", candidate_ci: "Candidate verification", judge_changes: "Independent review",
+    conflict: "Integration conflict", post_merge_ci: "Post-merge verification", infrastructure: "Review infrastructure" } as Record<string, string>)[failureClass]
+    || "Review";
 }
 function hasRebaseConflictEvidence(job: AgentJob): boolean {
   if (job.review?.status !== "conflict") return false;
@@ -113,7 +118,9 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
   const productCiRunning = reviewActive && status === "ci_running" && preparedForCurrentRound && !currentCiPublished && !activeRetry;
   const active = genuineWorker || reviewActive;
   const rebaseConflict = hasRebaseConflictEvidence(job);
-  const conflictRepairing = rebaseConflict && (genuineWorker || action?.failureClass === "conflict" && action.state === "repairing");
+  const conflictRepairing = rebaseConflict && genuineWorker;
+  const conflictRepairClaimed = rebaseConflict && !genuineWorker
+    && action?.failureClass === "conflict" && action.state === "repairing";
   const conflictActionRequired = rebaseConflict && action?.failureClass === "conflict" && ["pending", "exhausted"].includes(action.state);
   const freshHandoffAfterBase = !!review?.reviewBaseRef && !!job.handoff
     && ["handoff_received", "queued"].includes(status || "")
@@ -128,10 +135,12 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
   // Top-level worker and verified terminal dispositions override stale review phases.
   if (["queued", "interrupted", "needs_attention", "failed", "cancelled"].includes(job.status)) {
     headline = job.status === "queued" ? "Awaiting worker" : "Review blocked";
-    const attentionDetail = action && ["pending", "exhausted"].includes(action.state) ? action.evidence.detail : job.recoveryIssue;
-    const safeAttention = attentionDetail?.trim().split("\n")[0]?.slice(0, 180);
-    guidance = job.status === "interrupted" ? "Worker was interrupted; coordinator action is required."
-      : job.status === "needs_attention" ? safeAttention ? `Worker needs coordinator attention: ${safeAttention}` : "Worker needs coordinator attention."
+    guidance = job.status === "interrupted" ? action?.state === "repairing"
+      ? `${actionSubject(action.failureClass)} repair is claimed but the worker is interrupted; awaiting coordinator recovery.`
+      : "Worker was interrupted; coordinator action is required."
+      : job.status === "needs_attention" ? action
+        ? `${actionSubject(action.failureClass)} requires coordinator attention; open technical evidence for exact diagnostics.`
+        : "Worker needs coordinator attention."
       : job.status === "failed" ? "Worker failed before review could continue."
       : job.status === "cancelled" ? "Worker was cancelled."
       : "Worker is queued and has not produced a fresh handoff.";
@@ -202,15 +211,17 @@ export function reviewPipeline(job: AgentJob, activityReady = true): ReviewPipel
       ? "Rebase conflict repair attempts are exhausted; coordinator action is required."
       : "Rebase conflict repair is required; awaiting coordinator action.";
   } else if (conflictRepairing) {
-    headline = "Review blocked"; guidance = "Worker is resolving a rebase conflict; merge remains blocked.";
+    headline = "Review blocked"; guidance = "Worker is resolving an integration conflict; merge remains blocked.";
+  } else if (conflictRepairClaimed) {
+    headline = "Repair claimed"; guidance = "Integration conflict repair is claimed; awaiting worker resume or coordinator recovery.";
   } else if (rebaseConflict) {
     headline = "Action required"; guidance = "A rebase conflict is recorded; coordinator action is required before repair can continue.";
   } else if (["blocked", "failed", "needs_attention", "conflict"].includes(status || "")) {
-    headline = "Action required";
-    const blocker = (action?.evidence.detail || review?.error || job.recoveryIssue)?.trim().split("\n")[0]?.slice(0, 180);
-    guidance = blocker ? `Review is blocked: ${blocker}` : action
-      ? `${action.failureClass.replaceAll("_", " ")} requires coordinator action before review can continue.`
-      : "Coordinator action is required before review can continue.";
+    headline = action?.state === "repairing" ? "Repair claimed" : "Action required";
+    guidance = action?.state === "repairing"
+      ? `${actionSubject(action.failureClass)} repair is claimed; awaiting worker resume or coordinator recovery.`
+      : action ? `${actionSubject(action.failureClass)} requires coordinator action before review can continue; exact diagnostics are in technical evidence.`
+      : "Coordinator action is required before review can continue; exact diagnostics are in technical evidence.";
   }
 
   const phase = status ? rank[status] : 0;

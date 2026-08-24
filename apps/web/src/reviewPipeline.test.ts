@@ -28,6 +28,15 @@ test("ready for review is explicitly distinct from active coordinator review", (
   assert.equal(judging.stages.find((item) => item.tone === "active")?.label, "Independent judge");
 });
 
+test("no-handoff completed job truthfully awaits worker evidence without activity", () => {
+  const value = job(); value.handoff = undefined;
+  const pipeline = reviewPipeline(value);
+  assert.equal(pipeline.headline, "Awaiting worker handoff");
+  assert.match(pipeline.guidance, /No fresh handoff is available/);
+  assert.equal(pipeline.active, false);
+  assert.equal(pipeline.stages.some((item) => item.tone === "active"), false);
+});
+
 test("current-round queued judge claim remains claimed across disconnect without false activity", () => {
   for (const status of ["queued", "handoff_received"] as const) {
     const claimed = job(status); claimed.review!.judgeHandoffRound = claimed.handoff!.round;
@@ -73,8 +82,8 @@ test("conflicted integration does not erase specific production failure guidance
     ["ci_failed", /CI failed; repair is required/i, "ci"],
     ["rejected", /Judge rejected/, "judge"],
     ["post_ci_failed", /Post-merge CI failed/, "verification"],
-    ["blocked", /blocked exact diagnostic/i, "merge"],
-    ["failed", /failed exact diagnostic/i, "merge"],
+    ["blocked", /Coordinator action.*exact diagnostics/i, "merge"],
+    ["failed", /Coordinator action.*exact diagnostics/i, "merge"],
   ];
   for (const [status, guidance, failedStage] of cases) {
     const value = job(status); value.integration = { status: "conflicted" }; value.review!.error = `${status} exact diagnostic`;
@@ -93,7 +102,8 @@ test("action-required evidence marks its specific repair and failed stage withou
   const value = job("blocked"); value.integration = { status: "conflicted" };
   value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "ci-action", actions: [{ id: "ci-action", failureClass: "candidate_ci", fingerprint: "f", state: "pending", attempt: 1, maxAttempts: 2, createdAt: 3_000, updatedAt: 3_500, evidence: { detail: "candidate check failed" } }] };
   const pipeline = reviewPipeline(value);
-  assert.match(pipeline.guidance, /candidate check failed/i);
+  assert.match(pipeline.guidance, /Candidate verification requires coordinator action/i);
+  assert.doesNotMatch(pipeline.guidance, /candidate check failed/i);
   assert.equal(pipeline.stages.find((item) => item.id === "ci")?.tone, "blocked");
   assert.equal(pipeline.stages.find((item) => item.id === "repair")?.tone, "blocked");
   assert.doesNotMatch(pipeline.guidance, /rebase conflict/i);
@@ -164,7 +174,8 @@ test("current-round verdict published during judging is terminal evidence, not a
     const value = job("judging"); value.review!.judgeHandoffRound = 1; value.review!.judge = verdict(approved ? "Current approval" : "Current rejection", approved);
     const pipeline = reviewPipeline(value);
     assert.equal(stage(value, "judge").tone, approved ? "complete" : "failed");
-    assert.match(stage(value, "judge").summary, new RegExp(approved ? "Approved: Current approval" : "Rejected: Current rejection"));
+    assert.match(stage(value, "judge").summary, new RegExp(approved ? "Approved current handoff round" : "Rejected; implementation changes required"));
+    assert.doesNotMatch(stage(value, "judge").summary, /Current approval|Current rejection/);
     assert.equal(pipeline.stages.some((item) => item.tone === "active"), false);
     assert.match(pipeline.guidance, /awaiting durable coordinator transition/i);
   }
@@ -202,7 +213,8 @@ test("latest judge survives remediation and superseded outcomes remain terminal"
   ] };
   assert.equal(latestJudgeEvidence(value), undefined);
   assert.equal(latestHistoricalJudgeEvidence(value), preserved);
-  assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*Fresh approval required/);
+  assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*rejected/i);
+  assert.doesNotMatch(stage(value, "judge").summary, /Fresh approval required/);
   assert.equal(stage(value, "judge").tone, "waiting");
 
   value.integration = { status: "superseded" };
@@ -222,7 +234,8 @@ test("fresh handoff and pre-judge CI never promote resolved prior remediation ve
     value.review!.reviewBaseRef = "base";
     value.review!.remediation = { maxAttempts: 2, rounds: {}, actions: [{ id: "old", failureClass: "judge_changes", fingerprint: "f", state: "resolved", attempt: 1, maxAttempts: 2, createdAt: 2, updatedAt: 3, evidence: { detail: "old rejection", judge: verdict("Prior rejected verdict") } }] };
     assert.equal(latestJudgeEvidence(value), undefined);
-    assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*Prior rejected verdict/i);
+    assert.match(stage(value, "judge").summary, /Latest prior-round verdict.*rejected/i);
+    assert.doesNotMatch(stage(value, "judge").summary, /Prior rejected verdict/i);
     assert.equal(stage(value, "judge").tone, "waiting");
   }
 });
@@ -251,12 +264,13 @@ test("interrupted judge infrastructure evidence is surfaced without inventing a 
   const value = job("blocked");
   value.review!.transitions = [{ status: "judging", at: 3_000 }, { status: "blocked", at: 4_000 }];
   value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "infra", actions: [{ id: "infra", failureClass: "infrastructure", fingerprint: "f", state: "pending", attempt: 1, maxAttempts: 2, createdAt: 4_000, updatedAt: 4_000, evidence: { detail: "Judge process interrupted" } }] };
-  assert.match(stage(value, "judge").summary, /Interrupted: Judge process interrupted/);
+  assert.match(stage(value, "judge").summary, /judge interrupted.*coordinator recovery/i);
+  assert.doesNotMatch(stage(value, "judge").summary, /Judge process interrupted/);
   assert.equal(stage(value, "judge").tone, "blocked");
   assert.doesNotMatch(stage(value, "judge").summary, /has not started/);
 });
 
-test("pending conflict requests action while repairing conflict reports active repair", () => {
+test("repair claims remain inactive until the worker is genuinely running", () => {
   const conflict = (state: "pending" | "repairing", top: AgentJob["status"] = "completed") => {
     const value = job("conflict", top); value.integration = { status: "conflicted" }; value.review!.error = "Worker rebase onto main conflicts";
     value.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "conflict", actions: [{ id: "conflict", failureClass: "conflict", fingerprint: "f", state, attempt: 1, maxAttempts: 2, createdAt: 3_000, updatedAt: 4_000, evidence: { detail: "rebase conflict" } }] };
@@ -264,8 +278,25 @@ test("pending conflict requests action while repairing conflict reports active r
   };
   assert.match(reviewPipeline(conflict("pending")).guidance, /awaiting coordinator action/i);
   assert.doesNotMatch(reviewPipeline(conflict("pending")).guidance, /worker is resolving/i);
-  assert.match(reviewPipeline(conflict("repairing")).guidance, /worker is resolving/i);
-  assert.match(reviewPipeline(conflict("repairing", "running")).guidance, /same worktree/i);
+  const claimedConflict = reviewPipeline(conflict("repairing"));
+  assert.match(claimedConflict.guidance, /repair is claimed.*awaiting worker resume/i);
+  assert.doesNotMatch(claimedConflict.guidance, /worker is resolving/i);
+  assert.equal(claimedConflict.active, false);
+  assert.equal(claimedConflict.stages.some((item) => item.tone === "active"), false);
+  const runningConflict = reviewPipeline(conflict("repairing", "running"));
+  assert.match(runningConflict.guidance, /worker is resolving.*same worktree/i);
+  assert.equal(runningConflict.active, true);
+
+  const source = job("feedback_sent");
+  source.review!.remediation = { maxAttempts: 2, rounds: {}, currentActionId: "source", actions: [{ id: "source", failureClass: "worker_ci", fingerprint: "f", state: "repairing", attempt: 1, maxAttempts: 2, createdAt: 3_000, updatedAt: 4_000, evidence: { detail: "exact command and path" } }] };
+  assert.equal(reviewPipeline(source).active, false);
+  assert.equal(reviewPipeline(source).stages.some((item) => item.tone === "active"), false);
+  source.status = "interrupted";
+  assert.equal(reviewPipeline(source).active, false);
+  assert.match(reviewPipeline(source).guidance, /repair is claimed.*worker is interrupted/i);
+  source.status = "running";
+  assert.equal(reviewPipeline(source).active, true);
+  assert.match(reviewPipeline(source).guidance, /Worker is repairing feedback/);
 });
 
 test("target advancement and a fresh handoff invalidate an older prepared base", () => {
@@ -283,7 +314,8 @@ test("fresh active rounds label retained checks and verdicts as historical", () 
   assert.match(stage(ci, "ci").summary, /^Historical prior-round evidence/);
   assert.equal(stage(ci, "ci").durationMs, undefined);
   const judging = job("judging"); judging.review!.judge = verdict("Old rejection");
-  assert.match(stage(judging, "judge").summary, /Latest prior-round verdict.*Old rejection/i);
+  assert.match(stage(judging, "judge").summary, /Latest prior-round verdict.*rejected/i);
+  assert.doesNotMatch(stage(judging, "judge").summary, /Old rejection/i);
   assert.equal(stage(judging, "judge").tone, "active");
 });
 
@@ -304,8 +336,8 @@ test("offline judging, pre-merge verification evidence, and needs-attention reas
   const attention = job("blocked", "needs_attention");
   attention.recoveryIssue = "Checkout identity changed\nexact diagnostic";
   attention.review!.remediation = { maxAttempts: 1, rounds: {}, currentActionId: "exhausted", actions: [{ id: "exhausted", failureClass: "infrastructure", fingerprint: "f", state: "exhausted", attempt: 1, maxAttempts: 1, createdAt: 3, updatedAt: 4, evidence: { detail: "Judge backend unavailable" } }] };
-  assert.match(reviewPipeline(attention).guidance, /Judge backend unavailable/);
-  assert.doesNotMatch(reviewPipeline(attention).guidance, /exact diagnostic/);
+  assert.match(reviewPipeline(attention).guidance, /Review infrastructure requires coordinator attention/i);
+  assert.doesNotMatch(reviewPipeline(attention).guidance, /Judge backend unavailable|Checkout identity changed/);
 });
 
 test("durable infrastructure retry target overrides retained completed evidence", () => {
@@ -335,8 +367,8 @@ test("durable infrastructure retry target overrides retained completed evidence"
 test("generic blocked and failed states surface concise human-readable reasons", () => {
   for (const status of ["blocked", "failed"] as const) {
     const value = job(status); value.integration = { status: "conflicted" }; value.review!.error = "Target branch moved while checks ran\nopaque diagnostics";
-    assert.match(reviewPipeline(value).guidance, /Review is blocked: Target branch moved while checks ran/);
-    assert.doesNotMatch(reviewPipeline(value).guidance, /opaque diagnostics/);
+    assert.match(reviewPipeline(value).guidance, /Coordinator action.*exact diagnostics/i);
+    assert.doesNotMatch(reviewPipeline(value).guidance, /Target branch moved|opaque diagnostics/);
   }
 });
 

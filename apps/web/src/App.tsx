@@ -1010,7 +1010,7 @@ export function App() {
             >
               <div className="transcript-content" ref={transcriptContentRef}>
               {activeJob && <ReviewStatusPanel job={activeJob} activityReady={activityReady} />}
-              {activeJob?.recoveryIssue && <div className="recovery-notice">{activeJob.recoveryIssue}</div>}
+              {activeJob?.recoveryIssue && <div className="recovery-notice">Recovery needs coordinator attention. Open technical review evidence for exact diagnostics.</div>}
               {!rows.length && (
                 <div className="empty-view">
                   {active.kind === "coordinator" ? "Type a prompt to start." : "Worker is starting."}
@@ -1331,6 +1331,8 @@ function reviewTechnicalEvidence(job: AgentJob): string {
   const lines = [
     job.handoff && `handoff diff sha256 ${job.handoff.diffSha256}\nbranch ${job.handoff.branch}\nworktree ${job.handoff.worktree}`,
     review?.reviewBaseRef && `review base ${review.reviewBaseRef}`,
+    job.recoveryIssue && `recovery issue\n${job.recoveryIssue}`,
+    job.error && `worker error\n${job.error}`,
     review?.error && `review error\n${review.error}`,
     ...(review?.remediation?.actions || []).map((action) => `remediation action\n${JSON.stringify(action, null, 2)}`),
     ...(review?.ci || []).map((check) => `CI command: ${check.command}\nexit ${check.exitCode}\n${check.output}`),
