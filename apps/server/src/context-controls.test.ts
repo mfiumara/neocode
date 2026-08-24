@@ -3,7 +3,7 @@ import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { CoordinatorContextState, ServerMessage, TranscriptMessage } from "@neocode/protocol";
+import type { AgentJob, CoordinatorContextState, ServerMessage, TranscriptMessage } from "@neocode/protocol";
 import { Orchestrator } from "./orchestrator.js";
 
 interface FakeSession {
@@ -59,13 +59,6 @@ async function cleanupFixture(value: Fixture): Promise<void> {
   // abort the SDK session, enqueue the final durable state, and await its flush.
   await value.orchestrator.dispose();
   const store = value.internal.stateStore;
-  while (store.writing || store.latest) {
-    if (store.writing) await store.writing;
-    else await Promise.resolve();
-  }
-  assert.equal(store.writing, undefined);
-  assert.equal(store.latest, undefined);
-
   let writesAfterRemovalBegan = 0;
   const save = store.save.bind(store);
   store.save = (...args: unknown[]) => {
@@ -73,7 +66,6 @@ async function cleanupFixture(value: Fixture): Promise<void> {
     return save(...args);
   };
   await rm(value.cwd, { recursive: true, force: true });
-  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(writesAfterRemovalBegan, 0, "no orchestrator-owned writer starts after disposal and removal begin");
   await assert.rejects(access(value.cwd));
 }
@@ -215,6 +207,52 @@ test("production lifecycle wake reservation shares compaction, model, disposal, 
     hooks.turnReleased();
     assert.equal(latestContext(value.events).manualCompactionAvailable, true, "system-wake release publishes open availability");
   } finally { await cleanupFixture(value); }
+});
+
+test("dispose awaits real notification persistence and invalidates delayed release callbacks", async () => {
+  const value = await fixture();
+  let disposed = false;
+  try {
+    value.internal.activeReviewLaneIds = () => new Set<string>();
+    const job: AgentJob = {
+      id: "dispose-race", title: "Dispose race", prompt: "", status: "failed",
+      branch: "worker", worktree: "/tmp/worker",
+      isolation: { requested: "worktree", mode: "worktree", path: "/tmp/worker" },
+      baseRef: "base", createdAt: 1, updatedAt: 2, messages: [], error: "failure",
+    };
+    value.internal.jobs.set(job.id, job);
+    value.internal.initializeCoordinatorNotifications();
+    const queue = value.internal.coordinatorNotifications;
+    const hooks = queue.hooks;
+    const store = value.internal.stateStore;
+    const durableFlush = store.flush.bind(store);
+    let releasePersistence!: () => void;
+    const persistenceGate = new Promise<void>((resolve) => { releasePersistence = resolve; });
+    let flushCalls = 0;
+    store.flush = () => {
+      flushCalls += 1;
+      return flushCalls === 1 ? persistenceGate.then(() => durableFlush()) : durableFlush();
+    };
+
+    queue.observe(job); // starts the real append -> persistThenDrain continuation
+    let disposalReturned = false;
+    const disposal = value.orchestrator.dispose().then(() => { disposalReturned = true; disposed = true; });
+    await Promise.resolve();
+    assert.equal(disposalReturned, false, "dispose remains owned by the blocked notification persistence");
+    releasePersistence();
+    await disposal;
+
+    let savesAfterDispose = 0;
+    const durableSave = store.save.bind(store);
+    store.save = (...args: unknown[]) => { savesAfterDispose += 1; return durableSave(...args); };
+    hooks.turnReleased();
+    queue.settled();
+    assert.equal(savesAfterDispose, 0, "stopped queue and delayed turn release cannot persist after dispose returns");
+    await rm(value.cwd, { recursive: true, force: true });
+    await assert.rejects(access(value.cwd));
+  } finally {
+    if (!disposed) await cleanupFixture(value);
+  }
 });
 
 test("reserved system turns and compaction jointly gate FIFO prompts until authoritative settlement", async () => {

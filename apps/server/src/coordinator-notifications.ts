@@ -102,6 +102,9 @@ export class CoordinatorNotificationQueue {
   private settlement?: Promise<void>;
   private releaseTurn?: () => void;
   private stopped = false;
+  private drainRun?: Promise<void>;
+  private suppressNextDrain = false;
+  private readonly persistenceRuns = new Set<Promise<void>>();
 
   constructor(
     readonly state: CoordinatorNotificationState,
@@ -197,7 +200,9 @@ export class CoordinatorNotificationQueue {
       this.state.events.splice(removable, 1);
     }
     this.hooks.append(event);
-    void this.persistThenDrain();
+    const persistence = this.persistThenDrain();
+    this.persistenceRuns.add(persistence);
+    void persistence.finally(() => this.persistenceRuns.delete(persistence));
   }
 
   private async persistThenDrain(): Promise<void> {
@@ -207,7 +212,19 @@ export class CoordinatorNotificationQueue {
       this.persistenceBlocked = true;
       return;
     }
-    void this.drain();
+    this.requestDrain();
+  }
+
+  private requestDrain(): void {
+    if (this.stopped || this.drainRun) return;
+    const run = this.drain();
+    this.drainRun = run;
+    void run.finally(() => {
+      if (this.drainRun === run) this.drainRun = undefined;
+      const suppressed = this.suppressNextDrain;
+      this.suppressNextDrain = false;
+      if (!this.stopped && !suppressed && !this.persistenceBlocked && this.hasPendingWake() && this.hooks.isIdle()) this.requestDrain();
+    });
   }
 
   hasPendingWake(): boolean {
@@ -219,14 +236,24 @@ export class CoordinatorNotificationQueue {
     const event = this.activeEventId && this.state.events.find((entry) => entry.id === this.activeEventId);
     if (event && !this.isSettled(event)) {
       this.settlement ??= this.commitSettlement(event);
-      void this.settlement.then(() => this.drain(), () => undefined);
-    } else void this.drain();
+      void this.settlement.then(() => this.requestDrain(), () => undefined);
+    } else this.requestDrain();
   }
 
-  settled(): void { void this.drain(); }
+  settled(): void { this.requestDrain(); }
 
-  /** Release synchronous turn ownership during backend shutdown without starting more work. */
-  shutdown(): void { this.stopped = true; this.releaseReservation(false); }
+  /** Stop new work and resolve only after every already-owned continuation settles. */
+  async shutdown(): Promise<void> {
+    this.stopped = true;
+    this.releaseReservation(false);
+    while (this.drainRun || this.settlement || this.persistenceRuns.size) {
+      await Promise.allSettled([
+        ...this.persistenceRuns,
+        ...(this.drainRun ? [this.drainRun] : []),
+        ...(this.settlement ? [this.settlement] : []),
+      ]);
+    }
+  }
 
   private releaseReservation(notify = true): void {
     const release = this.releaseTurn;
@@ -287,6 +314,7 @@ export class CoordinatorNotificationQueue {
     if (!event) return;
     this.draining = true;
     let wakeFailed = false;
+    let reservationBlocked = false;
     try {
       if (!this.isCurrent(event)) {
         // Keep text/raw evidence byte-for-byte intact; only settle its obsolete
@@ -298,7 +326,10 @@ export class CoordinatorNotificationQueue {
       // Turn ownership is synchronous and precedes the first asynchronous claim
       // write, so a queued user prompt cannot enter Pi during this TOCTOU window.
       const reservation = this.hooks.reserveTurn?.(event);
-      if (this.hooks.reserveTurn && !reservation) return;
+      if (this.hooks.reserveTurn && !reservation) {
+        reservationBlocked = true;
+        return;
+      }
       this.releaseTurn = reservation || (() => undefined);
       if (!this.isCurrent(event)) {
         await this.commitSettlement(event);
@@ -347,7 +378,10 @@ export class CoordinatorNotificationQueue {
     } finally {
       this.releaseReservation();
       this.draining = false;
-      if (!wakeFailed && !this.persistenceBlocked && this.isSettled(event) && this.hooks.isIdle()) void this.drain();
+      // The tracked drain wrapper starts the next pending event only after this
+      // run has fully released its reservation and cleared drainRun. A failed
+      // wake remains pending for a later external settled()/restart trigger.
+      this.suppressNextDrain = wakeFailed || reservationBlocked;
     }
   }
 }

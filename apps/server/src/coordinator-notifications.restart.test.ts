@@ -21,7 +21,13 @@ type ProductionHarness = {
   notificationState: CoordinatorNotificationState;
   coordinatorMessages: TranscriptMessage[];
   coordinatorNotifications?: CoordinatorNotificationQueue;
-  coordinator: { isIdle: boolean; prompt(content: string): Promise<void> };
+  coordinator: {
+    isIdle: boolean;
+    prompt(content: string): Promise<void>;
+    abort(): Promise<void>;
+    dispose(): void;
+  };
+  dispose(): Promise<void>;
   jobs: Map<string, AgentJob>;
   stateStore: RuntimeStateStore;
   initializeCoordinatorNotifications(): void;
@@ -35,6 +41,8 @@ function productionHarness(root: string, wakes: string[]): ProductionHarness {
   harness.coordinator = {
     isIdle: true,
     async prompt(content: string) { wakes.push(content); },
+    async abort() { /* test session has no provider work */ },
+    dispose() { /* test session owns no external resources */ },
   };
   return harness;
 }
@@ -49,9 +57,11 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 
 test("production persistence preserves compacted settlements and redelivers only an uncommitted claim", async () => {
   const root = await mkdtemp(join(tmpdir(), "neocode-production-notification-restart-"));
+  let first: ProductionHarness | undefined;
+  let restarted: ProductionHarness | undefined;
   try {
     const firstWakes: string[] = [];
-    const first = productionHarness(root, firstWakes);
+    first = productionHarness(root, firstWakes);
     const settledJob = failedJob("settled-job");
     const claimJob = failedJob("claim-job");
     first.jobs.set(settledJob.id, settledJob);
@@ -61,7 +71,7 @@ test("production persistence preserves compacted settlements and redelivers only
     // Observe and settle through the same queue, append, wake, persistence, and
     // RuntimeStateStore hooks used by Orchestrator.initialize().
     first.coordinatorNotifications!.observe(settledJob);
-    await waitUntil(() => first.notificationState.events[0]?.wakeState === "delivered");
+    await waitUntil(() => first!.notificationState.events[0]?.wakeState === "delivered");
     await first.stateStore.flush();
     assert.equal(firstWakes.length, 1);
     const settled = structuredClone(first.notificationState.events[0]!);
@@ -85,13 +95,17 @@ test("production persistence preserves compacted settlements and redelivers only
       "actual Orchestrator.persist envelope must carry permanent settlement authority");
 
     const restartWakes: string[] = [];
-    const restarted = productionHarness(root, restartWakes);
+    // The first process must quiesce before the replacement process owns the
+    // same runtime directory, exactly as backend restart sequencing requires.
+    await first.dispose();
+    first = undefined;
+    restarted = productionHarness(root, restartWakes);
     restarted.coordinatorMessages.push(...loaded.coordinator.messages);
     for (const entry of loaded.jobs) restarted.jobs.set(entry.job.id, entry.job);
     restarted.restoreCoordinatorNotificationState(loaded.coordinatorNotifications);
     restarted.initializeCoordinatorNotifications();
     restarted.coordinatorNotifications!.settled();
-    await waitUntil(() => restarted.notificationState.events[1]?.wakeState === "delivered");
+    await waitUntil(() => restarted!.notificationState.events[1]?.wakeState === "delivered");
     await restarted.stateStore.flush();
 
     assert.equal(restartWakes.length, 1, "only the genuinely uncommitted claim redelivers");
@@ -101,6 +115,8 @@ test("production persistence preserves compacted settlements and redelivers only
     assert.deepEqual(restarted.coordinatorMessages, transcriptBeforeRestart,
       "settled duplicate adds neither a wake nor duplicate transcript append after restart");
   } finally {
+    await restarted?.dispose();
+    await first?.dispose();
     await rm(root, { recursive: true, force: true });
   }
 });

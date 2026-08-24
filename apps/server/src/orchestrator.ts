@@ -179,6 +179,7 @@ function slug(value: string): string {
 export class Orchestrator {
   private readonly jobs = new Map<string, AgentJob>();
   private readonly workers = new Map<string, RunningWorker>();
+  private readonly workerRuns = new Set<Promise<void>>();
   private readonly workerConfigs = new Map<string, WorkerConfig>();
   private readonly workerTimelines = new Map<string, ActivityTimeline>();
   private readonly coordinatorMessages: TranscriptMessage[] = [];
@@ -214,6 +215,7 @@ export class Orchestrator {
   private disposing = false;
   private modelRuntime!: ModelRuntime;
   private coordinator!: AgentSession;
+  private coordinatorUnsubscribe?: () => void;
   private completionPipeline!: CompletionPipeline;
   readonly #coordinatorMergeCapability = Symbol("main coordinator guarded integration");
   private readonly operationLock = new OperationLock();
@@ -223,6 +225,7 @@ export class Orchestrator {
   private janitorRun?: Promise<void>;
   private sweepTimer?: NodeJS.Timeout;
   private sweepScheduled = false;
+  private sweepSchedule?: Promise<void>;
   private sweepRun?: Promise<void>;
   private readonly sweepJobIds = new Set<string>();
   private readonly maintenanceConfig: Required<MaintenanceConfig>;
@@ -554,6 +557,7 @@ export class Orchestrator {
   }
 
   async prompt(text: string, context: string[] = [], attachments: ImageAttachment[] = [], requestId?: string): Promise<void> {
+    if (this.disposing) throw new Error("The coordinator is shutting down.");
     const messageId = requestId || id();
     // A reconnecting client may retry an accepted command. Its client id is the
     // durable idempotency key, so neither transcript nor queue can duplicate it.
@@ -836,17 +840,23 @@ export class Orchestrator {
   async dispose(): Promise<void> {
     this.disposing = true;
     this.publishCoordinatorContext();
+    this.coordinatorUnsubscribe?.();
+    this.coordinatorUnsubscribe = undefined;
     if (this.coordinatorCompacting) this.coordinator.abortCompaction();
+    const notificationShutdown = this.coordinatorNotifications?.shutdown() ?? Promise.resolve();
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
     if (this.janitorTimer) clearInterval(this.janitorTimer);
     if (this.sweepTimer) clearInterval(this.sweepTimer);
-    await this.janitorRun;
+    await Promise.allSettled([this.janitorRun, this.sweepSchedule]);
+    await this.sweepRun;
 
     this.setCoordinatorActivity(undefined, "interrupted");
-    this.coordinatorNotifications?.shutdown();
 
+    // Aborting releases any Pi prompt awaited by the prompt or notification
+    // drains. Await those owned continuations before the final durable write.
     await this.coordinator.abort().catch(() => undefined);
+    await Promise.allSettled([this.promptDrain, notificationShutdown]);
     for (const [jobId, worker] of this.workers) {
       worker.cancelled = true;
       await worker.session.abort().catch(() => undefined);
@@ -863,6 +873,7 @@ export class Orchestrator {
         this.finishAttempt(job, "Backend shutdown interrupted this attempt.");
       }
     }
+    await Promise.allSettled([...this.workerRuns]);
     this.workers.clear();
     this.coordinator.dispose();
     this.coordinatorStatus = "idle";
@@ -939,7 +950,7 @@ export class Orchestrator {
     job.recovery!.leaseAcquiredAt = Date.now();
     job.attempts!.push({ number: 1, generation: 1, token, reason: "initial", startedAt: Date.now() });
     this.publishJob(job);
-    void this.runWorker(job, attachments, { generation: 1, token, resume: false });
+    this.startWorkerRun(job, attachments, { generation: 1, token, resume: false });
     return job;
   }
 
@@ -1027,7 +1038,7 @@ export class Orchestrator {
     let streaming: TranscriptMessage | undefined;
     let emitted = false;
     let lastAssistantMessageId: string | undefined;
-    this.coordinator.subscribe((event) => {
+    this.coordinatorUnsubscribe = this.coordinator.subscribe((event) => {
       if (event.type === "agent_start") {
         lastAssistantMessageId = undefined;
         this.coordinatorStatus = "running";
@@ -1137,6 +1148,17 @@ export class Orchestrator {
     });
   }
 
+  private startWorkerRun(
+    job: AgentJob,
+    attachments: ImageAttachment[],
+    attempt: { generation: number; token: string; resume: boolean },
+  ): void {
+    if (this.disposing) return;
+    const run = this.runWorker(job, attachments, attempt);
+    this.workerRuns.add(run);
+    void run.finally(() => this.workerRuns.delete(run));
+  }
+
   private async runWorker(
     job: AgentJob,
     attachments: ImageAttachment[] = [],
@@ -1144,7 +1166,7 @@ export class Orchestrator {
   ): Promise<void> {
     let session: AgentSession | undefined;
     try {
-      if (!this.isCurrentAttempt(job, attempt.generation, attempt.token) || this.workers.has(job.id)) return;
+      if (this.disposing || !this.isCurrentAttempt(job, attempt.generation, attempt.token) || this.workers.has(job.id)) return;
       const loader = new DefaultResourceLoader({
         cwd: job.isolation.path,
         agentDir: getAgentDir(),
@@ -1181,7 +1203,7 @@ export class Orchestrator {
         sessionManager: workerManager,
       });
       session = result.session;
-      if (!this.isCurrentAttempt(job, attempt.generation, attempt.token) || this.workers.has(job.id)) {
+      if (this.disposing || !this.isCurrentAttempt(job, attempt.generation, attempt.token) || this.workers.has(job.id)) {
         session.dispose();
         return;
       }
@@ -1215,7 +1237,7 @@ export class Orchestrator {
       if (job.review) this.completionPipeline.nextHandoff(job);
       else this.completionPipeline.enqueue(job);
     } catch (error) {
-      if (this.workers.get(job.id)?.cancelled || job.status === "cancelled"
+      if (this.disposing || this.workers.get(job.id)?.cancelled || job.status === "cancelled"
         || !this.isCurrentAttempt(job, attempt.generation, attempt.token)) return;
       job.status = "failed";
       this.finishWorker(job);
@@ -1244,7 +1266,7 @@ export class Orchestrator {
     };
 
     session.subscribe((event) => {
-      if (!this.isCurrentAttempt(job, generation, token)) return;
+      if (this.disposing || !this.isCurrentAttempt(job, generation, token)) return;
       if (event.type === "agent_start") setActivity(activity("starting", `Starting · attempt ${job.attempts?.length || 1}`));
       else if (event.type === "message_start") {
         const role = roleOf(event.message);
@@ -1621,13 +1643,19 @@ export class Orchestrator {
   }
 
   private scheduleBacklogSweep(): void {
-    if (this.sweepScheduled) return;
+    if (this.disposing || this.sweepScheduled) return;
     this.sweepScheduled = true;
-    queueMicrotask(() => {
+    let scheduled!: Promise<void>;
+    scheduled = new Promise<void>((resolve) => queueMicrotask(() => {
       this.sweepScheduled = false;
-      if (this.sweepRun) return;
-      this.sweepRun = this.runBacklogSweep().finally(() => { this.sweepRun = undefined; });
+      if (!this.disposing && !this.sweepRun) {
+        this.sweepRun = this.runBacklogSweep().finally(() => { this.sweepRun = undefined; });
+      }
+      resolve();
+    })).finally(() => {
+      if (this.sweepSchedule === scheduled) this.sweepSchedule = undefined;
     });
+    this.sweepSchedule = scheduled;
   }
 
   private async assessIntegrationComplexity(job: AgentJob): Promise<number> {
@@ -1995,7 +2023,7 @@ export class Orchestrator {
     // process can execute tools. Stale callbacks are ignored by generation.
     this.publishJob(job);
     await this.stateStore.flush();
-    void this.runWorker(job, [], { generation, token, resume: true });
+    this.startWorkerRun(job, [], { generation, token, resume: true });
   }
 
   private isCurrentAttempt(job: AgentJob, generation: number, token: string): boolean {
