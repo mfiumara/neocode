@@ -10,6 +10,7 @@ import type { AgentJob, CheckEvidence, JudgeEvidence } from "@neocode/protocol";
 import {
   CANONICAL_DIFF_COMMAND,
   CompletionPipeline,
+  classifyProductCiEvidence,
   detectedCommands,
   LocalReviewAdapter,
   PipelineError,
@@ -37,27 +38,24 @@ test("recognized executed npm test remains product CI despite custom or environm
   const custom = new LocalReviewAdapter("/root", { targetBranch: "main", command: "custom-ci", judge: async (_job, _diff, hash) => verdict(hash) });
   assert.deepEqual(custom.productCiEvidence([failedTest]).map((check) => check.command), ["npm test"]);
 
-  const previous = process.env.NEOCODE_CI_COMMAND;
-  process.env.NEOCODE_CI_COMMAND = "stale-environment-ci";
-  try {
-    const environment = new LocalReviewAdapter("/root", { targetBranch: "main", judge: async (_job, _diff, hash) => verdict(hash) });
-    assert.deepEqual(environment.productCiEvidence([failedTest]).map((check) => check.command), ["npm test"]);
-  } finally {
-    if (previous === undefined) delete process.env.NEOCODE_CI_COMMAND;
-    else process.env.NEOCODE_CI_COMMAND = previous;
-  }
+  assert.deepEqual(classifyProductCiEvidence([failedTest], "stale-environment-ci").map((check) => check.command), ["npm test"],
+    "an environment-derived configured command cannot hide an already executed required command");
 
-  class ConfiguredFailureAdapter extends FakeAdapter {
-    override async runCi(): Promise<CheckEvidence[]> { this.ciCalls += 1; return [failedTest]; }
-    productCiEvidence(checks: CheckEvidence[]): CheckEvidence[] { return custom.productCiEvidence(checks); }
+  const preparation: CheckEvidence = { command: "git rev-parse HEAD", ok: true, exitCode: 0, durationMs: 1, output: "candidate" };
+  class CoordinatorConfiguredAdapter extends LocalReviewAdapter {
+    constructor() { super("/root", { targetBranch: "main", command: "stale-custom-ci", judge: async (_job, _diff, hash) => verdict(hash) }); }
+    override async prepareForReview(): Promise<void> { /* exact candidate preparation is represented by durable evidence below */ }
+    override async runCi(): Promise<CheckEvidence[]> { return [preparation, failedTest]; }
+    override async readDiff(): Promise<string> { return "coordinator prepared diff"; }
   }
   const value = job("recognized-failure");
-  const pipeline = new CompletionPipeline(new ConfiguredFailureAdapter(), () => undefined, "main", "/root", undefined, coordinatorMergeCapability);
+  const pipeline = new CompletionPipeline(new CoordinatorConfiguredAdapter(), () => undefined, "main", "/root", undefined, coordinatorMergeCapability);
   pipeline.enqueue(value); pipeline.startJudge(value); await pipeline.idle();
   assert.equal(value.review?.status, "ci_failed");
   assert.match(value.review?.error || "", /Worker CI failed/);
   assert.doesNotMatch(value.review?.error || "", /No product CI checks configured/);
-  assert.equal(value.review?.ci?.[0]?.purpose, "product_ci");
+  assert.equal(value.review?.ci?.find((check) => check.command === "npm test")?.purpose, "product_ci");
+  assert.equal(value.review?.ci?.find((check) => check.command === preparation.command)?.purpose, "preparation");
 });
 
 test("CI timeout process-group signal failure falls back without crashing the server", async () => {

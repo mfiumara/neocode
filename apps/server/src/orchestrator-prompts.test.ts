@@ -188,7 +188,12 @@ test("terminal persistence failure fails closed without claiming a durable promp
 test("notification claim reservation serializes a real queued user prompt", async () => {
   const root = await mkdtemp(join(tmpdir(), "neocode-notification-user-race-"));
   const calls: string[] = [];
-  const coordinator = { isIdle: true, async prompt(content: string) { calls.push(content); } };
+  const coordinator = {
+    isIdle: true,
+    async prompt(content: string) { calls.push(content); },
+    async abort() { /* no in-flight model operation in this fixture */ },
+    dispose() { /* fixture session owns no external resources */ },
+  };
   type Harness = {
     coordinator: typeof coordinator;
     coordinatorTurnInFlight: boolean;
@@ -197,10 +202,21 @@ test("notification claim reservation serializes a real queued user prompt", asyn
     schedulePromptDrain(): void;
     stateStore: RuntimeStateStore;
   };
+  let orchestrator: Orchestrator | undefined;
+  let queue: CoordinatorNotificationQueue | undefined;
+  let releaseClaim: (() => void) | undefined;
+  let disposalComplete = false;
+  let persistenceBegunAfterDisposal = 0;
+  let savesBegunAfterDisposal = 0;
   try {
-    const orchestrator = new Orchestrator(root, () => undefined, { startup: false, intervalMs: 0, sweepIntervalMs: 0 });
+    orchestrator = new Orchestrator(root, () => undefined, { startup: false, intervalMs: 0, sweepIntervalMs: 0 });
     const harness = orchestrator as unknown as Harness;
     harness.coordinator = coordinator;
+    const durableSave = harness.stateStore.save.bind(harness.stateStore);
+    harness.stateStore.save = (state) => {
+      if (disposalComplete) savesBegunAfterDisposal += 1;
+      durableSave(state);
+    };
     const current: AgentJob = {
       id: "race-job", title: "Race", prompt: "race", status: "completed", branch: "race", worktree: "/tmp/race",
       isolation: { requested: "worktree", mode: "worktree", path: "/tmp/race" }, baseRef: "base",
@@ -213,8 +229,7 @@ test("notification claim reservation serializes a real queued user prompt", asyn
     const notificationState: CoordinatorNotificationState = { events: [], lastSignals: {} };
     let persistCount = 0;
     let claimBlocked = false;
-    let releaseClaim!: () => void;
-    const queue = new CoordinatorNotificationQueue(notificationState, {
+    queue = new CoordinatorNotificationQueue(notificationState, {
       append: () => undefined, currentJob: () => current,
       isIdle: () => coordinator.isIdle,
       reserveTurn: () => {
@@ -224,6 +239,7 @@ test("notification claim reservation serializes a real queued user prompt", asyn
       },
       turnReleased: () => harness.schedulePromptDrain(),
       persist: async () => {
+        if (disposalComplete) persistenceBegunAfterDisposal += 1;
         if (++persistCount === 2) {
           claimBlocked = true;
           await new Promise<void>((resolve) => { releaseClaim = resolve; });
@@ -236,12 +252,12 @@ test("notification claim reservation serializes a real queued user prompt", asyn
     await waitFor(() => claimBlocked);
 
     await orchestrator.prompt("user FIFO", [], [], "user-race");
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.deepEqual(calls, [], "accepted user prompt cannot enter the reserved lifecycle turn");
+    assert.deepEqual(calls, [], "durably accepted user prompt cannot enter the reserved lifecycle turn");
     queue.agentSettled();
     assert.equal(notificationState.events[0]!.wakeState, "claimed", "unrelated settlement cannot acknowledge a not-started wake");
 
     current.review!.remediation!.actions[0]!.state = "repairing";
+    assert.ok(releaseClaim, "blocked claim exposes its authoritative release");
     releaseClaim();
     await waitFor(() => harness.pendingCoordinatorPrompts.length === 0);
     assert.equal(calls.length, 1);
@@ -249,6 +265,16 @@ test("notification claim reservation serializes a real queued user prompt", asyn
     assert.equal(notificationState.events[0]!.wakeState, "delivered", "stale wake settles without a model turn");
     await harness.stateStore.flush();
   } finally {
+    releaseClaim?.();
+    await orchestrator?.dispose();
+    disposalComplete = true;
+    const callsAtDisposal = calls.length;
+    queue?.settled();
+    queue?.agentSettled();
+    await Promise.resolve(); // join continuations synchronously triggered above; no timing delay
+    assert.equal(persistenceBegunAfterDisposal, 0, "no notification persistence callback begins after dispose resolves");
+    assert.equal(savesBegunAfterDisposal, 0, "no runtime save begins after dispose resolves");
+    assert.equal(calls.length, callsAtDisposal, "no reserved model turn begins after dispose resolves");
     await rm(root, { recursive: true, force: true });
   }
 });

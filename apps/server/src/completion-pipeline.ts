@@ -584,9 +584,7 @@ export class LocalReviewAdapter implements ReviewAdapter {
   }
 
   productCiEvidence(checks: CheckEvidence[]): CheckEvidence[] {
-    const explicit = this.options.command || process.env.NEOCODE_CI_COMMAND;
-    return checks.filter((check) => check.command === explicit
-      || /^(?:npm test|npm run (?:check|build))$/.test(check.command));
+    return classifyProductCiEvidence(checks, this.options.command || process.env.NEOCODE_CI_COMMAND);
   }
 
   readDiff(job: AgentJob): Promise<string> {
@@ -736,6 +734,12 @@ export async function readWorktreeDiff(cwd: string, baseRef: string): Promise<st
 }
 
 export const CANONICAL_DIFF_COMMAND = "git diff --binary main...HEAD | shasum -a 256";
+
+/** Recognized required commands remain product evidence if configuration changes after execution. */
+export function classifyProductCiEvidence(checks: CheckEvidence[], configuredCommand?: string): CheckEvidence[] {
+  return checks.filter((check) => check.command === configuredCommand
+    || /^(?:npm test|npm run (?:check|build))$/.test(check.command));
+}
 
 export function candidateGitPacketCommands(targetBranch = "main"): string[] {
   const target = targetBranch === "main" ? "main" : shellQuote(targetBranch);
