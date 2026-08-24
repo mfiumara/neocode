@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +24,29 @@ function fixture(): { root: string; base: string; cleanup(): void } {
   git(root, ["update-ref", "refs/remotes/origin/trunk", base]);
   git(root, ["checkout", "-b", "feature"]);
   return { root, base, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+function rawGit(cwd: string, args: string[]): string { return execFileSync("git", args, { cwd, encoding: "utf8" }); }
+function commitReviewEvidence(root: string, base: string, inconsistentCwd = false): string {
+  const parent = git(root, ["rev-parse", "HEAD"]);
+  const tree = git(root, ["rev-parse", "HEAD^{tree}"]);
+  const at = "2026-08-24T12:00:00.000Z";
+  const output = "verified fixture output\n";
+  const capture = (command: string, cwd = root) => ({ command, cwd, startedAt: at, finishedAt: at, exit: 0, bytes: Buffer.byteLength(output), output, sha256: sha256(output) });
+  const empty = (command: string) => ({ command, cwd: root, startedAt: at, finishedAt: at, exit: 0, bytes: 0, output: "", sha256: sha256("") });
+  const names = rawGit(root, ["diff", "--name-status", `${base}...${parent}`]);
+  const binary = rawGit(root, ["diff", "--binary", `${base}...${parent}`]);
+  const evidence = {
+    version: 1, testedParent: parent, testedTree: tree, base, mergeBase: base,
+    repository: { topLevel: root, testedParent: parent, testedTree: tree }, testCwd: root,
+    commands: [capture("npm test"), capture("npm run check", inconsistentCwd ? `${root}/other` : root), capture("npm run build")],
+    candidatePorcelain: empty("git status --porcelain --untracked-files=all"), rootPorcelain: empty("git status --porcelain --untracked-files=all"),
+    diffCheck: empty(`git diff --check ${base} ${parent}`), nameStatus: { output: names, sha256: sha256(names) },
+    canonicalDiffSha256: sha256(binary), risks: ["fixture portability risk"],
+  };
+  git(root, ["commit", "--allow-empty", "-m", "neocode-review-evidence-v1", "-m", JSON.stringify(evidence)]);
+  return git(root, ["rev-parse", "HEAD"]);
 }
 
 function check(cwd: string, env: Record<string, string> = {}) {
@@ -68,6 +92,29 @@ test("coordinator worktrees report literal main packet commands across the full 
     assert.match(result.stdout, /\$ git diff --check main\.\.\.HEAD\nmain-diff-check output begin\nmain-diff-check output end\nmain-diff-check exit: 0/);
     assert.match(result.stdout, new RegExp(`\\$ git diff --check ${value.base} HEAD`));
   } finally { value.cleanup(); }
+});
+
+test("recognized exact-tree evidence is portable across clones and rejects inconsistent historical cwd metadata", () => {
+  const value = fixture();
+  const cloneParent = mkdtempSync(join(tmpdir(), "neocode-evidence-clone-"));
+  const clone = join(cloneParent, "moved-checkout");
+  try {
+    const evidenceHead = commitReviewEvidence(value.root, value.base);
+    execFileSync("git", ["clone", "--quiet", value.root, clone]);
+    assert.equal(git(clone, ["rev-parse", "HEAD"]), evidenceHead);
+    value.cleanup(); // Verification must not depend on the recorded checkout still existing.
+    const moved = check(clone, { NEOCODE_DIFF_BASE_SHA: value.base });
+    assert.equal(moved.status, 0, moved.stderr);
+    assert.match(moved.stdout, /verified review evidence/);
+
+    commitReviewEvidence(clone, value.base, true);
+    const tampered = check(clone, { NEOCODE_DIFF_BASE_SHA: value.base });
+    assert.equal(tampered.status, 1);
+    assert.match(tampered.stderr, /historical cwd is inconsistent/);
+  } finally {
+    value.cleanup();
+    rmSync(cloneParent, { recursive: true, force: true });
+  }
 });
 
 test("recognized exact-tree evidence fails closed when malformed", () => {

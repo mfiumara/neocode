@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, normalize, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 export const EVIDENCE_MARKER = "neocode-review-evidence-v1";
@@ -53,11 +53,31 @@ export function verifyReviewEvidence(cwd = process.cwd()) {
   if (commit(evidence.base, cwd) !== evidence.base || git(["merge-base", evidence.base, "HEAD"], cwd).trim() !== evidence.mergeBase || evidence.mergeBase !== evidence.base) {
     throw new Error("Malformed recognized review evidence: base/merge-base mismatch.");
   }
+  const repository = requireObject(evidence.repository, "repository");
+  const recordedTop = normalize(repository.topLevel || "");
+  const recordedCwd = normalize(evidence.testCwd || "");
+  const outside = relative(recordedTop, recordedCwd);
+  if (!isAbsolute(recordedTop) || !isAbsolute(recordedCwd) || (outside && (outside === ".." || outside.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)))
+    || repository.testedParent !== evidence.testedParent || repository.testedTree !== evidence.testedTree) {
+    throw new Error("Malformed recognized review evidence: invalid or unbound historical repository/cwd identity.");
+  }
   if (!Array.isArray(evidence.commands) || evidence.commands.length !== COMMANDS.length) throw new Error("Malformed recognized review evidence: exact command captures are required.");
   evidence.commands.forEach((capture, index) => {
     verifyCapture(capture, COMMANDS[index], `commands[${index}]`);
-    if (capture.cwd !== cwd) throw new Error(`Malformed recognized review evidence: commands[${index}] cwd mismatch.`);
+    if (normalize(capture.cwd) !== recordedCwd) throw new Error(`Malformed recognized review evidence: commands[${index}] historical cwd is inconsistent.`);
   });
+  if (!Array.isArray(evidence.risks) || !evidence.risks.length || evidence.risks.some((risk) => typeof risk !== "string" || !risk.trim())) {
+    throw new Error("Malformed recognized review evidence: non-empty risks are required.");
+  }
+  const nameStatus = git(["diff", "--name-status", `${evidence.base}...${evidence.testedParent}`], cwd);
+  const nameEvidence = requireObject(evidence.nameStatus, "nameStatus");
+  if (typeof nameEvidence.output !== "string" || !hex64.test(nameEvidence.sha256 || "") || nameEvidence.output !== nameStatus || checksum(nameStatus) !== nameEvidence.sha256) {
+    throw new Error("Malformed recognized review evidence: name-status packet mismatch.");
+  }
+  const binaryDiff = git(["diff", "--binary", `${evidence.base}...${evidence.testedParent}`], cwd);
+  if (!hex64.test(evidence.canonicalDiffSha256 || "") || checksum(binaryDiff) !== evidence.canonicalDiffSha256) {
+    throw new Error("Malformed recognized review evidence: canonical diff checksum mismatch.");
+  }
 
   const commonDir = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd).trim();
   const root = resolve(dirname(commonDir));
@@ -68,6 +88,7 @@ export function verifyReviewEvidence(cwd = process.cwd()) {
   ];
   for (const [capture, command, label, output] of live) {
     verifyCapture(capture, command, label);
+    if (normalize(capture.cwd) !== recordedCwd) throw new Error(`Malformed recognized review evidence: ${label} historical cwd is inconsistent.`);
     if (capture.output !== output) throw new Error(`Malformed recognized review evidence: live ${label} output mismatch.`);
   }
   process.stdout.write(`verified review evidence: tested parent ${parent}, tree ${evidence.testedTree}\n`);
