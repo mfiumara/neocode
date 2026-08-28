@@ -1,48 +1,64 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inferParents } from "../server.mjs";
+import { buildPaseoGraph } from "../server.mjs";
 
-test("infers the nearest branch tip as parent and anchors shared tips at main", () => {
-  const nodes = [
-    { id: "main", hash: "a", remote: false },
-    { id: "team", hash: "b", remote: false },
-    { id: "task", hash: "c", remote: false },
-    { id: "fresh", hash: "a", remote: false },
-  ];
-  const commits = new Map([
-    ["a", []],
-    ["b", ["a"]],
-    ["c", ["b"]],
-  ]);
-
-  assert.equal(inferParents(nodes, commits, "main"), "main");
-  assert.deepEqual(
-    nodes.map(({ id, parent }) => [id, parent]),
+test("maps Paseo projects, workspaces, agents, and subagents", () => {
+  const graph = buildPaseoGraph(
+    [{ projectId: "project-1", name: "Neocode", path: "/repo" }],
     [
-      ["main", null],
-      ["team", "main"],
-      ["task", "team"],
-      ["fresh", "main"],
+      {
+        workspaceId: "workspace-1",
+        project: "Neocode",
+        name: "Main",
+        isolation: "local",
+        cwd: "/repo",
+        pullRequest: {
+          number: 42,
+          title: "Show workspace details",
+          url: "https://example.test/pr/42",
+          state: "OPEN",
+          additions: 12,
+          deletions: 3,
+          ci: "success",
+        },
+      },
+    ],
+    [
+      {
+        id: "lead",
+        shortId: "lead",
+        name: "Repository Lead",
+        provider: "pi/gpt-5.6-sol",
+        status: "idle",
+        cwd: "/repo",
+      },
+      {
+        id: "worker",
+        shortId: "worker",
+        name: "Feature Lead",
+        provider: "pi/gpt-5.6-sol",
+        status: "running",
+        cwd: "/worktree",
+        parentAgentId: "lead",
+      },
     ],
   );
-});
 
-test("does not turn merged historical branches into a fake management chain", () => {
-  const nodes = [
-    { id: "main", hash: "d", remote: false },
-    { id: "old-team", hash: "b", remote: false },
-    { id: "old-task", hash: "c", remote: false },
-  ];
-  const commits = new Map([
-    ["a", []],
-    ["b", ["a"]],
-    ["c", ["b"]],
-    ["d", ["c"]],
-  ]);
-
-  inferParents(nodes, commits, "main");
-  assert.deepEqual(
-    nodes.map(({ parent }) => parent),
-    [null, "main", "main"],
-  );
+  const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+  assert.equal(byId.get("project:project-1").parent, "paseo");
+  assert.equal(byId.get("workspace:workspace-1").parent, "project:project-1");
+  assert.equal(byId.get("workspace:workspace-1").pullRequest.number, 42);
+  assert.deepEqual(byId.get("workspace:workspace-1").diff, {
+    additions: 12,
+    deletions: 3,
+  });
+  assert.equal(byId.get("lead").parent, "workspace:workspace-1");
+  assert.equal(byId.get("worker").parent, "lead");
+  assert.equal(byId.get("worker").lane, "running");
+  assert.deepEqual(graph.counts, {
+    projects: 1,
+    workspaces: 1,
+    sessions: 2,
+    running: 1,
+  });
 });
