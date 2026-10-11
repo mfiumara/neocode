@@ -22,6 +22,13 @@ end
 vim.api.nvim_create_user_command("NeocodeNew", dispatch("new", true), { nargs = "?" })
 vim.api.nvim_create_user_command("NeocodeSessions", dispatch("sessions"), {})
 vim.api.nvim_create_user_command("NeocodeScan", dispatch("scan"), {})
+vim.api.nvim_create_user_command("NeocodePalette", dispatch("command_palette"), {})
+
+-- Backtick is a Neovim-style command prefix for Neocode.  Restricting this to
+-- NORMAL mode preserves literal backticks in terminal prompts and INSERT mode.
+vim.keymap.set("n", "`", function()
+  require("neocode").command_palette()
+end, { silent = true, desc = "Open Neocode command palette" })
 
 local function archive_cmd(opts)
   vim.schedule(function()

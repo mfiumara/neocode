@@ -149,6 +149,40 @@ assert(mk.code == 0, mk.stderr)
 check("title resolves from db", title.resolve({ name = "session-abc", agent = { backend_session_id = "ses_test" } }, db_path) == "Fix login bug")
 check("title falls back to name", title.resolve({ name = "session-xyz", agent = { backend_session_id = nil } }, db_path) == "session-xyz")
 
+-- The picker is modal: j/k navigate in NORMAL mode and remain ordinary text in
+-- its INSERT-mode filter.  Exercise the mappings rather than UI internals.
+local picked
+require("neocode.ui").select({ "alpha", "beta", "jolt" }, { prompt = "Test commands" }, function(value)
+  picked = value or false
+end)
+local normal_j = vim.fn.maparg("j", "n", false, true)
+local insert_j = vim.fn.maparg("j", "i", false, true)
+check("picker starts in normal mode", vim.api.nvim_get_mode().mode == "n")
+check("picker maps normal j for navigation", normal_j.buffer == 1)
+check("picker leaves insert j available to filter", vim.tbl_isempty(insert_j))
+vim.api.nvim_feedkeys("j", "x", false)
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "x", false)
+check("picker j then Enter selects second item", picked == "beta")
+
+local filtered
+require("neocode.ui").select({ "alpha", "beta", "jolt" }, { prompt = "Test filter" }, function(value)
+  filtered = value or false
+end)
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("/j<CR>", true, false, true), "x", false)
+check("insert-mode j filters instead of navigating", filtered == "jolt")
+
+local escaped = false
+require("neocode.ui").select({ "alpha" }, { prompt = "Test escape" }, function()
+  escaped = true
+end)
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+check("picker Escape closes", escaped)
+
+dofile(vim.uv.cwd() .. "/plugin/neocode.lua")
+local normal_tick = vim.fn.maparg("`", "n", false, true)
+local insert_tick = vim.fn.maparg("`", "i", false, true)
+check("backtick palette mapping is normal-mode only", not vim.tbl_isempty(normal_tick) and vim.tbl_isempty(insert_tick))
+
 vim.fn.delete(base, "rf")
 
 print(string.format("\n%d passed, %d failed", passed, failed))

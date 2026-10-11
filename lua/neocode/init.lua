@@ -214,6 +214,32 @@ function M.sessions()
   end)
 end
 
+function M.command_palette()
+  local commands = {
+    {
+      label = "New session",
+      run = function() M.new() end,
+    },
+    {
+      label = "Open session",
+      run = function() M.sessions() end,
+    },
+    {
+      label = "Scan workspace",
+      run = function() M.scan() end,
+    },
+  }
+
+  ui.select(commands, {
+    prompt = "Neocode commands  ·  j/k navigate  ·  / filter",
+    format_item = function(command)
+      return command.label
+    end,
+  }, function(command)
+    if command then command.run() end
+  end)
+end
+
 function M.scan()
   local ws = M.workspace()
   local names = vim.tbl_map(function(repo)

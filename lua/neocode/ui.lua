@@ -32,9 +32,9 @@ end
 local function help_buffer(actions)
   local rows = {
     pad("<CR>", 10) .. "open selection",
-    pad("type", 10) .. "fuzzy filter",
+    pad("/ or i", 10) .. "edit fuzzy filter",
     pad("j / k", 10) .. "move down / up",
-    pad("<Esc>", 10) .. "back to keys",
+    pad("<Esc>", 10) .. "close",
   }
   for _, a in ipairs(actions) do
     rows[#rows + 1] = pad(a.key, 10) .. (a.desc or "action")
@@ -57,6 +57,7 @@ function M.select(items, opts, on_choice)
   define_hl("NeocodeFuzzyMatch", { "TelescopeMatching", "Special" })
   define_hl("NeocodePromptPrefix", { "TelescopePromptPrefix", "Special" })
   define_hl("NeocodeDimText", { "Comment" })
+  define_hl("NeocodeSelection", { "Visual", "CursorLine" })
 
   local actions = opts.actions or {}
   local labels = {}
@@ -91,21 +92,12 @@ function M.select(items, opts, on_choice)
   local function open_win(buf, cfg)
     cfg.relative = "editor"
     cfg.style = "minimal"
-    cfg.title_pos = "center"
+    if cfg.title then cfg.title_pos = "center" end
     vim.api.nvim_buf_set_name(buf, "")
     return vim.api.nvim_open_win(buf, false, cfg)
   end
 
   local title = opts.prompt and clip(opts.prompt, math.max(list_w - 6, 10)) or nil
-  local prompt_win = open_win(prompt_buf, {
-    row = top + 1,
-    col = left + 1,
-    width = list_w,
-    height = 1,
-    border = PROMPT_BORDER,
-    title = title and (" " .. title .. " ") or nil,
-    zindex = 60,
-  })
   local list_win = open_win(list_buf, {
     row = top + 3,
     col = left + 1,
@@ -128,8 +120,7 @@ function M.select(items, opts, on_choice)
     vim.wo[preview_win].wrap = false
   end
 
-  vim.api.nvim_open_win(prompt_buf, true, {
-    enter = true,
+  local prompt_focus_win = vim.api.nvim_open_win(prompt_buf, true, {
     relative = "editor",
     row = top + 1,
     col = left + 1,
@@ -137,22 +128,21 @@ function M.select(items, opts, on_choice)
     height = 1,
     border = PROMPT_BORDER,
     title = title and (" " .. title .. " ") or nil,
-    title_pos = "center",
+    title_pos = title and "center" or nil,
     style = "minimal",
     zindex = 60,
   })
 
-  for _, w in ipairs({ prompt_win, list_win, preview_win }) do
+  for _, w in ipairs({ prompt_focus_win, list_win, preview_win }) do
     if w then
       vim.wo[w].winblend = 8
       vim.wo[w].cursorline = false
     end
   end
-  vim.wo[list_win].cursorline = true
-  vim.api.nvim_win_close(prompt_win, true)
-  prompt_win = nil
 
   local view = {}
+  local query = ""
+  local selected = 1
 
   local function set_lines(buf, lines)
     vim.bo[buf].modifiable = true
@@ -173,6 +163,12 @@ function M.select(items, opts, on_choice)
       out[row] = "  " .. clip(labels[idx], list_w - 2)
     end
     set_lines(list_buf, out)
+    if selected >= 1 and selected <= #view then
+      vim.api.nvim_buf_set_extmark(list_buf, NS, selected - 1, 0, {
+        line_hl_group = "NeocodeSelection",
+        priority = 10,
+      })
+    end
     if query ~= "" then
       local ok, res = pcall(vim.fn.matchfuzzypos, labels, query)
       if ok and type(res) == "table" and type(res[2]) == "table" then
@@ -204,8 +200,7 @@ function M.select(items, opts, on_choice)
 
   local function hovered()
     if #view == 0 or not vim.api.nvim_win_is_valid(list_win) then return nil end
-    local cur = vim.api.nvim_win_get_cursor(list_win)[1]
-    local idx = view[cur]
+    local idx = view[selected]
     if not idx then return nil end
     return { item = items[idx], label = labels[idx] }
   end
@@ -240,8 +235,6 @@ function M.select(items, opts, on_choice)
     end
   end
 
-  local query = ""
-
   local function apply_filter()
     view = {}
     if query == "" then
@@ -263,18 +256,19 @@ function M.select(items, opts, on_choice)
         end
       end
     end
+    selected = 1
     render_list()
     if vim.api.nvim_win_is_valid(list_win) then
-      pcall(vim.api.nvim_win_set_cursor, list_win, { 1, 0 })
+      pcall(vim.api.nvim_win_set_cursor, list_win, { selected, 0 })
     end
     render_preview()
   end
 
   local function move(delta)
     if #view == 0 or not vim.api.nvim_win_is_valid(list_win) then return end
-    local cur = vim.api.nvim_win_get_cursor(list_win)[1]
-    cur = math.min(math.max(cur + delta, 1), #view)
-    vim.api.nvim_win_set_cursor(list_win, { cur, 0 })
+    selected = math.min(math.max(selected + delta, 1), #view)
+    vim.api.nvim_win_set_cursor(list_win, { selected, 0 })
+    render_list()
     render_preview()
   end
 
@@ -321,14 +315,37 @@ function M.select(items, opts, on_choice)
     finish(hv and hv.item or nil)
   end
 
-  local function map(modes, lhs, rhs)
-    vim.keymap.set(modes, lhs, rhs, { buffer = prompt_buf, silent = true, nowait = true })
+  local function map(modes, lhs, rhs, buf)
+    vim.keymap.set(modes, lhs, rhs, { buffer = buf or prompt_buf, silent = true, nowait = true })
   end
 
-  map("n", "<CR>", pick)
-  map("n", "q", function() finish(nil) end)
-  map("n", "<Esc>", function() finish(nil) end)
-  map("n", "?", function()
+  local function focus_filter()
+    if vim.api.nvim_win_is_valid(prompt_focus_win) then
+      vim.api.nvim_set_current_win(prompt_focus_win)
+      vim.cmd("startinsert")
+    end
+  end
+
+  for _, buf in ipairs({ prompt_buf, list_buf }) do
+    map("n", "<CR>", pick, buf)
+    map("n", "q", function() finish(nil) end, buf)
+    map("n", "<Esc>", function() finish(nil) end, buf)
+    map("n", "j", function() move(1) end, buf)
+    map("n", "k", function() move(-1) end, buf)
+    map("n", "<Down>", function() move(1) end, buf)
+    map("n", "<Up>", function() move(-1) end, buf)
+    map("n", "/", focus_filter, buf)
+    map("n", "i", focus_filter, buf)
+  end
+  map("i", "<Esc>", function() finish(nil) end)
+  map("i", "<CR>", function()
+    -- Synchronize the final keystroke even when Enter arrives before
+    -- TextChangedI has had a chance to run (for example, through a macro).
+    query = vim.trim(vim.api.nvim_buf_get_lines(prompt_buf, 0, 1, false)[1] or "")
+    apply_filter()
+    pick()
+  end)
+  local function toggle_help()
     if help_state.win then close_help() return end
     local hbuf, rows = help_buffer(actions)
     local hw = 0
@@ -355,19 +372,35 @@ function M.select(items, opts, on_choice)
       if key and key:byte() == 128 then return end
       close_help()
     end, ns)
-  end)
-  map("n", "j", function() move(1) end)
-  map("n", "k", function() move(-1) end)
-  map({ "n", "i" }, "<Down>", function() move(1) end)
-  map({ "n", "i" }, "<Up>", function() move(-1) end)
-  map("i", "<CR>", pick)
+  end
+  map("n", "?", toggle_help, prompt_buf)
+  map("n", "?", toggle_help, list_buf)
+  map("i", "<Down>", function() move(1) end)
+  map("i", "<Up>", function() move(-1) end)
+
+  local function mouse_select(pick_after)
+    local pos = vim.fn.getmousepos()
+    if pos.winid ~= list_win or pos.line < 1 or pos.line > #view then return end
+    selected = pos.line
+    pcall(vim.api.nvim_win_set_cursor, list_win, { selected, 0 })
+    render_list()
+    render_preview()
+    if pick_after then pick() end
+  end
+  for _, buf in ipairs({ prompt_buf, list_buf }) do
+    map({ "n", "i" }, "<LeftMouse>", function() mouse_select(false) end, buf)
+    map({ "n", "i" }, "<2-LeftMouse>", function() mouse_select(true) end, buf)
+  end
+
   for _, a in ipairs(actions) do
-    map("n", a.key, function()
-      local hv = hovered()
-      local ok, err = pcall(a.fn, hv and hv.item or nil)
-      finish(nil)
-      if not ok then error(err) end
-    end)
+    for _, buf in ipairs({ prompt_buf, list_buf }) do
+      map("n", a.key, function()
+        local hv = hovered()
+        local ok, err = pcall(a.fn, hv and hv.item or nil)
+        finish(nil)
+        if not ok then error(err) end
+      end, buf)
+    end
   end
 
   vim.api.nvim_create_autocmd({ "TextChangedI", "TextChanged" }, {
@@ -394,7 +427,11 @@ function M.select(items, opts, on_choice)
     callback = function() finish(nil) end,
   })
 
-  vim.cmd("startinsert")
+  -- The picker deliberately opens in NORMAL mode: j/k are navigation keys and
+  -- can never leak into the filter.  Press / (or i) to edit the fuzzy filter;
+  -- arrows continue to navigate there, while j and k are ordinary query text.
+  apply_filter()
+  vim.cmd("stopinsert")
 end
 
 return M
