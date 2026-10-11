@@ -23,6 +23,36 @@ vim.api.nvim_create_user_command("NeocodeNew", dispatch("new", true), { nargs = 
 vim.api.nvim_create_user_command("NeocodeSessions", dispatch("sessions"), {})
 vim.api.nvim_create_user_command("NeocodeScan", dispatch("scan"), {})
 
+local function pipeline_cmd(action)
+  return function(opts)
+    vim.schedule(function()
+      local ok, err = pcall(function()
+        local nc = require("neocode")
+        local ws = nc.workspace()
+        for _, repo in ipairs(ws.repos) do
+          local session = require("neocode.store").find_by_name(repo.path, opts.fargs[1])
+          if session then
+            local requirements = table.concat(opts.fargs, " ", 2)
+            if action == "review" then
+              return nc.worker_complete(session.id, true, requirements, repo.path)
+            elseif action == "retry" then
+              return nc.retry(session.id, requirements, nil, repo.path)
+            elseif action == "integrate" then
+              return nc.integrate(session.id, nil, repo.path)
+            end
+          end
+        end
+        error("no session named '" .. opts.fargs[1] .. "'")
+      end)
+      if not ok then vim.notify("[neocode] " .. tostring(err), vim.log.levels.ERROR) end
+    end)
+  end
+end
+
+vim.api.nvim_create_user_command("NeocodeReview", pipeline_cmd("review"), { nargs = "+" })
+vim.api.nvim_create_user_command("NeocodeRetryReview", pipeline_cmd("retry"), { nargs = "+" })
+vim.api.nvim_create_user_command("NeocodeIntegrate", pipeline_cmd("integrate"), { nargs = 1 })
+
 local function archive_cmd(opts)
   vim.schedule(function()
     if opts.args ~= "" then

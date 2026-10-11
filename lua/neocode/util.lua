@@ -17,9 +17,12 @@ end
 
 function M.json_write(path, data)
   vim.fn.mkdir(vim.fs.dirname(path), "p")
-  local f = assert(io.open(path, "w"))
+  -- Write/rename keeps persisted state readable if Neovim is interrupted mid-transition.
+  local tmp = path .. ".tmp-" .. M.id()
+  local f = assert(io.open(tmp, "w"))
   f:write(vim.json.encode(data) .. "\n")
   f:close()
+  assert(os.rename(tmp, path))
 end
 
 function M.append_line(path, line)
@@ -30,8 +33,28 @@ end
 
 function M.run(cmd, opts)
   opts = opts or {}
-  local r = vim.system(cmd, { cwd = opts.cwd, text = true }):wait()
-  return { code = r.code, stdout = r.stdout or "", stderr = r.stderr or "" }
+  local limit = opts.output_limit or (1024 * 1024)
+  local proc = vim.system(cmd, { cwd = opts.cwd, env = opts.env, text = true })
+  local r = proc:wait(opts.timeout or 120000)
+  if not r then
+    pcall(proc.kill, proc, 15)
+    r = proc:wait(1000) or { code = 124, stdout = "", stderr = "command timed out" }
+  end
+  local function bounded(s)
+    s = s or ""
+    if #s <= limit then return s, false end
+    return s:sub(1, limit) .. "\n[output truncated]", true
+  end
+  local stdout, out_truncated = bounded(r.stdout)
+  local stderr, err_truncated = bounded(r.stderr)
+  return {
+    code = r.code or 124,
+    signal = r.signal,
+    stdout = stdout,
+    stderr = stderr,
+    timed_out = r.code == 124 or r.signal == 15,
+    truncated = out_truncated or err_truncated,
+  }
 end
 
 function M.git(args, cwd)

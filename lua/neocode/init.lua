@@ -7,6 +7,7 @@ local agents = require("neocode.agents")
 local ui = require("neocode.ui")
 local title = require("neocode.title")
 local opencode_db = require("neocode.opencode_db")
+local pipeline = require("neocode.pipeline")
 
 local M = {}
 
@@ -151,6 +152,40 @@ local function transcript_preview(repo_root, id)
   return out
 end
 
+function M.worker_complete(id, succeeded, requirements, repo_root, opts)
+  repo_root = repo_root or M.workspace().repos[1].path
+  return pipeline.worker_finished(repo_root, id, succeeded, requirements, opts)
+end
+
+function M.review(id, requirements, opts, repo_root)
+  repo_root = repo_root or M.workspace().repos[1].path
+  return pipeline.review(repo_root, id, requirements, opts)
+end
+
+function M.integrate(id, opts, repo_root)
+  repo_root = repo_root or M.workspace().repos[1].path
+  return pipeline.integrate(repo_root, id, opts)
+end
+
+function M.retry(id, requirements, opts, repo_root)
+  return M.review(id, requirements, opts, repo_root)
+end
+
+function M.manual_approve(id, reason, repo_root)
+  repo_root = repo_root or M.workspace().repos[1].path
+  return pipeline.manual_approve(repo_root, id, reason)
+end
+
+function M.recover(id, repo_root)
+  repo_root = repo_root or M.workspace().repos[1].path
+  return pipeline.recover(repo_root, id)
+end
+
+function M.process_queue(repo_root, opts)
+  repo_root = repo_root or M.workspace().repos[1].path
+  return pipeline.process_queue(repo_root, opts)
+end
+
 function M.sessions()
   local ws = M.workspace()
   local entries = {}
@@ -170,8 +205,10 @@ function M.sessions()
           end
         end)
       end
+      local state = s.pipeline and s.pipeline.state
+      local base_label = resolved ~= s.name and (repo.name .. " · " .. resolved) or (repo.name .. "/" .. s.name)
       table.insert(entries, {
-        label = resolved ~= s.name and (repo.name .. " · " .. resolved) or (repo.name .. "/" .. s.name),
+        label = state and (base_label .. " [" .. state .. "]") or base_label,
         session = s,
         repo_root = repo.path,
       })
@@ -189,6 +226,22 @@ function M.sessions()
     end,
     preview_fn = function(entry)
       local s = entry.session
+      local p = s.pipeline
+      if p then
+        local lines = { "pipeline: " .. tostring(p.state) }
+        if p.failure and p.failure ~= vim.NIL then lines[#lines + 1] = "failure: " .. tostring(p.failure) end
+        if p.ci then
+          lines[#lines + 1] = "pre-review CI: " .. (p.ci.passed and "passed" or "failed")
+        end
+        if p.post_reconcile_ci then
+          lines[#lines + 1] = "post-reconcile CI: " .. (p.post_reconcile_ci.passed and "passed" or "failed")
+        end
+        if p.judge then
+          lines[#lines + 1] = "judge: " .. (p.judge.approved and "approved" or "rejected")
+          lines[#lines + 1] = p.judge.summary or ""
+        end
+        if #lines > 1 then return lines end
+      end
       local backend_id = s.agent and s.agent.backend_session_id
       if backend_id then
         local lines = opencode_db.recent_messages(backend_id, 20)
@@ -204,6 +257,21 @@ function M.sessions()
         desc = "archive session",
         fn = function(entry)
           M.archive(entry.session.name, entry.repo_root)
+        end,
+      },
+      {
+        key = "r",
+        desc = "retry failed review",
+        fn = function(entry)
+          local p = entry.session.pipeline or {}
+          pipeline.review(entry.repo_root, entry.session.id, p.requirements)
+        end,
+      },
+      {
+        key = "i",
+        desc = "integrate merge-ready job",
+        fn = function(entry)
+          pipeline.integrate(entry.repo_root, entry.session.id)
         end,
       },
     },
