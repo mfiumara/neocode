@@ -36,6 +36,17 @@ function sidebarJob(
   };
 }
 
+test("sidebar status markers expose status and next action without consuming title copy", () => {
+  const attention = sidebarJob("needs_attention", "needs_attention");
+  attention.recoverable = true;
+  const markup = renderToStaticMarkup(<JobSidebarRow job={attention} active activityReady onOpen={() => {}} />);
+
+  assert.match(markup, /class="status-marker" role="img" aria-label="Status: Needs attention\./);
+  assert.match(markup, /Next: inspect the diagnostics, then resume/);
+  assert.match(markup, /aria-current="page"/);
+  assert.match(markup, /class="sidebar-row-copy"/);
+});
+
 test("sidebar renders current lifecycle execution as a labelled spinner only while connected", () => {
   const active = renderToStaticMarkup(<JobSidebarRow job={sidebarJob("judging")} active={false} activityReady onOpen={() => {}} />);
   assert.match(active, /job-glyph in-progress/);

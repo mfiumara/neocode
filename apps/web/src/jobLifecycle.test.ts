@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentJob } from "@neocode/protocol";
-import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
+import { isDoneJob, jobActiveState, jobLifecycleLabel, jobNextActionCue } from "./jobLifecycle";
 
 function job(status: AgentJob["status"], integration?: AgentJob["integration"]): AgentJob {
   return {
@@ -73,6 +73,20 @@ test("settled and disconnected lifecycle state never appears active", () => {
   const historical = reviewed("approved");
   historical.review!.transitions.unshift({ status: "judging", at: 1 });
   assert.equal(jobActiveState(historical), undefined, "historical transient transitions are ignored");
+});
+
+test("next-action cues distinguish safe resume, diagnostics, and coordinator-owned review", () => {
+  const recoverable = job("interrupted");
+  recoverable.recoverable = true;
+  assert.match(jobNextActionCue(recoverable) || "", /review the interruption details, then resume/i);
+
+  const unsafe = job("needs_attention");
+  unsafe.recoverable = true;
+  unsafe.recoveryIssue = "branch mismatch";
+  assert.match(jobNextActionCue(unsafe) || "", /inspect the diagnostics.*before.*resume/i);
+
+  assert.match(jobNextActionCue(reviewed("handoff_received")) || "", /await coordinator-owned review/i);
+  assert.match(jobNextActionCue(reviewed("blocked")) || "", /inspect the review diagnostics.*coordinator-owned/i);
 });
 
 test("top-level queued and terminal labels override stale transient lifecycle metadata", () => {

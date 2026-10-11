@@ -45,6 +45,34 @@ export function isDoneJob(job: AgentJob): boolean {
   return job.status === "completed" && job.isolation.mode === "root";
 }
 
+export function jobNextActionCue(job: AgentJob): string | undefined {
+  if (job.status === "interrupted") {
+    return job.recoverable && !job.recoveryIssue
+      ? "Next: review the interruption details, then resume this worker when ready."
+      : "Next: inspect the recovery diagnostics; this checkout is not currently safe to resume.";
+  }
+  if (job.status === "needs_attention") {
+    return job.recoverable && !job.recoveryIssue
+      ? "Next: inspect the diagnostics, then resume only when the recorded checkout is appropriate."
+      : "Next: inspect the diagnostics; recovery must be resolved before this worker can resume.";
+  }
+
+  const review = job.review?.status;
+  if (["queued", "handoff_received", "judging", "ci_running"].includes(review || "")) {
+    return "Next: await coordinator-owned review and checks.";
+  }
+  if (["approved", "merge_queued", "merging", "post_merge_ci"].includes(review || "")) {
+    return "Next: await coordinator-owned integration and verification.";
+  }
+  if (["ci_failed", "post_ci_failed", "rejected", "blocked", "conflict", "failed", "needs_attention"].includes(review || "") || job.integration?.status === "conflicted") {
+    return "Next: inspect the review diagnostics; remediation remains coordinator-owned.";
+  }
+  if (job.status === "completed" && job.isolation.mode === "worktree" && !job.review) {
+    return "Next: await coordinator-owned review of the worker handoff.";
+  }
+  return undefined;
+}
+
 export function jobLifecycleLabel(job: AgentJob): string {
   const integration = job.integration?.status;
   const review = job.review?.status;

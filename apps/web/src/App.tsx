@@ -11,7 +11,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Markdown } from "./Markdown";
 import { navigationForView, type ThreadNavigationByView } from "./threadNavigation";
 import { isNearTranscriptBottom, nearestTranscriptScrollTop } from "./transcriptScroll";
-import { isDoneJob, jobActiveState, jobLifecycleLabel } from "./jobLifecycle";
+import { isDoneJob, jobActiveState, jobLifecycleLabel, jobNextActionCue } from "./jobLifecycle";
 import { isCommandPaletteShortcut, isNormalModeCommandPaletteShortcut } from "./commandPalette";
 import { WorkerEventCard, parseWorkerEvent } from "./WorkerEventCard";
 import { appendUnique, insertPageBefore, messageContextText, reconcileWindow } from "./transcript";
@@ -837,8 +837,8 @@ export function App() {
       <section className="workspace-grid">
         <aside className="rail">
           <div className="section-label">Threads</div>
-          <Button variant="ghost" className={`thread-row ${active.kind === "coordinator" ? "active" : ""}`} onClick={openCoordinator} aria-current={active.kind === "coordinator" ? "page" : undefined}>
-            <span className={`agent-orb ${activityReady ? snapshot?.coordinator.status || "idle" : "idle"}`} aria-hidden="true" />
+          <Button variant="ghost" className={`thread-row ${active.kind === "coordinator" ? "active" : ""}`} onClick={openCoordinator} aria-current={active.kind === "coordinator" ? "page" : undefined} aria-label={`Coordinator thread. Status: ${activityReady ? snapshot?.coordinator.status || "idle" : "reconnecting"}`}>
+            <span className="status-marker" role="img" aria-label={`Coordinator ${activityReady ? snapshot?.coordinator.status || "idle" : "reconnecting"}`} title={`Coordinator status: ${activityReady ? snapshot?.coordinator.status || "idle" : "reconnecting"}`}><span className={`agent-orb ${activityReady ? snapshot?.coordinator.status || "idle" : "idle"}`} aria-hidden="true" /></span>
             <span><strong>Coordinator</strong><small>{activityReady && snapshot?.coordinator.status === "running" ? <>{snapshot.coordinator.activity?.description || "Working"} {snapshot.coordinator.activity && <ActivityDuration activity={snapshot.coordinator.activity} />}</> : "Main thread"}</small></span>
 
             <span className="binding">q</span>
@@ -923,7 +923,7 @@ export function App() {
                   </TabsList>
                 </Tabs>
                 {activeJob.review && <Badge variant="secondary">Coordinator-owned review</Badge>}
-                {(activeJob.status === "interrupted" || activeJob.status === "needs_attention") && activeJob.recoverable && (
+                {(activeJob.status === "interrupted" || activeJob.status === "needs_attention") && activeJob.recoverable && !activeJob.recoveryIssue && (
                   <Button variant="outline" size="sm" className="resume-button" onClick={() => send({ type: "resume_job", jobId: activeJob.id })}>Resume</Button>
                 )}
                 {activeJob.status === "running" && <Button variant="destructive" size="sm" className="cancel-button" onClick={() => send({ type: "cancel_job", jobId: activeJob.id })}>Cancel</Button>}
@@ -952,7 +952,8 @@ export function App() {
               }}
             >
               <div className="transcript-content" ref={transcriptContentRef}>
-              {activeJob?.recoveryIssue && <div className="recovery-notice">{activeJob.recoveryIssue}</div>}
+              {activeJob && jobNextActionCue(activeJob) && <div className="next-action-notice" role="status">{jobNextActionCue(activeJob)}</div>}
+              {activeJob?.recoveryIssue && <div className="recovery-notice"><strong>Recovery diagnostics:</strong> {activeJob.recoveryIssue}</div>}
               {!rows.length && (
                 <div className="empty-view">
                   {active.kind === "coordinator" ? "Type a prompt to start." : "Worker is starting."}
@@ -1015,7 +1016,7 @@ export function App() {
             </ScrollArea>
           )}
 
-          <div className={`composer ${mode === "INSERT" ? "focused" : ""}`}>
+          <div className={`composer ${mode === "INSERT" ? "focused" : ""}`} aria-label="Prompt composer">
             {context.length > 0 && (
               <div className="context-chips">
                 {context.map((entry) => (
@@ -1108,8 +1109,8 @@ export function App() {
             <CommandGroup>
 
               {filteredPalette.map((entry, index) => (
-                <CommandItem key={entry.id} value={entry.id} onMouseEnter={() => setPaletteIndex(index)} onSelect={() => { entry.action(); setPaletteOpen(false); }}>
-                  <span>{entry.label}</span><small>{entry.detail}</small>
+                <CommandItem className="palette-entry" key={entry.id} value={entry.id} onMouseEnter={() => setPaletteIndex(index)} onSelect={() => { entry.action(); setPaletteOpen(false); }}>
+                  <span className="palette-entry-title">{entry.label}</span><small className="palette-entry-meta">{entry.detail}</small>
                 </CommandItem>
 
               ))}
@@ -1154,14 +1155,17 @@ export function JobSidebarRow({ job, active, activityReady, onOpen }: {
   const activeState = jobActiveState(job, activityReady);
   const semanticClass = job.integration?.status || job.status;
   const statusLabel = activeState?.label || jobLifecycleLabel(job);
-  return <Button variant="ghost" className={`job-row ${active ? "active" : ""}`} onClick={onOpen} title={statusLabel} aria-current={active ? "page" : undefined}>
-    <span className={`job-glyph ${activeState ? "in-progress" : semanticClass}`} aria-hidden="true">
-      {job.integration?.status === "merged" ? "✓" : statusGlyph(job.status)}
+  const nextAction = jobNextActionCue(job);
+  const accessibleStatus = `Status: ${statusLabel}.${nextAction ? ` ${nextAction}` : " Open worker session for details."}`;
+  return <Button variant="ghost" className={`job-row ${active ? "active" : ""}`} onClick={onOpen} title={accessibleStatus} aria-label={`${job.title}. ${accessibleStatus}`} aria-current={active ? "page" : undefined}>
+    <span className="status-marker" role="img" aria-label={accessibleStatus} title={accessibleStatus}>
+      <span className={`job-glyph ${activeState ? "in-progress" : semanticClass}`} aria-hidden="true">
+        {job.integration?.status === "merged" ? "✓" : statusGlyph(job.status)}
+      </span>
     </span>
-    <span><strong>{job.title}</strong><small>{activeState
+    <span className="sidebar-row-copy"><strong>{job.title}</strong><small>{activeState
       ? <>{activeState.label}{activeState.kind === "worker" && job.activity && <> <ActivityDuration activity={job.activity} /></>}</>
       : <>{jobLifecycleLabel(job)} · {isolationLabel(job)}{job.durationMs !== undefined ? ` · ${formatDuration(job.durationMs)} total` : ""}</>}</small></span>
-    <span className="sr-only">Status: {statusLabel}</span>
   </Button>;
 }
 
