@@ -4,6 +4,7 @@ export interface RecoveryConfig {
   maxRetries: number;
   backoffMs: number;
   maxBackoffMs: number;
+  leaseMs: number;
 }
 
 function nonNegativeInteger(value: string | undefined, fallback: number): number {
@@ -17,6 +18,7 @@ export function recoveryConfig(env: NodeJS.ProcessEnv = process.env): RecoveryCo
     maxRetries: nonNegativeInteger(env.NEOCODE_WORKER_RESTART_MAX_RETRIES, 3),
     backoffMs: nonNegativeInteger(env.NEOCODE_WORKER_RESTART_BACKOFF_MS, 1_000),
     maxBackoffMs: nonNegativeInteger(env.NEOCODE_WORKER_RESTART_MAX_BACKOFF_MS, 30_000),
+    leaseMs: Math.max(1_000, nonNegativeInteger(env.NEOCODE_WORKER_LEASE_MS, 30_000)),
   };
 }
 
@@ -59,6 +61,11 @@ export function openRecoverySession<T>(
 
 export function isDurableAttemptCurrent(job: AgentJob, generation: number, token: string): boolean {
   return job.recovery?.generation === generation && job.recovery.leaseToken === token;
+}
+
+export function hasUnexpiredRecoveryLease(job: AgentJob, now = Date.now()): boolean {
+  const recovery = job.recovery;
+  return Boolean(recovery?.leaseToken && recovery.leaseExpiresAt && recovery.leaseExpiresAt > now);
 }
 
 export function durableProgressSummary(job: AgentJob, limit = 6_000): string {

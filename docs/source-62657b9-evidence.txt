@@ -1,0 +1,13 @@
+$ git rev-parse 62657b930701a392e943be402982f2fdf43b765b bb615e9f1f3d874ee3498bdc16faa8636cd8e5d4 62657b930701a392e943be402982f2fdf43b765b^{tree}
+62657b930701a392e943be402982f2fdf43b765b
+bb615e9f1f3d874ee3498bdc16faa8636cd8e5d4
+384ff01695749fc57f75933851b57002f4de4565
+$ git diff --name-status bb615e9f1f3d874ee3498bdc16faa8636cd8e5d4 62657b930701a392e943be402982f2fdf43b765b
+M	.env.example
+M	apps/server/src/completion-pipeline.test.ts
+M	apps/server/src/orchestrator.ts
+M	apps/server/src/recovery.test.ts
+M	apps/server/src/recovery.ts
+M	packages/protocol/src/index.ts
+$ git diff --binary bb615e9f1f3d874ee3498bdc16faa8636cd8e5d4 62657b930701a392e943be402982f2fdf43b765b | shasum -a 256
+fadecde3b564a28b1ce0e8e73cd511f9103a341c4d3c3c2f515cdab91f1f7bcd  -
