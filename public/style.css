@@ -433,17 +433,18 @@ aside {
 body.agent-view aside {
   position: absolute;
   z-index: 10;
-  top: 22px;
-  right: 28px;
-  bottom: 22px;
+  top: 18px;
+  left: 50%;
+  bottom: 18px;
   display: flex;
-  width: min(760px, calc(100% - 56px));
+  width: min(1600px, calc(100% - 96px));
+  translate: -50% 0;
   flex-direction: column;
   overflow: hidden;
   padding: 20px;
   border: 1px solid #374032;
   border-radius: 20px;
-  background: linear-gradient(145deg, rgb(17 22 27 / 98%), rgb(11 14 20 / 98%));
+  background: linear-gradient(145deg, rgb(17 22 27 / 99%), rgb(11 14 20 / 99%));
   box-shadow:
     0 28px 90px #000b,
     0 0 50px #b8f36b0b;
@@ -1016,6 +1017,136 @@ dialog::backdrop {
 dialog h2 {
   margin: 5px 0 24px;
   font-size: 18px;
+}
+.agent-creator {
+  width: min(680px, calc(100% - 40px));
+  padding: 22px;
+}
+.agent-creator form {
+  display: grid;
+  gap: 16px;
+}
+.creator-heading small,
+.agent-creator label {
+  color: #7a8391;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font:
+    8px DM Mono,
+    monospace;
+}
+.creator-heading h2 {
+  margin: 5px 34px 0 0;
+}
+.agent-creator label {
+  display: grid;
+  gap: 7px;
+}
+.agent-creator input,
+.agent-creator textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid #303844;
+  border-radius: 9px;
+  outline: 0;
+  padding: 11px 12px;
+  color: #e7ebf0;
+  background: #0d1117;
+  font-size: 12px;
+  line-height: 1.5;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.agent-creator input:focus,
+.agent-creator textarea:focus {
+  border-color: #657a49;
+  box-shadow: 0 0 0 3px #b8f36b0c;
+}
+.creator-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.creator-actions small {
+  color: #68717f;
+  font-size: 9px;
+}
+.creator-actions button {
+  border: 1px solid #52613e;
+  border-radius: 9px;
+  padding: 9px 13px;
+  color: var(--lime);
+  background: #151b15;
+  cursor: pointer;
+}
+.creator-actions button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+.creator-error:not(:empty) {
+  padding: 10px;
+  border: 1px solid #623936;
+  border-radius: 8px;
+  color: #e49a94;
+  background: #241514;
+  font-size: 10px;
+}
+.command-palette {
+  width: min(620px, calc(100% - 40px));
+  overflow: hidden;
+  padding: 0;
+}
+.command-palette input {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #2d3440;
+  outline: 0;
+  padding: 18px 20px;
+  color: #edf0f5;
+  background: #0e1218;
+  font-size: 14px;
+}
+.command-list {
+  max-height: min(480px, 60vh);
+  overflow: auto;
+  padding: 8px;
+}
+.command-list button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  border-radius: 9px;
+  padding: 11px 12px;
+  color: #bdc3cd;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+}
+.command-list button.active,
+.command-list button:hover {
+  color: #edf2e8;
+  background: #1a2119;
+}
+.command-list small {
+  color: #707987;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font:
+    8px DM Mono,
+    monospace;
+}
+.command-list button.active small {
+  color: #9abb72;
+}
+.command-empty {
+  padding: 24px;
+  color: #747c89;
+  text-align: center;
+  font-size: 11px;
 }
 .close {
   position: absolute;

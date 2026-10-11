@@ -10,6 +10,10 @@ const exec = promisify(execFile);
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC = join(HERE, "public");
 const PORT = Number(process.env.PORT || 4173);
+const eventClients = new Set();
+let eventTimer;
+let eventSignature;
+let eventCheckRunning = false;
 
 async function paseo(...args) {
   const { stdout } = await exec("paseo", ["--no-color", ...args], {
@@ -239,20 +243,132 @@ function sameOrigin(request) {
   }
 }
 
-async function readPrompt(request) {
+async function readJson(request) {
   let body = "";
   for await (const chunk of request) {
     body += chunk;
-    if (body.length > 32_000) throw new Error("Prompt is too long");
+    if (body.length > 32_000) throw new Error("Request is too long");
   }
-  let prompt;
   try {
-    prompt = JSON.parse(body).prompt?.trim();
+    return JSON.parse(body);
   } catch {
-    throw new Error("Prompt must be valid JSON");
+    throw new Error("Request must be valid JSON");
   }
+}
+
+async function readPrompt(request) {
+  const prompt = (await readJson(request)).prompt?.trim();
   if (!prompt) throw new Error("Prompt is required");
   return prompt;
+}
+
+function branchName(title) {
+  const slug = title
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 44);
+  return `agent/${slug || "task"}-${Date.now().toString(36).slice(-5)}`;
+}
+
+async function createAgent(request) {
+  const input = await readJson(request);
+  const prompt = input.prompt?.trim();
+  const provider = input.provider?.trim();
+  const title = (
+    input.title?.trim() ||
+    prompt?.split("\n")[0] ||
+    "New agent"
+  ).slice(0, 120);
+  if (!prompt) throw new Error("Prompt is required");
+  if (!provider || !/^[a-z0-9][a-z0-9._/-]*$/i.test(provider))
+    throw new Error("A valid Paseo provider is required");
+
+  const args = [
+    "run",
+    "--background",
+    "--provider",
+    provider,
+    "--title",
+    title,
+  ];
+  if (input.mode === "workspace") {
+    const workspace = (await json("workspace", "ls", "--json")).find(
+      (item) => item.workspaceId === input.workspaceId,
+    );
+    if (!workspace) throw new Error("Unknown Paseo workspace");
+    args.push("--workspace", workspace.workspaceId);
+  } else if (input.mode === "worktree") {
+    const project = (await json("project", "ls", "--json")).find(
+      (item) => item.projectId === input.projectId,
+    );
+    if (!project?.path) throw new Error("Unknown local Paseo project");
+    args.push(
+      "--cwd",
+      absoluteCwd(project.path),
+      "--new-workspace",
+      "worktree",
+      "--worktree-mode",
+      "branch-off",
+      "--new-branch",
+      branchName(title),
+    );
+  } else {
+    throw new Error("Agent mode must be workspace or worktree");
+  }
+  args.push("--json", prompt);
+  return paseo(...args);
+}
+
+async function checkPaseoChanges() {
+  if (eventCheckRunning) return;
+  eventCheckRunning = true;
+  try {
+    const [workspaces, agents] = await Promise.all([
+      json("workspace", "ls", "--json"),
+      json("ls", "--global", "--json"),
+    ]);
+    const signature = JSON.stringify({
+      workspaces: workspaces
+        .map((item) => [item.workspaceId, item.name, item.cwd])
+        .sort(),
+      agents: agents
+        .map((item) => [item.id, item.name, item.status, item.cwd])
+        .sort(),
+    });
+    if (eventSignature && signature !== eventSignature)
+      for (const client of eventClients)
+        client.write("event: refresh\ndata: changed\n\n");
+    eventSignature = signature;
+  } catch {
+    // The next tick retries when Paseo is temporarily unavailable.
+  } finally {
+    eventCheckRunning = false;
+  }
+}
+
+function subscribeToPaseo(request, response) {
+  response.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-store",
+    connection: "keep-alive",
+  });
+  response.write("retry: 2000\nevent: refresh\ndata: connected\n\n");
+  eventClients.add(response);
+  if (!eventTimer) {
+    eventSignature = undefined;
+    checkPaseoChanges();
+    eventTimer = setInterval(checkPaseoChanges, 2_000);
+  }
+  request.on("close", () => {
+    eventClients.delete(response);
+    if (!eventClients.size) {
+      clearInterval(eventTimer);
+      eventTimer = undefined;
+      eventSignature = undefined;
+    }
+  });
 }
 
 const files = new Map([
@@ -264,12 +380,32 @@ const files = new Map([
 export const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://localhost");
+    if (url.pathname === "/api/events") {
+      subscribeToPaseo(request, response);
+      return;
+    }
     if (url.pathname === "/api/graph") {
       response.writeHead(200, {
         "content-type": "application/json",
         "cache-control": "no-store",
       });
       response.end(JSON.stringify(await snapshot()));
+      return;
+    }
+
+    if (url.pathname === "/api/agents" && request.method === "POST") {
+      if (!sameOrigin(request)) {
+        response
+          .writeHead(403)
+          .end("Cross-origin agent creation is not allowed");
+        return;
+      }
+      const result = await createAgent(request);
+      response.writeHead(201, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      });
+      response.end(result || "{}");
       return;
     }
 
@@ -292,7 +428,10 @@ export const server = createServer(async (request, response) => {
           "--tail",
           "60",
         );
-        response.writeHead(200, { "content-type": "application/json" });
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
         response.end(JSON.stringify({ logs, agent }));
         return;
       }
@@ -326,8 +465,15 @@ export const server = createServer(async (request, response) => {
     response.writeHead(200, { "content-type": type });
     response.end(await readFile(join(PUBLIC, file)));
   } catch (error) {
+    let message = error.message;
+    try {
+      const failure = JSON.parse(error.stderr);
+      message = failure.error?.message || failure.message || message;
+    } catch {
+      // Keep the original error when Paseo did not return structured JSON.
+    }
     response.writeHead(500, { "content-type": "application/json" });
-    response.end(JSON.stringify({ error: error.message }));
+    response.end(JSON.stringify({ error: message }));
   }
 });
 

@@ -44,21 +44,67 @@
       <aside id="details" aria-live="polite"></aside>
     </main>
     <footer>
-      <span><kbd>h</kbd><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd> navigate</span
-      ><span><kbd>enter</kbd> agent</span><span><kbd>/</kbd> find</span
-      ><span><kbd>r</kbd> refresh</span><span><kbd>?</kbd> help</span>
+      <span><kbd>j</kbd><kbd>k</kbd> agents</span
+      ><span><kbd>enter</kbd> agent</span
+      ><span><kbd>a</kbd><kbd>A</kbd> new</span><span><kbd>/</kbd> find</span
+      ><span><kbd>r</kbd> refresh</span><span><kbd>⌘K</kbd> commands</span
+      ><span><kbd>?</kbd> help</span>
     </footer>
+    <dialog id="create-agent" class="agent-creator">
+      <form>
+        <div class="creator-heading">
+          <div>
+            <small>New Paseo agent</small>
+            <h2></h2>
+          </div>
+          <button type="button" class="close" aria-label="Cancel">×</button>
+        </div>
+        <label
+          >Title
+          <input
+            name="title"
+            placeholder="Optional — defaults to the first prompt line"
+        /></label>
+        <label
+          >Provider
+          <input
+            name="provider"
+            placeholder="For example: pi/openai-codex/gpt-5.6-sol"
+            required
+        /></label>
+        <label
+          >Initial prompt <textarea name="prompt" rows="7" required></textarea>
+        </label>
+        <div class="creator-error" role="alert"></div>
+        <div class="creator-actions">
+          <small>Enter create · ⇧Enter newline · Esc cancel</small>
+          <button type="submit">Create agent</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="palette" class="command-palette">
+      <input
+        type="search"
+        aria-label="Search commands"
+        placeholder="Search projects, workspaces, agents, and actions…"
+        autocomplete="off"
+      />
+      <div class="command-list" role="listbox"></div>
+    </dialog>
     <dialog id="help">
       <button class="close" aria-label="Close">×</button>
       <h2>Move like Neovim</h2>
       <div class="help-grid">
         <kbd>h</kbd><span>parent</span><kbd>j / k</kbd
-        ><span>next / previous</span><kbd>l</kbd><span>first child</span
+        ><span>next / previous agent</span><kbd>l</kbd><span>first child</span
         ><kbd>gg / G</kbd><span>root / last</span><kbd>/ / n</kbd
         ><span>find / next result</span><kbd>enter</kbd
-        ><span>open worktree agent</span><kbd>q / esc</kbd
+        ><span>open / focus prompt</span><kbd>esc</kbd
+        ><span>prompt → navigation → overview</span><kbd>a / A</kbd
+        ><span>new agent here / fresh worktree</span><kbd>q</kbd
         ><span>leave agent view</span><kbd>r</kbd
-        ><span>refresh Git + Paseo</span>
+        ><span>refresh Git + Paseo</span><kbd>⌘K</kbd
+        ><span>command palette</span>
       </div>
     </dialog>
     <script type="module" src="/app.js"></script>

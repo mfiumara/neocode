@@ -3,6 +3,12 @@ const viewport = document.querySelector("#viewport");
 const details = document.querySelector("#details");
 const projectList = document.querySelector("#projects .project-list");
 const search = document.querySelector("#search");
+const creator = document.querySelector("#create-agent");
+const creatorForm = creator.querySelector("form");
+const creatorPrompt = creator.querySelector("textarea");
+const palette = document.querySelector("#palette");
+const paletteInput = palette.querySelector("input");
+const commandList = palette.querySelector(".command-list");
 const help = document.querySelector("#help");
 
 const state = {
@@ -16,6 +22,7 @@ const state = {
   agentSelection: new Map(),
   poll: null,
   g: false,
+  loading: null,
 };
 const NS = "http://www.w3.org/2000/svg";
 const $ = (tag, className, text) => {
@@ -34,11 +41,22 @@ const short = (value, length = 34) =>
   value.length > length ? `${value.slice(0, length - 1)}…` : value;
 
 async function load({ keepSelection = true } = {}) {
+  if (state.loading) {
+    await state.loading;
+    return load({ keepSelection });
+  }
+  let finishLoading;
+  state.loading = new Promise((resolve) => {
+    finishLoading = resolve;
+  });
   document.body.classList.add("loading");
   try {
     const response = await fetch("/api/graph");
     if (!response.ok) throw new Error(`Git returned ${response.status}`);
     const data = await response.json();
+    const currentPrompt = details.querySelector(".prompt-box textarea");
+    const draft = currentPrompt?.value;
+    const restoreFocus = currentPrompt === document.activeElement;
     state.data = data;
     const projects = data.nodes.filter((node) => node.kind === "project");
     const remembered = localStorage.getItem("neocode-project");
@@ -61,9 +79,16 @@ async function load({ keepSelection = true } = {}) {
         stat(data.counts.projects, "projects"),
       );
     render();
+    const nextPrompt = details.querySelector(".prompt-box textarea");
+    if (nextPrompt && draft !== undefined) {
+      nextPrompt.value = draft;
+      if (restoreFocus) nextPrompt.focus();
+    }
   } catch (error) {
     details.replaceChildren($("div", "error", error.message));
   } finally {
+    finishLoading();
+    state.loading = null;
     document.body.classList.remove("loading");
   }
 }
@@ -72,6 +97,16 @@ function stat(value, label) {
   const item = $("span");
   item.append($("strong", "", String(value)), $("small", "", label));
   return item;
+}
+
+function activateProject(id) {
+  closeAgent();
+  state.activeProject = id;
+  state.selected = null;
+  localStorage.setItem("neocode-project", id);
+  renderProjectTabs();
+  render();
+  viewport.scrollTo(0, 0);
 }
 
 function renderProjectTabs() {
@@ -89,15 +124,7 @@ function renderProjectTabs() {
       $("span", "project-icon", project.name.slice(0, 2).toUpperCase()),
       $("span", "project-name", project.name),
     );
-    button.addEventListener("click", () => {
-      closeAgent();
-      state.activeProject = project.id;
-      state.selected = null;
-      localStorage.setItem("neocode-project", project.id);
-      renderProjectTabs();
-      render();
-      viewport.scrollTo(0, 0);
-    });
+    button.addEventListener("click", () => activateProject(project.id));
     projectList.append(button);
   }
 }
@@ -446,15 +473,15 @@ function showDetails(node) {
 function openAgent(id) {
   const node = state.data.nodes.find((item) => item.id === id);
   if (node?.kind !== "agent") return;
+  const opening = !state.session;
   state.session = id;
   document.body.classList.add("agent-view");
   svg.classList.add("session-active");
   select(id);
-  animateAgentWindow(id);
-  loadAgentLogs(node);
+  if (opening) animateAgentWindow(id);
+  loadAgentLogs(node, true);
   clearInterval(state.poll);
   state.poll = setInterval(() => loadAgentLogs(node, true), 2_000);
-  setTimeout(() => details.querySelector("textarea")?.focus(), 320);
 }
 
 function animateAgentWindow(id) {
@@ -530,6 +557,7 @@ async function loadAgentLogs(node, force = false) {
   try {
     const response = await fetch(
       `/api/agents/${encodeURIComponent(agent.id)}/logs`,
+      { cache: "no-store" },
     );
     if (!response.ok) throw new Error(await response.text());
     const activity = await response.json();
@@ -558,6 +586,8 @@ async function loadAgentLogs(node, force = false) {
 }
 
 function showAgent(node) {
+  const preservePromptFocus =
+    details.querySelector("textarea") === document.activeElement;
   details.replaceChildren();
   const agent = activeAgent(node);
   const top = $("div", "agent-topbar");
@@ -668,10 +698,18 @@ function showAgent(node) {
     $(
       "small",
       "",
-      agent?.id ? `Paseo · ${agent.shortId}` : "Waiting for a Paseo session",
+      agent?.id
+        ? `Paseo · ${agent.shortId} · Enter send · ⇧Enter newline · Esc navigate`
+        : "Waiting for a Paseo session",
     ),
     submit,
   );
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const prompt = textarea.value.trim();
@@ -700,6 +738,7 @@ function showAgent(node) {
   details.append(top, heading, picker || "", context, transcript, down, form);
   requestAnimationFrame(() => {
     transcript.scrollTop = transcript.scrollHeight;
+    if (preservePromptFocus) details.querySelector("textarea")?.focus();
   });
 }
 
@@ -836,7 +875,6 @@ function applySearch() {
 }
 
 function move(direction) {
-  const position = state.ordered.indexOf(state.selected);
   if (direction === "parent")
     return select(
       state.positions.get(state.selected)?.parent || state.selected,
@@ -847,11 +885,19 @@ function move(direction) {
     );
     return select(child || state.selected);
   }
-  const next = Math.max(
-    0,
-    Math.min(state.ordered.length - 1, position + direction),
+  const agents = state.ordered.filter(
+    (id) => state.data.nodes.find((node) => node.id === id)?.kind === "agent",
   );
-  select(state.ordered[next]);
+  if (!agents.length) return;
+  const current = agents.indexOf(state.selected);
+  const next =
+    current < 0
+      ? direction > 0
+        ? 0
+        : agents.length - 1
+      : (current + direction + agents.length) % agents.length;
+  if (state.session) openAgent(agents[next]);
+  else select(agents[next]);
 }
 
 function nextMatch() {
@@ -861,6 +907,221 @@ function nextMatch() {
   if (!matches.length) return;
   select(matches[(matches.indexOf(state.selected) + 1) % matches.length]);
 }
+
+function workspaceForSelection() {
+  let node = state.data.nodes.find((item) => item.id === state.selected);
+  while (node && node.kind !== "workspace")
+    node = state.data.nodes.find((item) => item.id === node.parent);
+  return node || tree().visible.find((item) => item.kind === "workspace");
+}
+
+function openAgentCreator(mode) {
+  const target =
+    mode === "workspace"
+      ? workspaceForSelection()
+      : state.data.nodes.find((node) => node.id === state.activeProject);
+  if (!target) return;
+  creatorForm.reset();
+  const provider = tree()
+    .visible.filter(
+      (node) =>
+        node.kind === "agent" &&
+        (mode === "worktree" ||
+          node.paseoWorkspace?.workspaceId ===
+            target.paseoWorkspace.workspaceId),
+    )
+    .sort(
+      (a, b) =>
+        Number(b.id === state.selected) - Number(a.id === state.selected) ||
+        b.timestamp - a.timestamp,
+    )[0]?.agent.provider;
+  creatorForm.elements.provider.value = provider || "";
+  creator.dataset.mode = mode;
+  creator.dataset.target =
+    mode === "workspace"
+      ? target.paseoWorkspace.workspaceId
+      : target.project.projectId;
+  creator.querySelector("h2").textContent =
+    mode === "workspace"
+      ? `In ${target.name}`
+      : `Fresh worktree in ${target.name}`;
+  creator.querySelector(".creator-error").textContent = "";
+  creator.showModal();
+  creatorPrompt.focus();
+}
+
+creator
+  .querySelector(".close")
+  .addEventListener("click", () => creator.close());
+creator.addEventListener("click", (event) => {
+  if (event.target === creator) creator.close();
+});
+creatorPrompt.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    creatorForm.requestSubmit();
+  }
+});
+creatorForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const submit = creatorForm.querySelector('[type="submit"]');
+  const error = creator.querySelector(".creator-error");
+  const input = new FormData(creatorForm);
+  submit.disabled = true;
+  submit.textContent = "Creating…";
+  error.textContent = "";
+  try {
+    const response = await fetch("/api/agents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mode: creator.dataset.mode,
+        workspaceId:
+          creator.dataset.mode === "workspace"
+            ? creator.dataset.target
+            : undefined,
+        projectId:
+          creator.dataset.mode === "worktree"
+            ? creator.dataset.target
+            : undefined,
+        title: input.get("title"),
+        provider: input.get("provider"),
+        prompt: input.get("prompt"),
+      }),
+    });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => null);
+      throw new Error(failure?.error || `Paseo returned ${response.status}`);
+    }
+    const agent = await response.json();
+    creator.close();
+    await load({ keepSelection: false });
+    if (agent.agentId) openAgent(agent.agentId);
+  } catch (failure) {
+    error.textContent = failure.message;
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "Create agent";
+  }
+});
+
+let paletteCommands = [];
+let paletteIndex = 0;
+
+function commands() {
+  const items = [
+    { label: "Refresh Paseo", group: "Action", run: () => load() },
+  ];
+  if (state.session)
+    items.push({
+      label: "Close agent session",
+      group: "Action",
+      run: closeAgent,
+    });
+  if (!state.data) return items;
+  items.push(
+    {
+      label: "New agent in selected workspace",
+      group: "Action · a",
+      run: () => openAgentCreator("workspace"),
+    },
+    {
+      label: "New agent in fresh worktree",
+      group: "Action · A",
+      run: () => openAgentCreator("worktree"),
+    },
+  );
+  for (const project of state.data.nodes.filter(
+    (node) => node.kind === "project",
+  ))
+    items.push({
+      label: project.name,
+      group: "Project",
+      run: () => activateProject(project.id),
+    });
+  for (const node of tree().visible.filter((item) =>
+    ["workspace", "agent"].includes(item.kind),
+  ))
+    items.push({
+      label: node.name,
+      group: node.kind === "agent" ? "Agent" : "Workspace",
+      run: () => (node.kind === "agent" ? openAgent(node.id) : select(node.id)),
+    });
+  return items;
+}
+
+function renderPalette() {
+  const query = paletteInput.value.trim().toLowerCase();
+  paletteCommands = commands()
+    .filter((command) =>
+      `${command.group} ${command.label}`.toLowerCase().includes(query),
+    )
+    .slice(0, 12);
+  paletteIndex = Math.min(
+    paletteIndex,
+    Math.max(0, paletteCommands.length - 1),
+  );
+  commandList.replaceChildren();
+  for (const [index, command] of paletteCommands.entries()) {
+    const button = $("button", index === paletteIndex ? "active" : "");
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(index === paletteIndex));
+    button.append($("span", "", command.label), $("small", "", command.group));
+    button.addEventListener("mouseenter", () => {
+      paletteIndex = index;
+      const active = commandList.querySelector(".active");
+      active?.classList.remove("active");
+      active?.setAttribute("aria-selected", "false");
+      button.classList.add("active");
+      button.setAttribute("aria-selected", "true");
+    });
+    button.addEventListener("click", () => runPaletteCommand(index));
+    commandList.append(button);
+  }
+  if (!paletteCommands.length)
+    commandList.append($("div", "command-empty", "No matching commands"));
+  commandList.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+}
+
+function runPaletteCommand(index = paletteIndex) {
+  const command = paletteCommands[index];
+  if (!command) return;
+  palette.close();
+  command.run();
+}
+
+function togglePalette() {
+  if (palette.open) {
+    palette.close();
+    return;
+  }
+  paletteInput.value = "";
+  paletteIndex = 0;
+  renderPalette();
+  palette.showModal();
+  paletteInput.focus();
+}
+
+paletteInput.addEventListener("input", () => {
+  paletteIndex = 0;
+  renderPalette();
+});
+paletteInput.addEventListener("keydown", (event) => {
+  if (!["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.key === "Enter") return runPaletteCommand();
+  if (!paletteCommands.length) return;
+  const direction = event.key === "ArrowDown" ? 1 : -1;
+  paletteIndex =
+    (paletteIndex + direction + paletteCommands.length) %
+    paletteCommands.length;
+  renderPalette();
+});
+palette.addEventListener("click", (event) => {
+  if (event.target === palette) palette.close();
+});
 
 search.addEventListener("input", applySearch);
 search.addEventListener("keydown", (event) => {
@@ -876,17 +1137,43 @@ search.addEventListener("keydown", (event) => {
 });
 document.querySelector("#refresh").addEventListener("click", () => load());
 document.addEventListener("pointerdown", (event) => {
-  if (state.session && !details.contains(event.target)) closeAgent();
+  if (
+    state.session &&
+    !details.contains(event.target) &&
+    !creator.contains(event.target) &&
+    !palette.contains(event.target)
+  )
+    closeAgent();
 });
 help.querySelector(".close").addEventListener("click", () => help.close());
 
 window.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    togglePalette();
+    return;
+  }
+  if (creator.open) {
+    if (event.key === "Escape") creator.close();
+    return;
+  }
+  if (palette.open) {
+    if (event.key === "Escape") palette.close();
+    return;
+  }
   if (help.open) {
     if (event.key === "Escape") help.close();
     return;
   }
   if (event.target.matches("input, textarea")) {
-    if (event.key === "Escape" && state.session) closeAgent();
+    if (
+      event.key === "Escape" &&
+      state.session &&
+      event.target.matches("textarea")
+    ) {
+      event.preventDefault();
+      event.target.blur();
+    }
     return;
   }
   if (event.key === "/") {
@@ -898,10 +1185,16 @@ window.addEventListener("keydown", (event) => {
     help.showModal();
     return;
   }
-  if ((event.key === "q" || event.key === "Escape") && state.session)
-    closeAgent();
-  else if (event.key === "Enter") openAgent(state.selected);
-  else if (event.key === "h") move("parent");
+  if (event.key.toLowerCase() === "a")
+    openAgentCreator(event.shiftKey ? "worktree" : "workspace");
+  else if (event.key === "q" && state.session) closeAgent();
+  else if (event.key === "Enter" && state.session) {
+    event.preventDefault();
+    details.querySelector("textarea")?.focus();
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    openAgent(state.selected);
+  } else if (event.key === "h") move("parent");
   else if (event.key === "j") move(1);
   else if (event.key === "k") move(-1);
   else if (event.key === "l") move("child");
@@ -917,10 +1210,16 @@ window.addEventListener("keydown", (event) => {
   } else if (event.key === "n") nextMatch();
   else if (event.key === "r") load();
   else if (event.key === "Escape") {
-    search.value = "";
-    applySearch();
+    if (state.session) closeAgent();
+    else {
+      search.value = "";
+      applySearch();
+    }
   }
 });
+
+const paseoEvents = new EventSource("/api/events");
+paseoEvents.addEventListener("refresh", () => load());
 
 load({ keepSelection: false }).then(() =>
   requestAnimationFrame(() => viewport.scrollTo({ top: 0, left: 0 })),
