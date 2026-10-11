@@ -1,0 +1,493 @@
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdir, appendFile } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { promisify } from "node:util";
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
+  ModelRuntime,
+  SessionManager,
+  type AgentSession,
+} from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { Type } from "typebox";
+import type {
+  AgentActivity,
+  AgentJob,
+  AgentStatus,
+  AppSnapshot,
+  ServerMessage,
+  TranscriptMessage,
+} from "@neocode/protocol";
+import { activity, toolActivity } from "./activity.js";
+
+const execFileAsync = promisify(execFile);
+
+type Emit = (message: ServerMessage) => void;
+
+interface RunningWorker {
+  session: AgentSession;
+  cancelled: boolean;
+}
+
+function id(): string {
+  return randomUUID();
+}
+
+function transcriptText(value: string): string {
+  const limit = 12_000;
+  return value.length > limit ? `${value.slice(0, limit)}\n\n… output truncated for display` : value;
+}
+
+function textOf(message: AgentMessage): string {
+  if (message.role === "bashExecution") return transcriptText(message.output);
+  if ("summary" in message && typeof message.summary === "string") return transcriptText(message.summary);
+  if (!("content" in message)) return "";
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return transcriptText(message.content
+    .map((part: { type: string; text?: string; thinking?: string; name?: string; arguments?: unknown }) => {
+      if (part.type === "text") return part.text || "";
+      if (part.type === "thinking") return part.thinking || "";
+      if (part.type === "toolCall") return `${part.name}(${JSON.stringify(part.arguments)})`;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n"));
+}
+
+function assistantText(message: AgentMessage): string {
+  if (message.role !== "assistant" || !("content" in message)) return "";
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+function roleOf(message: AgentMessage): TranscriptMessage["role"] {
+  if (message.role === "user") return "user";
+  if (message.role === "assistant") return "assistant";
+  if (message.role === "toolResult" || message.role === "bashExecution") return "tool";
+  return "system";
+}
+
+function slug(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 32) || "task";
+}
+
+export class Orchestrator {
+  private readonly jobs = new Map<string, AgentJob>();
+  private readonly workers = new Map<string, RunningWorker>();
+  private readonly coordinatorMessages: TranscriptMessage[] = [];
+  private coordinatorStatus: AgentStatus = "idle";
+  private coordinatorActivity: AgentActivity | undefined;
+  private coordinatorAborting = false;
+  private modelRuntime!: ModelRuntime;
+  private coordinator!: AgentSession;
+
+  constructor(
+    readonly cwd: string,
+    private readonly emit: Emit,
+  ) {}
+
+  async initialize(): Promise<void> {
+    this.modelRuntime = await ModelRuntime.create();
+
+    const loader = new DefaultResourceLoader({
+      cwd: this.cwd,
+      agentDir: getAgentDir(),
+      systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode coordinator\nYou are the user's responsive coordinator. Discuss, investigate, and help the user understand the project. Delegate implementation work to background workers with delegate_task instead of editing files yourself. Keep the main thread available: after delegation, report the job id briefly and continue helping. Use inspect_job only when the user asks to check a worker or when its result is needed. Never claim a worker succeeded before inspecting its status.`,
+    });
+    await loader.reload();
+
+    const customTools = [
+      {
+        name: "delegate_task",
+        label: "Delegate task",
+        description: "Start an implementation task in an isolated git worktree and return immediately with a background job id.",
+        promptSnippet: "Delegate implementation work to an isolated background worker",
+        promptGuidelines: ["Use delegate_task for implementation work so the coordinator remains responsive."],
+        parameters: Type.Object({
+          task: Type.String({ description: "A self-contained implementation task with acceptance criteria" }),
+          title: Type.Optional(Type.String({ description: "Short task title" })),
+        }),
+        execute: async (_callId: string, params: { task: string; title?: string }) => {
+          const job = await this.delegate(params.task, params.title);
+          return {
+            content: [{ type: "text" as const, text: `Started background job ${job.id}: ${job.title}` }],
+            details: { jobId: job.id, worktree: job.worktree, branch: job.branch },
+          };
+        },
+      },
+      {
+        name: "list_jobs",
+        label: "List jobs",
+        description: "List background worker jobs and their current status.",
+        parameters: Type.Object({}),
+        execute: async () => ({
+          content: [{
+            type: "text" as const,
+            text: this.listJobs().map((job) => `${job.id} [${job.status}] ${job.title}`).join("\n") || "No jobs",
+          }],
+          details: {},
+        }),
+      },
+      {
+        name: "inspect_job",
+        label: "Inspect job",
+        description: "Inspect a background worker's report and current diff.",
+        parameters: Type.Object({ jobId: Type.String() }),
+        execute: async (_callId: string, params: { jobId: string }) => {
+          const job = this.jobs.get(params.jobId);
+          if (!job) throw new Error(`Unknown job: ${params.jobId}`);
+          await this.refreshDiff(job);
+          const output = [
+            `${job.id} [${job.status}] ${job.title}`,
+            job.summary ? `\nReport:\n${job.summary}` : "",
+            job.diff ? `\nDiff:\n${job.diff.slice(0, 40_000)}` : "\nNo diff yet.",
+            job.error ? `\nError:\n${job.error}` : "",
+          ].join("");
+          return { content: [{ type: "text" as const, text: output }], details: { jobId: job.id } };
+        },
+      },
+    ];
+
+    const result = await createAgentSession({
+      cwd: this.cwd,
+      modelRuntime: this.modelRuntime,
+      resourceLoader: loader,
+      sessionManager: SessionManager.create(this.cwd),
+      tools: ["read", "grep", "find", "ls", "delegate_task", "list_jobs", "inspect_job"],
+      customTools,
+    });
+    this.coordinator = result.session;
+    this.bindCoordinator();
+  }
+
+  snapshot(): AppSnapshot {
+    return {
+      cwd: this.cwd,
+      coordinator: {
+        status: this.coordinatorStatus,
+        activity: this.coordinatorActivity,
+        messages: [...this.coordinatorMessages],
+      },
+      jobs: this.listJobs(),
+    };
+  }
+
+  async prompt(text: string, context: string[] = []): Promise<void> {
+    const content = context.length
+      ? `${text}\n\n<context-basket>\n${context.join("\n\n---\n\n")}\n</context-basket>`
+      : text;
+
+    const userMessage: TranscriptMessage = { id: id(), role: "user", text, timestamp: Date.now() };
+    this.coordinatorMessages.push(userMessage);
+    this.emit({ type: "coordinator_message", message: userMessage });
+
+    try {
+      await this.coordinator.prompt(content, this.coordinator.isStreaming ? { streamingBehavior: "steer" } : undefined);
+    } catch (error) {
+      if (!this.coordinatorAborting) this.fail(error);
+    }
+  }
+
+  async abort(): Promise<void> {
+    this.coordinatorAborting = true;
+    try {
+      await this.coordinator.abort();
+    } finally {
+      this.coordinatorStatus = "idle";
+      this.emit({ type: "coordinator_status", status: "idle" });
+      this.setCoordinatorActivity(undefined);
+      this.coordinatorAborting = false;
+    }
+  }
+
+  async dispose(): Promise<void> {
+    await this.coordinator.abort().catch(() => undefined);
+    for (const worker of this.workers.values()) {
+      worker.cancelled = true;
+      await worker.session.abort().catch(() => undefined);
+      worker.session.dispose();
+    }
+    this.workers.clear();
+    this.coordinator.dispose();
+  }
+
+  async delegate(task: string, requestedTitle?: string): Promise<AgentJob> {
+    const shortId = id().slice(0, 8);
+    const title = requestedTitle?.trim() || task.trim().split("\n")[0]!.slice(0, 60) || "Background task";
+    const baseRef = await this.git(["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "HEAD");
+    const branch = `neocode/${slug(title)}-${shortId}`;
+    const worktree = join(this.cwd, ".worktrees", `${slug(title)}-${shortId}`);
+
+    const job: AgentJob = {
+      id: shortId,
+      title,
+      prompt: task,
+      status: "queued",
+      branch,
+      worktree,
+      baseRef,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: [{ id: id(), role: "user", text: task, timestamp: Date.now() }],
+      activity: activity("starting", "Waiting to start"),
+    };
+    this.jobs.set(job.id, job);
+    this.publishJob(job);
+
+    try {
+      await mkdir(join(this.cwd, ".worktrees"), { recursive: true });
+      await this.ensureLocalExcludes();
+      await this.git(["worktree", "add", "-b", branch, worktree, baseRef]);
+    } catch (error) {
+      job.status = "failed";
+      job.activity = undefined;
+      job.error = error instanceof Error ? error.message : String(error);
+      job.updatedAt = Date.now();
+      this.publishJob(job);
+      throw error;
+    }
+
+    job.status = "running";
+    job.activity = activity("starting", "Starting worker");
+    job.updatedAt = Date.now();
+    this.publishJob(job);
+    void this.runWorker(job);
+    return job;
+  }
+
+  async cancelJob(jobId: string): Promise<void> {
+    const job = this.jobs.get(jobId);
+    if (!job) throw new Error(`Unknown job: ${jobId}`);
+    const worker = this.workers.get(jobId);
+    if (worker) {
+      worker.cancelled = true;
+      await worker.session.abort();
+    }
+    job.status = "cancelled";
+    job.activity = undefined;
+    job.updatedAt = Date.now();
+    this.publishJob(job);
+  }
+
+  private listJobs(): AgentJob[] {
+    return [...this.jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  private bindCoordinator(): void {
+    let streaming: TranscriptMessage | undefined;
+    let emitted = false;
+    this.coordinator.subscribe((event) => {
+      if (event.type === "agent_start") {
+        this.coordinatorStatus = "running";
+        this.emit({ type: "coordinator_status", status: "running" });
+        this.setCoordinatorActivity(activity("starting", "Starting"));
+      } else if (event.type === "message_start" && event.message.role === "assistant") {
+        streaming = { id: id(), role: "assistant", text: "", timestamp: Date.now() };
+        emitted = false;
+      } else if (event.type === "message_update") {
+        const update = event.assistantMessageEvent;
+        if (update.type === "thinking_start" || update.type === "thinking_delta") {
+          this.setCoordinatorActivity(activity("thinking", "Thinking"));
+        } else if (update.type === "toolcall_end") {
+          this.setCoordinatorActivity(toolActivity("tool_pending", update.toolCall.name, update.toolCall.arguments));
+        } else if ((update.type === "text_start" || update.type === "text_delta") && streaming) {
+          this.setCoordinatorActivity(activity("responding", "Writing response"));
+          if (update.type === "text_delta") {
+            if (!emitted) {
+              streaming.text = update.delta;
+              this.coordinatorMessages.push(streaming);
+              this.emit({ type: "coordinator_message", message: { ...streaming } });
+              emitted = true;
+            } else {
+              streaming.text += update.delta;
+              this.emit({ type: "coordinator_delta", messageId: streaming.id, delta: update.delta });
+            }
+          }
+        }
+      } else if (event.type === "tool_execution_start") {
+        this.setCoordinatorActivity(toolActivity("tool_running", event.toolName, event.args));
+      } else if (event.type === "tool_execution_end") {
+        this.setCoordinatorActivity(toolActivity(event.isError ? "tool_error" : "tool_complete", event.toolName));
+      } else if (event.type === "message_end" && event.message.role === "assistant" && streaming) {
+        const finalText = assistantText(event.message);
+        if (finalText) {
+          streaming.text = finalText;
+          if (!emitted) {
+            this.coordinatorMessages.push(streaming);
+            this.emit({ type: "coordinator_message", message: { ...streaming } });
+          } else {
+            this.emit({ type: "coordinator_message_updated", message: { ...streaming } });
+          }
+        }
+        streaming = undefined;
+        emitted = false;
+        if (event.message.stopReason === "error") {
+          this.fail(event.message.errorMessage || "The coordinator encountered an error.");
+        } else if (event.message.stopReason === "aborted") {
+          this.coordinatorStatus = "idle";
+          this.emit({ type: "coordinator_status", status: "idle" });
+          this.setCoordinatorActivity(undefined);
+        }
+      } else if (event.type === "agent_settled") {
+        if (this.coordinatorStatus !== "error") {
+          this.coordinatorStatus = "idle";
+          this.emit({ type: "coordinator_status", status: "idle" });
+        }
+        this.setCoordinatorActivity(undefined);
+      }
+    });
+  }
+
+  private async runWorker(job: AgentJob): Promise<void> {
+    let session: AgentSession | undefined;
+    try {
+      const loader = new DefaultResourceLoader({
+        cwd: job.worktree,
+        agentDir: getAgentDir(),
+        systemPromptOverride: (base) => `${base ?? ""}\n\n# Neocode background worker\nYou are an implementation worker in an isolated git worktree. Complete the assigned task autonomously. Inspect the project, edit files, run relevant tests, and leave the worktree ready for review. Do not ask conversational questions unless completely blocked. End with a concise report covering changes, tests, and remaining risks.`,
+      });
+      await loader.reload();
+      const result = await createAgentSession({
+        cwd: job.worktree,
+        model: this.coordinator.model,
+        thinkingLevel: this.coordinator.thinkingLevel,
+        modelRuntime: this.modelRuntime,
+        resourceLoader: loader,
+        sessionManager: SessionManager.create(job.worktree),
+      });
+      session = result.session;
+      this.workers.set(job.id, { session, cancelled: false });
+      this.bindWorker(job, session);
+      await session.prompt(job.prompt);
+
+      if (this.workers.get(job.id)?.cancelled) return;
+      job.status = "completed";
+      job.activity = undefined;
+      job.summary = [...job.messages].reverse().find((message) => message.role === "assistant")?.text;
+      await this.refreshDiff(job);
+      job.updatedAt = Date.now();
+      this.publishJob(job);
+    } catch (error) {
+      if (this.workers.get(job.id)?.cancelled || job.status === "cancelled") return;
+      job.status = "failed";
+      job.activity = undefined;
+      job.error = error instanceof Error ? error.message : String(error);
+      job.updatedAt = Date.now();
+      this.publishJob(job);
+    } finally {
+      this.workers.delete(job.id);
+      session?.dispose();
+    }
+  }
+
+  private bindWorker(job: AgentJob, session: AgentSession): void {
+    let streaming: TranscriptMessage | undefined;
+    let emitted = false;
+    const setActivity = (next: AgentActivity | undefined) => {
+      if (job.activity?.phase === next?.phase && job.activity?.description === next?.description) return;
+      job.activity = next;
+      job.updatedAt = Date.now();
+      this.publishJob(job);
+    };
+    session.subscribe((event) => {
+      if (event.type === "agent_start") {
+        setActivity(activity("starting", "Starting"));
+      } else if (event.type === "message_start") {
+        const role = roleOf(event.message);
+        if (role === "assistant") {
+          streaming = { id: id(), role, text: "", timestamp: Date.now() };
+          emitted = false;
+        } else if (role === "tool") {
+          const text = textOf(event.message);
+          if (!text) return;
+          job.messages.push({ id: id(), role, text, timestamp: Date.now() });
+          job.updatedAt = Date.now();
+          this.publishJob(job);
+        }
+      } else if (event.type === "message_update") {
+        const update = event.assistantMessageEvent;
+        if (update.type === "thinking_start" || update.type === "thinking_delta") {
+          setActivity(activity("thinking", "Thinking"));
+        } else if (update.type === "toolcall_end") {
+          setActivity(toolActivity("tool_pending", update.toolCall.name, update.toolCall.arguments));
+        } else if (update.type === "text_start" || update.type === "text_delta") {
+          setActivity(activity("responding", "Writing response"));
+          if (update.type === "text_delta" && streaming) {
+            if (!emitted) {
+              streaming.text = update.delta;
+              job.messages.push(streaming);
+              emitted = true;
+            } else {
+              streaming.text += update.delta;
+            }
+            job.updatedAt = Date.now();
+            this.publishJob(job);
+          }
+        }
+      } else if (event.type === "tool_execution_start") {
+        setActivity(toolActivity("tool_running", event.toolName, event.args));
+      } else if (event.type === "tool_execution_end") {
+        setActivity(toolActivity(event.isError ? "tool_error" : "tool_complete", event.toolName));
+      } else if (event.type === "message_end" && event.message.role === "assistant" && streaming) {
+        const finalText = assistantText(event.message);
+        if (finalText) {
+          streaming.text = finalText;
+          if (!emitted) job.messages.push(streaming);
+          job.updatedAt = Date.now();
+          this.publishJob(job);
+        }
+        streaming = undefined;
+        emitted = false;
+      }
+    });
+  }
+
+  private async refreshDiff(job: AgentJob): Promise<void> {
+    const { stdout } = await execFileAsync("git", ["diff", "--no-ext-diff", job.baseRef], {
+      cwd: job.worktree,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    job.diff = stdout;
+  }
+
+  private async git(args: string[]): Promise<string> {
+    const { stdout } = await execFileAsync("git", args, { cwd: this.cwd });
+    return stdout.trim();
+  }
+
+  private async ensureLocalExcludes(): Promise<void> {
+    const gitDir = await this.git(["rev-parse", "--git-common-dir"]);
+    const absoluteGitDir = gitDir.startsWith("/") ? gitDir : join(this.cwd, gitDir);
+    await appendFile(join(absoluteGitDir, "info", "exclude"), "\n.worktrees/\n", "utf8").catch(() => undefined);
+  }
+
+  private publishJob(job: AgentJob): void {
+    this.emit({ type: "job_updated", job: structuredClone(job) });
+  }
+
+  private setCoordinatorActivity(next: AgentActivity | undefined): void {
+    if (this.coordinatorActivity?.phase === next?.phase
+      && this.coordinatorActivity?.description === next?.description) return;
+    this.coordinatorActivity = next;
+    this.emit({ type: "coordinator_activity", activity: next });
+  }
+
+  private fail(error: unknown): void {
+    this.coordinatorStatus = "error";
+    this.emit({ type: "coordinator_status", status: "error" });
+    this.setCoordinatorActivity(undefined);
+    this.emit({ type: "error", message: error instanceof Error ? error.message : String(error) });
+  }
+}
