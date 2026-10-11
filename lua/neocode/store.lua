@@ -40,6 +40,8 @@ end
 function M.create(repo_root, name, opts)
   opts = opts or {}
   local id = util.id()
+  local parent_model = opts.parent_session and opts.parent_session.agent
+    and opts.parent_session.agent.model or nil
   local mode = opts.local_mode and "local" or "worktree"
   local base = base_ref(repo_root)
   local meta = {
@@ -62,7 +64,9 @@ function M.create(repo_root, name, opts)
     agent = {
       kind = opts.agent_kind or config.options.default_agent,
       backend_session_id = nil,
-      model = nil,
+      -- Provider and id are persisted together so identically named models
+      -- from different Pi providers cannot be confused.
+      model = (opts.model or parent_model) and vim.deepcopy(opts.model or parent_model) or nil,
       runs_on = "local",
     },
   }

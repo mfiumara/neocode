@@ -7,6 +7,7 @@ local agents = require("neocode.agents")
 local ui = require("neocode.ui")
 local title = require("neocode.title")
 local opencode_db = require("neocode.opencode_db")
+local model = require("neocode.model")
 
 local M = {}
 
@@ -49,7 +50,8 @@ function M.open(session, repo_root)
     path = worktree.ensure(repo_root, session)
   end
   pcall(vim.api.nvim_set_current_dir, path)
-  agents.get(session.agent.kind).start(session, { cwd = path, repo_root = repo_root })
+  local bufnr = agents.get(session.agent.kind).start(session, { cwd = path, repo_root = repo_root })
+  model.attach(session, repo_root, bufnr)
   util.notify("'" .. session.name .. "' -> " .. path)
   return session
 end
@@ -212,6 +214,25 @@ function M.sessions()
       M.open(entry.session, entry.repo_root)
     end
   end)
+end
+
+function M.models()
+  model.pick()
+end
+
+-- Used by coordinator/server integrations once their Pi RPC client is live.
+-- Binding through the adapter keeps protocol details out of the UI.
+function M.bind_coordinator(session, coordinator, repo_root, bufnr)
+  local adapter = agents.get(session.agent.kind)
+  if type(adapter.bind) ~= "function" then
+    error("agent '" .. tostring(session.agent.kind) .. "' does not support a coordinator protocol")
+  end
+  adapter.bind(session, coordinator)
+  model.attach(session, repo_root, bufnr)
+end
+
+function M.inherit_model(parent, worker)
+  return model.inherit(parent, worker)
 end
 
 function M.scan()

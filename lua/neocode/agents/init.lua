@@ -2,6 +2,7 @@ local M = {}
 
 M.registry = {
   opencode = "neocode.agents.opencode",
+  pi = "neocode.agents.pi",
 }
 
 function M.get(kind)

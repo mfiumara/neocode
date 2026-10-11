@@ -149,6 +149,50 @@ assert(mk.code == 0, mk.stderr)
 check("title resolves from db", title.resolve({ name = "session-abc", agent = { backend_session_id = "ses_test" } }, db_path) == "Fix login bug")
 check("title falls back to name", title.resolve({ name = "session-xyz", agent = { backend_session_id = nil } }, db_path) == "session-xyz")
 
+local model = require("neocode.model")
+local normalized = model.normalize({
+  { provider = "zeta", modelId = "two", reasoning = true },
+  { provider = "alpha", id = "one" },
+  { provider = "alpha", id = "one" },
+  { provider = "", id = "invalid" },
+})
+check("models normalized, deduplicated and sorted", #normalized == 2
+  and model.label(normalized[1]) == "alpha/one" and model.label(normalized[2]) == "zeta/two")
+local parent = { agent = { model = { provider = "anthropic", id = "claude-sonnet" }, effort = "high" } }
+local worker = { agent = { effort = "low" } }
+model.inherit(parent, worker)
+parent.agent.model.id = "changed"
+check("delegated worker inherits independent model state", worker.agent.model.id == "claude-sonnet"
+  and worker.agent.effort == "low")
+local persisted_worker = store.create(repo_a, "model-worker", { parent_session = parent, local_mode = true })
+check("worker session creation persists inherited model", persisted_worker.agent.model.provider == "anthropic"
+  and persisted_worker.agent.model.id == "changed")
+
+local pi = require("neocode.agents.pi")
+local pi_session = { id = "pi-test", agent = { kind = "pi" } }
+local commands = {}
+local coordinator = {}
+function coordinator:request(command)
+  commands[#commands + 1] = command
+  if command.type == "get_available_models" then
+    return { success = true, data = { models = { { provider = "openai", id = "gpt-test" } } } }
+  elseif command.type == "get_state" then
+    return { success = true, data = { model = { provider = "openai", id = "gpt-test" } } }
+  elseif command.type == "set_model" then
+    return { success = true, data = { provider = command.provider, id = command.modelId } }
+  end
+end
+pi.bind(pi_session, coordinator)
+local available
+pi.list_models(pi_session, function(result) available = result end)
+check("Pi model list comes from coordinator protocol", available and available[1].id == "gpt-test"
+  and commands[1].type == "get_available_models")
+local applied
+pi.set_model(pi_session, { provider = "openai", id = "gpt-test" }, function(result) applied = result end)
+check("Pi model update uses provider and modelId protocol fields", applied and applied.id == "gpt-test"
+  and commands[2].type == "set_model" and commands[2].provider == "openai" and commands[2].modelId == "gpt-test")
+pi.unbind(pi_session)
+
 vim.fn.delete(base, "rf")
 
 print(string.format("\n%d passed, %d failed", passed, failed))

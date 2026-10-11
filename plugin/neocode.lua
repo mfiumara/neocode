@@ -22,6 +22,7 @@ end
 vim.api.nvim_create_user_command("NeocodeNew", dispatch("new", true), { nargs = "?" })
 vim.api.nvim_create_user_command("NeocodeSessions", dispatch("sessions"), {})
 vim.api.nvim_create_user_command("NeocodeScan", dispatch("scan"), {})
+vim.api.nvim_create_user_command("NeocodeModel", dispatch("models"), {})
 
 local function archive_cmd(opts)
   vim.schedule(function()

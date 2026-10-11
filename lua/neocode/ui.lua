@@ -128,7 +128,7 @@ function M.select(items, opts, on_choice)
     vim.wo[preview_win].wrap = false
   end
 
-  vim.api.nvim_open_win(prompt_buf, true, {
+  local prompt_focus_win = vim.api.nvim_open_win(prompt_buf, true, {
     enter = true,
     relative = "editor",
     row = top + 1,
@@ -153,6 +153,7 @@ function M.select(items, opts, on_choice)
   prompt_win = nil
 
   local view = {}
+  local query = ""
 
   local function set_lines(buf, lines)
     vim.bo[buf].modifiable = true
@@ -239,8 +240,6 @@ function M.select(items, opts, on_choice)
       pcall(vim.api.nvim_win_set_config, preview_win, { title = " " .. t .. " ", title_pos = "center" })
     end
   end
-
-  local query = ""
 
   local function apply_filter()
     view = {}
@@ -394,6 +393,7 @@ function M.select(items, opts, on_choice)
     callback = function() finish(nil) end,
   })
 
+  apply_filter()
   vim.cmd("startinsert")
 end
 
